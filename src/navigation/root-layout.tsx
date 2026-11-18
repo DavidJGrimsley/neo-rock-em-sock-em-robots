@@ -106,6 +106,10 @@ function LayoutInner() {
                   }}
                 />
               ))}
+              <Stack.Screen
+                name="quest-vr"
+                options={{ title: 'Quest VR Runtime', orientation: 'default', headerShown: false }}
+              />
             </Stack>
           </RouterThemeBridge>
         </SafeAreaProvider>

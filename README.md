@@ -23,6 +23,8 @@ npm run build:ios
 npm run build:android
 ```
 
+Meta Quest builds use `QUEST_BUILD=1`; see [Quest 01 runtime build, install and logs](docs/quest-01-dev-build.md).
+
 Exports validate JavaScript and assets, not a signed native build. Physical-device AR, camera permissions, lifecycle behavior, and live external services require device testing. Existing upstream dependency advisories and renderer limitations are not resolved by the repository split. Expo compatibility checks currently recommend six newer SDK 57 patch versions, identically in the source app and these snapshots; dependency upgrades are a separate task.
 
 The URI-decoder postinstall bridge and scoped UUID override preserve the source project's dependency compatibility fixes. Keep install scripts enabled; `tests/dependency-compat.test.cjs` verifies them.

@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { router } from 'expo-router';
-import { ScrollView, View } from 'react-native';
+import { Platform, ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { experiences, showcase } from '@/features/experiences/experience-catalog';
+import { isQuestDevice, questExperience } from '@/features/quest-vr/quest-platform';
 import { useAppTheme } from '@/theme/provider';
 import { GameButton } from '@/ui/game-button';
 import { GameText } from '@/ui/game-text';
@@ -13,6 +14,8 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { width } = useGameWindowDimensions();
   const [measuredWidth, setMeasuredWidth] = useState<number | null>(null);
+  // A Quest gets the VR runtime instead of phone AR.
+  const entries = isQuestDevice(Platform) ? [questExperience] : experiences;
   const contentWidth =
     measuredWidth ??
     Math.max(1, Math.min(720, width - Math.max(20, insets.left) - Math.max(20, insets.right)));
@@ -51,7 +54,7 @@ export default function HomeScreen() {
           </GameText>
         </View>
         <View style={{ gap: 16 }}>
-          {experiences.map((experience) => (
+          {entries.map((experience) => (
             <GameButton
               key={experience.route}
               testID={`home-${experience.route}`}
