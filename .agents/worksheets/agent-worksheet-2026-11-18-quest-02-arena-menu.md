@@ -1,6 +1,6 @@
 # Quest 02 arena menu
 
-- Status: ACTIVE. Rebased onto current `origin/main`. Headset gates remain pending. Pull request is not open yet.
+- Status: ACTIVE. Pull request https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2 is open against `main`. Headset gates remain pending. Roadmap checkbox 02 is not done.
 - Task source: `project/agent/handoffs/2026-11-18-quest-02-arena-menu.md`
 - Control bootstrap: `79aff298941ea4b94acc788d2e3d3f1e344911fe` (packet and control `todo.md` were not edited)
 - Branch: `feat/quest-02-arena-menu`
@@ -10,7 +10,7 @@
 - Current `origin/main`: `4c95f577708147fac9b958126ff51883de9f528e` (merge of PR #1)
 - Quest 02 commit: `c68a65a97ddeb4abb06bc00ebb91b7c5ca9f8d48`, parent `4c95f577708147fac9b958126ff51883de9f528e`. Rewritten from `712f641b7a54a89821a1a4d5fcbe82c308052d7a` (parent `ee0a2a046d3486201144b0a4886e1b6174dbd44d`).
 - Owner: Grok 4.7 implementation session `26c5025e-b244-4faf-80f2-2d3383bd4c75`. No further delegation.
-- Git: `git rebase --onto origin/main ee0a2a046d3486201144b0a4886e1b6174dbd44d` replayed only the Quest 02 commit. No conflicts. `git log origin/main..HEAD` is that one commit. Quest 01 commits `c388cbf` and `9e93b84` stay in `origin/main` and were not replayed. Fetched `origin` again on 2026-11-18; `origin/main` was still `4c95f577708147fac9b958126ff51883de9f528e` and `ee0a2a0` was still its ancestor, so the rebase was not run a second time. A second `--onto` from the already rebased tip would have selected the Quest 01 commits as well. No upstream yet. PR URL is not opened at this record.
+- Git: `git rebase --onto origin/main ee0a2a046d3486201144b0a4886e1b6174dbd44d` replayed only the Quest 02 commit. No conflicts. After that rebase, `git log origin/main..HEAD` was only `c68a65a97ddeb4abb06bc00ebb91b7c5ca9f8d48`. Quest 01 commits `c388cbf` and `9e93b84` stay in `origin/main` and were not replayed. Fetched `origin` again on 2026-11-18; `origin/main` was still `4c95f577708147fac9b958126ff51883de9f528e` and `ee0a2a0` was still its ancestor, so the rebase was not run a second time. A second `--onto` from the already rebased tip would have selected the Quest 01 commits as well. `271ffd489a6c73dda013f6ba28d712746e995638` records the post-rebase checks. Normal push `git push -u origin HEAD` created `origin/feat/quest-02-arena-menu`. Pull request: https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2. No force push.
 
 ## Accepted requirements
 
@@ -82,8 +82,8 @@ An earlier staged APK (137,378,713 bytes, `BUILD SUCCESSFUL in 6m 6s`) was built
 - Quest 02 headset gate: pending. Checklist is in `docs/quest-02-arena-menu.md`. Ready is the Start/Ready control. Do not treat a passing compile or `npm run build:android` as the gate.
 - Hit-quad invisibility and PNG orientation are unverified until a controller aim test. If the aim point misses the printed buttons, fix the shared layout. Do not move only the hit quads.
 - Roadmap checkbox 02 stays open. The control `todo.md` was not edited.
-- Push and the pull request are the next git steps after this record. No force push.
+- Pull request: https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2. It was opened with a normal push. No force push.
 
 ## Next action
 
-Push `feat/quest-02-arena-menu` normally and open a pull request to `main`. After that, install the release APK built from the rebased commit, run the branch 02 checklist, and record the headset model, OS build, git SHA, and whether Ready stays in the lobby. Leave roadmap checkbox 02 unchecked until that gate and the branch 01 gate both pass.
+Install the release APK built from `c68a65a97ddeb4abb06bc00ebb91b7c5ca9f8d48`, run the branch 02 checklist, and record the headset model, OS build, git SHA, and whether Ready stays in the lobby. Leave roadmap checkbox 02 unchecked until that gate and the branch 01 gate both pass.
