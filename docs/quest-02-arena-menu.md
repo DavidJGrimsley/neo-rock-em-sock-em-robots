@@ -4,7 +4,7 @@ Stage 02 replaces the stage 01 reference cube with an in-headset menu and a fixe
 
 The 2D route at `/quest-vr` is only the launcher. Solo, Ready, Back, and Exit are inside the existing `ViroXRSceneNavigator` scene. There is one OpenXR session, the one stage 01 already opens. Passthrough stays off. Solo still places both robots in the ring.
 
-## Why the medical-viewer compositor is not used
+## Medical-viewer compositor: evaluated, not adopted in this stage
 
 Reference, not a dependency: `medical-viewer-main/native/quest-compositor/` and `tools/quest/build-compositor.mjs`. That prototype is unmerged. Its README says texture orientation, occlusion, pointer alignment, and readability still need a headset.
 
@@ -17,9 +17,19 @@ What the reference actually does:
 - A Viro depth-only rectangle is supposed to leave a transparent hole in the projection layer so the underlay shows through. The medical scene turns passthrough on (`passthroughEnabled={true}`).
 - The build clones ViroCore `v3.0.3` at `23710240d2cab5d4e866f3dba44ef568d8e563b4`, compiles arm64, and replaces `libviro_renderer.so` inside the installed renderer AAR. The header is app-owned. The renderer binary is not.
 
-With passthrough off, the projection layer is cleared opaque and submitted after the quad. An opaque projection layer covers an underlay. This app's Quest config keeps `passthroughCamera: false` and `passthroughEnabled={false}`. This branch does not set `QUEST_COMPOSITOR_UI`, does not copy the medical AAR, and does not patch the projection-layer hole or the GL color mask.
+Passthrough is not what makes that work, and it does not rule the approach out for this fully immersive scene. In ViroCore v3.0.3, `VROSceneRendererOpenXR.cpp` gives the projection layer `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT` only `if (_passthroughEnabled)`. `setPassthroughEnabled` also switches the display clear alpha from 1 to 0. The same flag and the same clear can be set by a Quest patch with passthrough off. Two adaptations are possible, and neither has been built or worn:
 
-The menu still follows the medical viewer's JavaScript input idea: a trigger press is `clickState === 1`, and hover is baked into the same texture as the button.
+- **Underlay.** Submit the panel quad before the projection layer, give the projection layer source-alpha blending, clear alpha to 0, and leave a depth-only hole the size of the panel.
+  - The skybox and scene keep alpha 1 elsewhere. The ray and hit dot stay in the projection layer, in front of the hole, and depth-tested.
+  - Risk: anything that writes alpha below 1 inside the hole (bloom, HDR tone mapping, alpha-blended materials) lets the panel bleed through.
+- **Overlay.** Submit the panel quad after the projection layer. No hole is needed.
+  - Risk: the compositor draws it over the ray and hit dot, so the pointer would need its own layer or `XR_FB_composition_layer_depth_test` with depth submission.
+
+What either path would gain: the compositor samples the Canvas pixels once at display resolution, so text is sharper than a mipmapped texture in Viro's HDR projection pass. This build's logcat shows `HDR enabled: 1` and "No gamma correction enabled in tone-mapper", and Constant white came out about 227/255 in the user's capture. What it costs: a second renderer patch on top of the pointer patch, swapchain lifetime and orientation code, and its own headset gate. The medical viewer's own README still lists texture orientation, occlusion, pointer alignment, and readability as unverified.
+
+Stage 02 keeps the panel in the projection layer, with the readiness fix below, so the branded menu can be judged on the headset first. The same Canvas ops, the 2048×1152 pixel rectangles, and the hit frames would carry over to either layer path unchanged. This branch does not set `QUEST_COMPOSITOR_UI` and does not copy the medical AAR.
+
+The menu still follows the medical viewer's JavaScript input idea: a trigger press is `clickState === 1`, and hover is baked into the same texture as the button. Error-panel text uses the medical viewer's headset text scale: `ViroText` at scale 0.05, with the box given in scaled units.
 
 ## Quest-only OpenXR pointer patch
 
@@ -56,9 +66,21 @@ The only export difference between pristine and patched is the old 4-argument `u
 
 The menu is a 2048×1152 PNG on a world-fixed quad in the projection layer. `modules/quest-menu-texture` draws it with Android Canvas. It loads the phone Noto fonts and the pre-rasterized title PNGs in `assets/arena/ui/quest-lettering/` (`neo.png`, `rock.png`, `robots.png`), taken from the phone lettering SVGs at the phone blue `#60a5fa` and violet `#a78bfa`. It also draws `menu-background.png`. It does not load `libviro_renderer`, create an `XrSession`, or submit a composition layer.
 
-The panel is 1.6×0.9 m at z = -1.15. The menu page is `(0, 0.08, -1.15)`. The ring page is `(0, 0.52, -1.15)`. The ring stays at `(0, -0.55, -2.1)`. Buttons are 540×256 px with a 128 px gap, which is 0.20 m tall and 0.10 m apart. That is larger than a 3° trigger tilt at this distance. Hit quads use the same rectangles, sit 12 mm in front, write no color, and do not write depth.
+The panel is 1.6×0.9 m at z = -1.15. The menu page is `(0, 0.08, -1.15)`. The ring page is `(0, 0.52, -1.15)`. The ring stays at `(0, -0.55, -2.1)`. Buttons are 540×256 px with a 128 px gap, which is 0.20 m tall and 0.10 m apart. That is larger than a 3° trigger tilt at this distance. Hit quads use the same rectangles, sit 12 mm in front, and do not write depth. Their material sets `colorWriteMask` None, writes zero alpha in the fragment, and uses Alpha blending. If the OpenXR per-eye clear resets the colour mask, the quads still draw nothing; with blendMode None and passthrough off, they would paint black. Viro hit tests geometry and only checks `_selectable`, so a fully transparent quad still receives the ray (`VRONode::hitTest`, virocore v3.0.3).
 
-Page changes drop the old texture in the same update. A raster is applied only if its generation is still current. Each file URI gets its own material name. Hover is baked into the PNG at the button rectangle, and the previous PNG is kept until the new one is ready so hover does not blank the panel.
+`src/features/quest-vr/quest-menu-texture-pipeline.ts` turns each menu spec into a Viro material, one at a time:
+
+1. Canvas draws the PNG.
+2. `prepareMaterial` in the native module registers it with Viro's `MaterialManager` on the native-modules thread, which is the thread `ViroMaterials.createMaterials` uses.
+3. That call resolves only after Viro returns a diffuse texture the size of the file. If Viro gives back no texture or the wrong size, the material is deleted and the call rejects with the reason.
+
+Only then may a quad name the material. The scene never calls `ViroMaterials.createMaterials` for panel art.
+
+The panel shows a *screen*: the page plus the Ready acknowledgement. Art, pose, and hit targets all come from the displayed screen. When the player changes screen (Solo, Ready to Set, Back), the old art stays at the old pose and the hit targets are removed until the new art is registered. Pressed triggers and hover are cleared whenever the displayed screen or input state changes.
+
+A failed draw or registration for the requested screen shows a dark error panel, not Viro's white default. That panel carries the reason and the session lines, uses colour-only button quads, and keeps live hit targets so Exit still works. A draw or registration that takes longer than 15 s becomes that error. A late result is released.
+
+Hover is baked into the PNG. Requests coalesce to the newest spec. At most three menu materials are registered at once: the shown one, the one before it, and one in flight. Their PNG files are kept, because Viro re-reads every registered material's file when a scene navigator detaches. Every other material is deleted with `MaterialManager.deleteMaterials`, together with its file. Leaving the scene releases everything. A mounted quad keeps its own reference after its material is deleted.
 
 Colors follow the phone dark theme: background `#09090b`, card `#E818181B`, tagline pill `#A809090B`, primary `#60a5fa`, danger `#d99a9a` with near-black text, and Back in black with white text plus a light ring. The tagline is "Bring the fight to your table." Action words stay Solo, Ready, Back, and Exit. After Ready is acknowledged, the Ready button reads Set.
 
@@ -135,6 +157,46 @@ Quest rebuild at `%TEMP%\nrq-w`, same renderer AAR, JDK 17.0.16, NDK `27.1.12297
 
 Exactly one device was attached: serial `3487C10J3706TQ`, model Quest 3S, device `panther`, incremental `4183210015200610`. `adb install -r` of that release succeeded. The pulled `base.apk` matches the hash above. `firstInstallTime` stayed `2026-11-18 19:01:45`. `lastUpdateTime` became `2026-11-19 17:43:55`. There was no uninstall and no data clear. Starting `MainActivity` reached `ReactNativeJS: Running "main"` (pid 22490) with no fatal exception in the sampled log. That launch is the 2D launcher, not the VR menu. The release package is not debuggable, so the generated cache PNG was not pulled. No worn view of this build was captured.
 
+## White panel on the ed03ede release
+
+The user's worn capture of release `02b17343…` (commit `ed03ede`) showed a flat light-grey panel-sized quad: no lettering, no buttons, no fallback text. The cause was found in logcat during a fresh VR entry on that installed build at 2026-11-19 18:32:21 device time. The capture was streamed live from the host, filtered to the app's uid, without clearing logs or changing buffer sizes:
+
+```
+18:32:21.564 22530 W ReactNativeJS: Quest menu texture 2048x1152 file:///…/cache/quest-menu/panel-75569709966940.png
+18:32:21.568 22490 E VRTNodeManager: Error applying materials: Material [questMenu-f1c760af] not found. Did you create it?
+18:32:21.634 29307 D [ImageDownloader.onNewResultImpl]: class …DefaultCloseableStaticBitmap
+```
+
+`questMenu-f1c760af` is the FNV name of that URI. The JS thread called `ViroMaterials.createMaterials` and then set state. Four ms later, the UI thread mounted the quad and Viro could not find the material. Viro's own decode of the same PNG succeeded 66 ms after that. Viro then logs the error and does not retry, so the quad keeps Viro's default material: Constant, white, with no texture. The same sequence happened for all three textures drawn on that entry (`questMenu-28b4013c`, `questMenu-a5f271af`).
+
+The same entry also logged `Viro-ImageDownloader: Could not download image at: …/panel-73432860725734.png` on the UI thread. That is a menu material from the previous VR entry. `VRT3DSceneNavigator.onDetachedFromWindow` sets `MaterialManager.shouldReload`, and the next lookup re-creates every registered material from its file, which had already been deleted. That stale material was not on screen, but each one costs a synchronous decode attempt on the UI thread.
+
+What the logs rule out:
+- **Fresco failure on the shown texture.** Its decode succeeded.
+- **A bad Canvas PNG.** The draw resolved, and a uniform colour across the whole panel cannot come from that photo-backed art.
+- **The pointer patch.** It is input-only.
+- **The renderer.** It reported `HDR enabled: 1` and "No gamma correction enabled in tone-mapper", which is why Constant white was captured near 227 rather than 255.
+
+Verified in the installed Viro bridge (`react_viro-release.aar`, javap):
+- `setJSMaterials` is an async `@ReactMethod`, and `loadMaterials` only replaces the map entry. Re-defining one material name therefore does not update a quad that is already mounted.
+- `ViroImage` would load its own texture, but until the placeholder or image arrives its quad shows the untextured material, which is white by default. Its default placeholder, `viro_blank.png`, is 128×128 white at alpha 0.
+
+The fix registers and checks the material natively before the quad is mounted (see "What the headset scene renders"), and releases menu materials so they are not re-created from deleted files.
+
+Build of commit `5fcd3e3`, staged at `%TEMP%\nrq-w` from the working tree:
+- `npm test` exited 0: lint, typecheck, `test:ar` 14, `test:app` 363, `test:quest` 40, `test:ui` 16, `test:dependencies` 3.
+- `QUEST_BUILD=1 npx expo prebuild -p android --clean --no-install`, then `gradlew :app:processReleaseManifest :app:assembleRelease -PreactNativeArchitectures=arm64-v8a -I ../tools/quest/short-cmake.gradle`, finished with `BUILD SUCCESSFUL`.
+- The first assemble failed in `:quest-menu-texture:compileReleaseKotlin` because the module had no `com.facebook.react:react-android` dependency. That dependency is now declared, as `expo-asset` does, and a test checks for it.
+- Release APK: 137,296,705 bytes, SHA-256 `90065614387039383122abd6e45471347092b887c995607fa6fb5c6854025019`. Contents:
+  - V2 signer certificate `fac61745…9b8332667591033b9c`, the same as the installed app.
+  - Patched `libviro_renderer.so` `182db849…`.
+  - The embedded bundle contains `prepareMaterial`, `releaseMaterials`, and `Menu art did not load`.
+  - The dex contains `VRTMaterialManager`, `getDiffuseTexture`, and `runOnNativeModulesQueueThread`.
+  - The manifest is not debuggable.
+- Install: on 2026-11-19 18:36:56 device time, `adb install -r` on Quest 3S `3487C10J3706TQ` succeeded. The pulled `base.apk` has the hash above. `firstInstallTime` stayed `2026-11-18 19:01:45`. There was no uninstall and no data clear.
+
+These checks prove what the APK contains. They do not prove what the headset shows.
+
 ## Headset checklist
 
 Both gates below are **pending**. A passing JS test or a successful native compile does not close them. This document does not claim a worn test.
@@ -158,10 +220,22 @@ Branch 02, pending, after those:
 6. Aim at Exit. The panel says it is leaving, then the launcher returns. Enter again and confirm Solo still starts from a clean lobby. Repeat with the controller Back button.
 7. If a GLB fails, the panel shows the arena or fighter load error and VR stays open.
 8. From logcat, confirm there is no second OpenXR session and no `MedicalQuestPanel` line.
+9. Stream logcat for the app uid from the host before entering VR. Expected lines per screen:
+   - `ReactNativeJS: QuestMenu drawn …` with three probe pixels.
+   - `QuestMenuTexture: prepared questMenu-… 2048x1152`.
+   - `QuestMenu shown <page> questMenu-…`.
+
+   Then `QuestMenu hover <action> true source 1|4` while aiming, and `QuestMenu click … activate` once per trigger press. There must be no `Error applying materials` line and no `Could not download image` for a current panel file. If the panel shows "Menu art did not load", copy its reason; the same reason appears as `QuestMenu … failed:` in logcat.
 
 ## Known limits
 
-- No worn observation of this menu. The previous release was worn and showed only the clipped "Menu" fallback. The replacement release is installed, and the 2D launcher started, but the VR panel, ray, hover, and Solo/Ready/Back/Exit have not been observed on this build.
+- No worn observation of the `5fcd3e3` menu. Earlier releases were worn:
+  - `fda2d67b…` showed the clipped "Menu" fallback.
+  - `02b17343…` (`ed03ede`) showed a white panel, explained above.
+
+  The `5fcd3e3` release is installed. Its VR panel, ray, hover, and Solo/Ready/Back/Exit have not been seen. A "material prepared" or "shown" log line proves Viro holds the texture before the quad mounts, not that the panel is readable.
+- Hover is baked into the PNG, so each hover change redraws and re-registers a 2048×1152 texture. Expect a visible delay before the highlight; it has not been measured on the headset.
+- Viro's HDR tone mapper is on for this scene and compresses Constant colours (white was about 227/255). Brand colours may look slightly darker than on the phone.
 - Head gaze still moves the reticle when no controller ray is tracked. The left controller does not move the reticle until its own trigger goes down.
 - There is no controller model. The origin marker is a sphere, not a licensed controller mesh.
 - Public-tag rebuilds omit ReactVisionCCA and the ARCore image-tracker JNI that the published binary has. Phone builds keep the published binary.

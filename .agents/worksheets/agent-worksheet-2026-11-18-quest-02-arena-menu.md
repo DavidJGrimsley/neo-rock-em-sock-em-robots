@@ -1,6 +1,6 @@
 # Quest 02 arena menu
 
-- Status: ACTIVE. Pull request https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2 is open against `main`. The worn release showed a clipped "Menu" because release drawables were passed to `BitmapFactory.decodeFile`. A replacement release is installed on the connected Quest 3S. Headset gates remain pending. Roadmap checkbox 02 is not done.
+- Status: ACTIVE. Pull request https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2 is open against `main`. The worn `ed03ede` release showed a white panel. Logcat from a fresh VR entry on that build showed the cause: the panel quad mounted before Viro registered its material. Commit `5fcd3e3` registers and checks the material natively before the quad mounts. Its release is installed on the connected Quest 3S. Headset gates remain pending. Roadmap checkbox 02 is not done.
 - Task source: `project/agent/handoffs/2026-11-18-quest-02-arena-menu.md`
 - Control bootstrap: `79aff298941ea4b94acc788d2e3d3f1e344911fe` (packet and control `todo.md` were not edited)
 - Branch: `feat/quest-02-arena-menu`
@@ -9,7 +9,7 @@
 - Final base at handoff: `origin/main` `f85eb9352803ee4b331ee3ce7a40d0138cf1bf4e`
 - Current `origin/main`: `4c95f577708147fac9b958126ff51883de9f528e` (merge of PR #1)
 - Quest 02 commit: `c68a65a97ddeb4abb06bc00ebb91b7c5ca9f8d48`, parent `4c95f577708147fac9b958126ff51883de9f528e`. Rewritten from `712f641b7a54a89821a1a4d5fcbe82c308052d7a` (parent `ee0a2a046d3486201144b0a4886e1b6174dbd44d`).
-- Owner: Grok 4.7 implementation session `26c5025e-b244-4faf-80f2-2d3383bd4c75`, continued in session `fd495e22-b8cd-460c-8e14-bc407f7f2697` after the previous provider stopped. No delegation.
+- Owner: Grok 4.7 implementation session `26c5025e-b244-4faf-80f2-2d3383bd4c75`, continued in session `fd495e22-b8cd-460c-8e14-bc407f7f2697` after the previous provider stopped. No delegation. The white-panel diagnosis and the `5fcd3e3` fix were done by Claude Opus 5.5 as sole implementation owner after a Ping-Pong Planning round. No delegation. No OpenAI models.
 - Git: `git rebase --onto origin/main ee0a2a046d3486201144b0a4886e1b6174dbd44d` replayed only the Quest 02 commit. No conflicts. After that rebase, `git log origin/main..HEAD` was only `c68a65a97ddeb4abb06bc00ebb91b7c5ca9f8d48`. Quest 01 commits `c388cbf` and `9e93b84` stay in `origin/main` and were not replayed. Fetched `origin` again on 2026-11-18; `origin/main` was still `4c95f577708147fac9b958126ff51883de9f528e` and `ee0a2a0` was still its ancestor, so the rebase was not run a second time. A second `--onto` from the already rebased tip would have selected the Quest 01 commits as well. `271ffd489a6c73dda013f6ba28d712746e995638` records the post-rebase checks. Normal push `git push -u origin HEAD` created `origin/feat/quest-02-arena-menu`. Pull request: https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2. No force push.
 
 ## Accepted requirements
@@ -112,13 +112,60 @@ The installed release was byte-identical to `%TEMP%\nrq-apks\app-release.apk` (`
 - Exactly one Quest 3S was attached. `adb install -r` succeeded. Pulled `base.apk` matches that hash. `firstInstallTime` stayed `2026-11-18 19:01:45`. `lastUpdateTime` is `2026-11-19 17:43:55`. No uninstall and no data clear.
 - `am start` of `MainActivity` logged `ReactNativeJS: Running "main"` (pid 22490) with no fatal line in the sample. The VR scene was not opened. The release package is not debuggable, so the cache PNG was not read. This is not a worn pass.
 
+## 2026-11-19 white panel: root cause and readiness fix
+
+Evidence, from a live logcat stream filtered to app uid 10183. It was streamed to the host; logs were not cleared and buffer sizes were not changed. The user exited and re-entered VR on the installed `ed03ede` release at 18:32:21 device time. Excerpt: `%TEMP%q02-evidenceed03ede-reentry-excerpt.log`.
+
+- `18:32:21.564 ReactNativeJS: Quest menu texture 2048x1152 …/panel-75569709966940.png`
+- `18:32:21.568 VRTNodeManager: Error applying materials: Material [questMenu-f1c760af] not found` (`questMenu-f1c760af` is the FNV name of that URI)
+- `18:32:21.634 [ImageDownloader.onNewResultImpl]`: Viro's decode succeeded, 66 ms too late.
+- The same sequence happened for `questMenu-28b4013c` and `questMenu-a5f271af`.
+- `Viro-ImageDownloader: Could not download image at …/panel-73432860725734.png` on the UI thread. That is a material from the previous entry being re-created after navigator detach, from a file that had already been deleted.
+- `HDR enabled: 1` and "No gamma correction enabled in tone-mapper". This explains why Constant white was captured near 227/255.
+
+Ruled out:
+- Fresco failure on the shown texture.
+- A bad Canvas PNG.
+- The pointer patch.
+
+Checked in the bridge with javap:
+- `setJSMaterials` is async.
+- `loadMaterials` does not notify mounted nodes, so re-defining one material name does not update them.
+- `ViroImage` shows its untextured material until an image arrives. Its default placeholder is white at alpha 0.
+- `VRONode::hitTest` ignores material alpha.
+
+Fix in `5fcd3e3`:
+- `QuestMenuTexture.prepareMaterial` calls `MaterialManager.setJSMaterials` on the native-modules queue. It resolves only once `getMaterial(name).getDiffuseTexture()` is non-null and the same size as the file. Otherwise it deletes the material and rejects with the reason.
+- `quest-menu-texture-pipeline.ts` coalesces requests and applies a 15 s timeout. It keeps at most three menu materials registered, keeps their files, and releases late or stale results.
+- The scene takes art, pose, and hit targets from the displayed screen. Input is off during a transition. A failure shows a dark error panel with working buttons.
+- Hit quads blend zero alpha.
+- The module now declares `com.facebook.react:react-android`. The first Gradle attempt failed without it.
+
+Validation:
+- `npm test` exit 0: `test:quest` 40, including 11 new pipeline and native-contract tests.
+- Release APK `90065614387039383122abd6e45471347092b887c995607fa6fb5c6854025019` (137,296,705 bytes): same signer `fac61745…`, patched `.so` `182db849…`, not debuggable.
+- Installed with `adb install -r` at 18:36:56. The pulled `base.apk` matches. `firstInstallTime` was unchanged.
+
+Not shown by this: the headset image. A host watcher (`%TEMP%q02-toolscapture-when-shown.sh`) takes one Meta capture when the log reports `QuestMenu shown`, but only if the headset is awake in `VRActivity`.
+
+Medical-viewer compositor: the evaluation is in `docs/quest-02-arena-menu.md`. An underlay or an overlay are both possible without passthrough. Neither has been built or worn.
+
 ## Blockers
 
 - Quest 01 headset gate: pending. PR #1 is merged, and this branch no longer contains the reference cube. The cube gate was not run on a headset.
-- Quest 02 headset gate: pending. The clipped "Menu" release is replaced on the headset. Checklist is in `docs/quest-02-arena-menu.md`. Do not claim pointer alignment, menu readability, Ready, Back, or Exit until this installed release is worn.
+- Quest 02 headset gate: pending. The `5fcd3e3` release replaced the white-panel `ed03ede` release on the headset. Checklist is in `docs/quest-02-arena-menu.md`. Do not claim pointer alignment, menu readability, Ready, Back, or Exit until this installed release is worn.
 - Roadmap checkbox 02 stays open. The control `todo.md` was not edited.
 - Pull request: https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2. Updates use a normal push. No force push.
 
 ## Next action
 
-Wear the release installed on 2026-11-19 17:43:55 device time (Quest 3S `3487C10J3706TQ`, SHA-256 `02b17343c8b2b49b2910f037bf94a0dd5fb4dd75b992f3823aee30157dd56b63`). Enter VR and run the branch 02 checklist. Record whether the panel shows the phone lettering and Solo/Ready/Back/Exit, whether the ray starts at the controller, and whether Ready stays in the lobby. Leave roadmap checkbox 02 unchecked until that gate and the branch 01 gate both pass.
+Wear the `5fcd3e3` release installed at 2026-11-19 18:36:56 device time (Quest 3S `3487C10J3706TQ`, SHA-256 `90065614…`). From the launcher, Enter VR. The host log stream and the capture watcher should already be running.
+
+Record:
+- Whether the panel shows the phone lettering, the tagline, and Solo/Exit.
+- Whether hover follows the ray.
+- Whether Solo moves to the ring, Ready shows Set and stays in the lobby, and Back and Exit work.
+- Whether the ray starts at the controller.
+- The `QuestMenu` and `QuestMenuTexture` lines described in checklist item 9.
+
+Leave roadmap checkbox 02 unchecked until that gate and the branch 01 gate both pass.
