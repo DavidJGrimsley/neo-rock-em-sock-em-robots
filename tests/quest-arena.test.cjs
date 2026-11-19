@@ -10,9 +10,7 @@ const {
   QUEST_MENU_TAGLINE,
   QUEST_MENU_TEXTURE,
   QUEST_RING_POSE,
-  beginMenuTexture,
   buildQuestMenu,
-  menuTextureIsCurrent,
   questMenuButtonFrame,
   questMenuButtons,
   questMenuHit,
@@ -148,18 +146,7 @@ test('trigger presses and hover ignore gaze, grips, and repeat clicks', () => {
   assert.equal(questPointerHover(hover, false, 1), false);
 });
 
-test('a page change blanks the previous texture and a stale raster is dropped', () => {
-  let step = { generation: 0, page: null };
-  const first = beginMenuTexture(step, 'menu');
-  assert.equal(first.blank, false);
-  step = { generation: first.generation, page: first.page };
-  const samePage = beginMenuTexture(step, 'menu');
-  assert.equal(samePage.blank, false);
-  step = { generation: samePage.generation, page: samePage.page };
-  const nextPage = beginMenuTexture(step, 'ring');
-  assert.equal(nextPage.blank, true);
-  assert.equal(menuTextureIsCurrent(first.generation, nextPage.generation), false);
-  assert.equal(menuTextureIsCurrent(nextPage.generation, nextPage.generation), true);
+test('menu material names are stable per PNG and distinct across PNGs', () => {
   const left = questMenuMaterialName('file:///panel-a.png');
   const right = questMenuMaterialName('file:///panel-b.png');
   assert.notEqual(left, right);
@@ -282,8 +269,7 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
   assert.match(scene, /questTriggerPress/);
   assert.match(scene, /questPointerHover/);
   assert.match(scene, /onClickState/);
-  assert.match(scene, /beginMenuTexture/);
-  assert.match(scene, /questMenuMaterialName/);
+  assert.match(scene, /createQuestMenuTexturePipeline/);
   assert.match(scene, /menu-background\.png/);
   assert.match(scene, /quest-lettering\/rock\.png/);
   assert.match(scene, /session\.exit\(\)/);

@@ -85,11 +85,6 @@ export interface QuestMenuModel {
   specKey: string;
 }
 
-export interface MenuTextureStep {
-  generation: number;
-  page: QuestMenuPage | null;
-}
-
 const buttonWidth = 540;
 const buttonHeight = 256;
 const buttonY = 832;
@@ -167,18 +162,6 @@ export function wrapMenuLine(text: string, maxChars = 46): string[] {
   }
   if (current) lines.push(current);
   return lines.length > 0 ? lines : [''];
-}
-
-export function beginMenuTexture(step: MenuTextureStep, page: QuestMenuPage) {
-  return {
-    generation: step.generation + 1,
-    page,
-    blank: step.page !== null && step.page !== page,
-  };
-}
-
-export function menuTextureIsCurrent(generation: number, latest: number) {
-  return generation === latest;
 }
 
 export function questMenuMaterialName(uri: string) {

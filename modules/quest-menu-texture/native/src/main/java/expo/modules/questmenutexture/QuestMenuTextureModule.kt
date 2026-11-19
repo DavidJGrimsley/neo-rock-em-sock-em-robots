@@ -13,15 +13,34 @@ import android.graphics.Typeface
 import android.net.Uri
 import android.text.TextPaint
 import android.text.TextUtils
+import android.util.Log
+import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.ReactContext
+import com.facebook.react.bridge.ReadableArray
+import com.facebook.react.bridge.ReadableMap
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.lang.reflect.InvocationTargetException
 import java.security.MessageDigest
 
+private const val TAG = "QuestMenuTexture"
+
 // Rasterizes the headset menu to a cache PNG. Drawing stays in this process.
+//
+// ViroMaterials.createMaterials is an async void call. Viro decodes the PNG on
+// the native-modules thread and only then stores the material. A quad mounted
+// first logs "Material [x] not found" and keeps Viro's default white material
+// with no retry. A decode that returns null stores a material with no texture,
+// which is also white. prepareMaterial registers the material on that same
+// thread and resolves only after Viro returns a texture of the file's size, so
+// the scene never mounts a quad on a missing or empty material. Viro is reached
+// by module name and reflection; this module does not link react_viro.
 class QuestMenuTextureModule : Module() {
   private val drawLock = Any()
   private val typefaces = HashMap<String, Typeface>()
@@ -181,6 +200,11 @@ class QuestMenuTextureModule : Module() {
           else -> error("Unknown menu draw operation.")
         }
       }
+      // These pixels show what Canvas drew, not what the headset displays.
+      val probe = JSONArray()
+      for ((px, py) in listOf(width / 2 to height / 2, width / 4 to height * 7 / 8, 8 to 8)) {
+        probe.put("%08X".format(bitmap.getPixel(px, py)))
+      }
       val context = appContext.reactContext ?: error("Menu texture has no Android context.")
       val directory = File(context.cacheDir, "quest-menu")
       directory.mkdirs()
@@ -207,10 +231,112 @@ class QuestMenuTextureModule : Module() {
         .put("uri", Uri.fromFile(file).toString())
         .put("width", width)
         .put("height", height)
+        .put("probe", probe)
         .toString()
     } finally {
       bitmap.recycle()
     }
+  }
+
+  private fun panelFile(value: String): File? {
+    val file = existingFile(value) ?: return null
+    val context = appContext.reactContext ?: return null
+    val directory = File(context.cacheDir, "quest-menu").canonicalFile
+    val inside = file.canonicalFile.parentFile == directory && file.name.startsWith("panel-")
+    return if (inside) file else null
+  }
+
+  private fun viroMaterialManager(context: ReactContext): Any =
+    context.getNativeModule("VRTMaterialManager")
+      ?: error("Viro MaterialManager (VRTMaterialManager) is not loaded.")
+
+  // Runs on the queue Viro uses for setJSMaterials, so a JS createMaterials
+  // call and this one never interleave.
+  private fun onViroQueue(promise: Promise, code: String, work: (Any) -> Any?) {
+    val context = appContext.reactContext as? ReactContext
+    if (context == null) {
+      promise.reject(code, "Menu material has no React context.", null)
+      return
+    }
+    context.runOnNativeModulesQueueThread {
+      try {
+        promise.resolve(work(viroMaterialManager(context)))
+      } catch (failure: Throwable) {
+        val cause = (failure as? InvocationTargetException)?.targetException ?: failure
+        val message = cause.message ?: cause.toString()
+        Log.e(TAG, "$code $message")
+        promise.reject(code, message, cause)
+      }
+    }
+  }
+
+  private fun deleteViroMaterials(manager: Any, names: List<String>) {
+    if (names.isEmpty()) return
+    val array = Arguments.createArray()
+    names.forEach { array.pushString(it) }
+    manager.javaClass.getMethod("deleteMaterials", ReadableArray::class.java).invoke(manager, array)
+  }
+
+  private fun prepare(manager: Any, name: String, uri: String): String {
+    require(name.startsWith("questMenu-")) { "Not a menu material name: $name" }
+    val file = panelFile(uri) ?: error("Menu texture file is missing before Viro loads it: $uri")
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(file.absolutePath, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0)
+      error("Menu texture is not a decodable PNG: $uri (${file.length()} bytes)")
+    val texture = Arguments.createMap()
+    texture.putString("uri", uri)
+    texture.putString("type", "png")
+    val material = Arguments.createMap()
+    material.putMap("diffuseTexture", texture)
+    material.putString("lightingModel", "Constant")
+    material.putString("blendMode", "Alpha")
+    material.putString("cullMode", "None")
+    material.putString("minificationFilter", "Linear")
+    material.putString("magnificationFilter", "Linear")
+    material.putString("mipFilter", "Linear")
+    val materials = Arguments.createMap()
+    materials.putMap(name, material)
+    val started = System.nanoTime()
+    manager.javaClass.getMethod("setJSMaterials", ReadableMap::class.java).invoke(manager, materials)
+    val native = manager.javaClass.getMethod("getMaterial", String::class.java).invoke(manager, name)
+      ?: error("Viro did not register material $name.")
+    val diffuse = native.javaClass.getMethod("getDiffuseTexture").invoke(native)
+    if (diffuse == null) {
+      deleteViroMaterials(manager, listOf(name))
+      error("Viro stored $name without a texture; its image loader returned nothing for $uri.")
+    }
+    val textureWidth = diffuse.javaClass.getMethod("getWidth").invoke(diffuse) as Int
+    val textureHeight = diffuse.javaClass.getMethod("getHeight").invoke(diffuse) as Int
+    if (textureWidth != bounds.outWidth || textureHeight != bounds.outHeight) {
+      deleteViroMaterials(manager, listOf(name))
+      error(
+        "Viro texture for $name is ${textureWidth}x$textureHeight; " +
+          "the file is ${bounds.outWidth}x${bounds.outHeight}."
+      )
+    }
+    val ms = (System.nanoTime() - started) / 1_000_000
+    Log.i(TAG, "prepared $name ${textureWidth}x$textureHeight in ${ms}ms from $uri")
+    return JSONObject()
+      .put("name", name)
+      .put("width", textureWidth)
+      .put("height", textureHeight)
+      .put("ms", ms)
+      .toString()
+  }
+
+  // Deleting a material does not detach it from a mounted quad; the geometry
+  // keeps its own reference. Files are deleted here because Viro re-reads every
+  // registered material's file when a scene navigator detaches.
+  private fun release(manager: Any, names: List<String>, uris: List<String>): Int {
+    deleteViroMaterials(manager, names.filter { it.startsWith("questMenu-") })
+    var deleted = 0
+    for (uri in uris) {
+      val file = panelFile(uri) ?: continue
+      if (file.delete()) deleted += 1
+    }
+    Log.i(TAG, "released ${names.size} materials and $deleted files")
+    return deleted
   }
 
   override fun definition() = ModuleDefinition {
@@ -218,6 +344,14 @@ class QuestMenuTextureModule : Module() {
 
     AsyncFunction("render") { json: String ->
       synchronized(drawLock) { renderToFile(json) }
+    }
+
+    AsyncFunction("prepareMaterial") { name: String, uri: String, promise: Promise ->
+      onViroQueue(promise, "ERR_QUEST_MENU_MATERIAL") { manager -> prepare(manager, name, uri) }
+    }
+
+    AsyncFunction("releaseMaterials") { names: List<String>, uris: List<String>, promise: Promise ->
+      onViroQueue(promise, "ERR_QUEST_MENU_RELEASE") { manager -> release(manager, names, uris) }
     }
   }
 }

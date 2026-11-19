@@ -12,3 +12,8 @@ android {
     consumerProguardFiles 'consumer-rules.pro'
   }
 }
+
+dependencies {
+  // Arguments, ReactContext, and Readable* for the Viro material bridge.
+  implementation 'com.facebook.react:react-android'
+}

@@ -16,28 +16,34 @@ import {
 
 import { ARENA_LAYOUT, type FighterId } from '../arena-fighter/arena-controller.ts';
 
-import { renderQuestMenuTexture } from '../../../modules/quest-menu-texture/src/index.ts';
+import {
+  prepareQuestMenuMaterial,
+  releaseQuestMenuMaterials,
+  renderQuestMenuTexture,
+} from '../../../modules/quest-menu-texture/src/index.ts';
 import {
   createQuestArenaSession,
   type QuestArenaSession,
   type QuestArenaView,
 } from './quest-arena-session.ts';
 import {
-  beginMenuTexture,
   buildQuestMenu,
-  menuTextureIsCurrent,
   QUEST_MENU_POSE,
   QUEST_MENU_SIZE,
   QUEST_RING_POSE,
   questMenuButtonFrame,
   questMenuButtons,
-  questMenuMaterialName,
-  type MenuTextureStep,
   type QuestMenuAction,
   type QuestMenuAssets,
 } from './quest-menu-layout.ts';
 import { resolveQuestMenuAssetFile } from './quest-menu-asset-uri.ts';
 import { questPointerHover, questTriggerPress, type QuestPressState } from './quest-menu-input.ts';
+import {
+  createQuestMenuTexturePipeline,
+  questMenuDisplay,
+  questMenuInputKey,
+  type QuestMenuDisplay,
+} from './quest-menu-texture-pipeline.ts';
 import { questRuntime } from './quest-runtime-store.ts';
 
 const sources = {
@@ -73,31 +79,54 @@ const arenaScale: [number, number, number] = [
 const fighterY = ARENA_LAYOUT.floorHeight + ARENA_LAYOUT.footOffset;
 const idleAnimation = { name: 'IdleAggro', loop: true, run: true, interruptible: true };
 
+// Colour-only materials have no texture to decode, so they register at import
+// long before the scene mounts. Panel art materials are registered natively by
+// prepareQuestMenuMaterial before a quad may name them.
 ViroMaterials.createMaterials({
   questMenuBacking: { diffuseColor: '#09090b', lightingModel: 'Constant' },
   questRingFloor: { diffuseColor: '#1f2937', lightingModel: 'Constant' },
-  // Stock Viro 3.0.3 reads colorWriteMask. The fragment keeps a missed mask from
-  // painting an opaque quad over the texture. Hits are geometric, not pixels.
+  // Stock Viro 3.0.3 reads colorWriteMask. The OpenXR per-eye clear can reset GL
+  // colour writes, so the fragment also writes zero alpha, and Alpha blending
+  // turns that into no change. With passthrough off, blendMode None would paint
+  // the zero as opaque black. Hits are geometric, not pixels.
   questMenuHit: {
     lightingModel: 'Constant',
-    blendMode: 'None',
-    diffuseColor: '#000000',
+    blendMode: 'Alpha',
+    diffuseColor: '#00000000',
     writesToDepthBuffer: false,
     cullMode: 'None',
     colorWriteMask: ['None'],
     shaderModifiers: { fragment: '_output_color = vec4(0.0);' },
   } as never,
+  questMenuFallbackPrimary: { diffuseColor: '#60a5fa', lightingModel: 'Constant' },
+  questMenuFallbackDanger: { diffuseColor: '#d99a9a', lightingModel: 'Constant' },
+  questMenuFallbackBack: { diffuseColor: '#27272a', lightingModel: 'Constant' },
 });
 
-const fallbackStyle = {
+// The medical viewer's headset text: scale 0.05 with the box in scaled units.
+// A 28 pt string on an unscaled metre box clipped to "Menu" on a Quest 3S.
+const TEXT_SCALE = 0.05;
+const textScale: [number, number, number] = [TEXT_SCALE, TEXT_SCALE, TEXT_SCALE];
+const messageStyle = {
   fontFamily: 'sans-serif',
-  // Point size on a metre-sized quad. 28pt clipped the failure string to "Menu"
-  // on a Quest 3S. This text is only the failure path.
-  fontSize: 4,
+  fontSize: 18,
   color: '#f8fafc',
-  textAlign: 'left',
-  textAlignVertical: 'top',
+  textAlign: 'center',
+  textAlignVertical: 'center',
 } as const;
+const labelStyle = { ...messageStyle, fontSize: 28 } as const;
+
+function fallbackMaterial(action: QuestMenuAction) {
+  if (action === 'exit') return 'questMenuFallbackDanger';
+  if (action === 'back') return 'questMenuFallbackBack';
+  return 'questMenuFallbackPrimary';
+}
+
+function logMenu(level: 'info' | 'error', message: string) {
+  // console.warn and console.error reach logcat as ReactNativeJS in release.
+  if (level === 'error') console.error(`QuestMenu ${message}`);
+  else console.warn(`QuestMenu ${message}`);
+}
 
 function leave(session: QuestArenaSession) {
   session.exit();
@@ -195,22 +224,35 @@ function QuestRing({ view, session }: { view: QuestArenaView; session: QuestAren
   );
 }
 
+function QuestMenuText({ text, width, height }: { text: string; width: number; height: number }) {
+  return (
+    <ViroText
+      text={text}
+      position={[0, 0.06, 0.004]}
+      scale={textScale}
+      width={width / TEXT_SCALE}
+      height={height / TEXT_SCALE}
+      style={messageStyle}
+    />
+  );
+}
+
 function QuestMenu({
-  view,
-  textureUri,
-  materialName,
-  textureError,
+  display,
+  lines,
   onPress,
   onHover,
 }: {
-  view: QuestArenaView;
-  textureUri: string | null;
-  materialName: string | null;
-  textureError: string | null;
+  display: QuestMenuDisplay;
+  lines: string[];
   onPress: (action: QuestMenuAction, clickState: number, source: unknown) => void;
   onHover: (action: QuestMenuAction, hovering: boolean, source: unknown) => void;
 }) {
-  const pose = QUEST_MENU_POSE[view.page];
+  // Pose, art, and hit targets all come from the displayed screen.
+  const pose = QUEST_MENU_POSE[display.page];
+  const buttons = questMenuButtons(display.page, display.acknowledged);
+  const textWidth = QUEST_MENU_SIZE.widthM * 0.9;
+  const textHeight = QUEST_MENU_SIZE.heightM * 0.5;
   return (
     <ViroNode position={pose.position} rotation={pose.rotation}>
       <ViroQuad
@@ -218,42 +260,69 @@ function QuestMenu({
         height={QUEST_MENU_SIZE.heightM}
         materials={['questMenuBacking']}
       />
-      {textureUri && materialName ? (
+      {display.kind === 'art' ? (
         <ViroQuad
-          key={textureUri}
+          key={display.material}
           position={[0, 0, 0.001]}
           width={QUEST_MENU_SIZE.widthM}
           height={QUEST_MENU_SIZE.heightM}
-          materials={[materialName]}
+          materials={[display.material]}
         />
       ) : null}
-      {textureError ? (
-        <ViroText
-          text={`Menu texture failed.\n${textureError}\n${view.lines.join('\n')}`}
-          position={[0, 0, 0.004]}
-          width={QUEST_MENU_SIZE.widthM * 0.9}
-          height={QUEST_MENU_SIZE.heightM * 0.62}
-          style={fallbackStyle}
-        />
+      {display.kind === 'loading' ? (
+        <QuestMenuText text="Loading the menu…" width={textWidth} height={textHeight} />
       ) : null}
-      {questMenuButtons(view.page, view.acknowledged).map((button) => {
-        const frame = questMenuButtonFrame(button);
-        return (
-          <ViroQuad
-            key={button.action}
-            position={frame.position}
-            width={frame.width}
-            height={frame.height}
-            materials={['questMenuHit']}
-            onClickState={(clickState: number, _position: unknown, source: unknown) =>
-              onPress(button.action, clickState, source)
-            }
-            onHover={(isHovering: boolean, _position: unknown, source: unknown) =>
-              onHover(button.action, isHovering, source)
-            }
+      {display.kind === 'error' ? (
+        <>
+          <QuestMenuText
+            text={`Menu art did not load: ${display.message}\n${lines.join('\n')}`}
+            width={textWidth}
+            height={textHeight}
           />
-        );
-      })}
+          {buttons.map((button) => {
+            const frame = questMenuButtonFrame(button);
+            return (
+              <ViroNode
+                key={button.action}
+                position={[frame.position[0], frame.position[1], 0.004]}>
+                <ViroQuad
+                  width={frame.width}
+                  height={frame.height}
+                  materials={[fallbackMaterial(button.action)]}
+                />
+                <ViroText
+                  text={button.label}
+                  position={[0, 0, 0.004]}
+                  scale={textScale}
+                  width={frame.width / TEXT_SCALE}
+                  height={frame.height / TEXT_SCALE}
+                  style={{ ...labelStyle, color: button.action === 'back' ? '#f8fafc' : '#09090b' }}
+                />
+              </ViroNode>
+            );
+          })}
+        </>
+      ) : null}
+      {display.input
+        ? buttons.map((button) => {
+            const frame = questMenuButtonFrame(button);
+            return (
+              <ViroQuad
+                key={`hit-${button.action}`}
+                position={frame.position}
+                width={frame.width}
+                height={frame.height}
+                materials={['questMenuHit']}
+                onClickState={(clickState: number, _position: unknown, source: unknown) =>
+                  onPress(button.action, clickState, source)
+                }
+                onHover={(isHovering: boolean, _position: unknown, source: unknown) =>
+                  onHover(button.action, isHovering, source)
+                }
+              />
+            );
+          })
+        : null}
     </ViroNode>
   );
 }
@@ -261,28 +330,30 @@ function QuestMenu({
 export default function QuestArenaScene() {
   const [session] = useState(createQuestArenaSession);
   const view = useSyncExternalStore(session.subscribe, session.getSnapshot);
+  const [pipeline] = useState(() =>
+    createQuestMenuTexturePipeline({
+      render: renderQuestMenuTexture,
+      prepare: prepareQuestMenuMaterial,
+      release: releaseQuestMenuMaterials,
+      log: logMenu,
+    })
+  );
+  const texture = useSyncExternalStore(pipeline.subscribe, pipeline.getSnapshot);
   const [hover, setHover] = useState<QuestMenuAction | null>(null);
   const [assets, setAssets] = useState<QuestMenuAssets | null>(null);
-  const [textureUri, setTextureUri] = useState<string | null>(null);
-  const [materialName, setMaterialName] = useState<string | null>(null);
-  const [textureError, setTextureError] = useState<string | null>(null);
-  const textureStep = useRef<MenuTextureStep>({ generation: 0, page: null });
-  const shownUri = useRef<string | null>(null);
   const press = useRef<QuestPressState>({ down: new Set() });
   const hoverSources = useRef(new Map<QuestMenuAction, Set<number>>());
-  const inputPage = useRef(view.page);
-  const visibleHover = questMenuButtons(view.page, view.acknowledged).some(
-    (button) => button.action === hover
-  )
-    ? hover
-    : null;
-  const resetInputForPage = () => {
-    if (inputPage.current === view.page) return;
-    inputPage.current = view.page;
-    press.current.down.clear();
-    hoverSources.current.clear();
-    setHover(null);
-  };
+  const display = questMenuDisplay({ page: view.page, acknowledged: view.acknowledged }, texture);
+  const inputKey = questMenuInputKey(display);
+  const inputKeyRef = useRef(inputKey);
+  // Hover belongs to the screen the player is pointing at. Until that screen is
+  // displayed with input on, nothing is highlighted.
+  const visibleHover =
+    display.input &&
+    display.page === view.page &&
+    questMenuButtons(view.page, view.acknowledged).some((button) => button.action === hover)
+      ? hover
+      : null;
   const menu = useMemo(
     () =>
       buildQuestMenu(view.page, view.lines, {
@@ -297,9 +368,20 @@ export default function QuestArenaScene() {
     questRuntime.sceneMounted();
     return () => {
       session.dispose();
+      pipeline.dispose();
       questRuntime.sceneUnmounted();
     };
-  }, [session]);
+  }, [pipeline, session]);
+
+  // A new screen, an input switch, or an error panel starts with no trigger
+  // held and no hover, so a press on the old targets cannot act on the new ones.
+  useEffect(() => {
+    if (inputKeyRef.current === inputKey) return;
+    inputKeyRef.current = inputKey;
+    press.current.down.clear();
+    hoverSources.current.clear();
+    setHover(null);
+  }, [inputKey]);
 
   useEffect(() => {
     let cancel = false;
@@ -310,7 +392,7 @@ export default function QuestArenaScene() {
           return [key, await localAssetUri(menuAssetModules[key])] as const;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          console.error(`Quest menu asset ${key} failed: ${message}`);
+          logMenu('error', `asset ${key} failed: ${message}`);
           return [key, null] as const;
         }
       })
@@ -341,53 +423,16 @@ export default function QuestArenaScene() {
 
   useEffect(() => {
     if (!assets) return;
-    const step = beginMenuTexture(textureStep.current, view.page);
-    textureStep.current = { generation: step.generation, page: step.page };
-    if (step.blank) {
-      shownUri.current = null;
-      setTextureUri(null);
-      setMaterialName(null);
-    }
-    const keep = step.blank || !shownUri.current ? [] : [shownUri.current];
-    let cancel = false;
-    renderQuestMenuTexture(menu.ops, keep).then(
-      (result) => {
-        if (cancel || !menuTextureIsCurrent(step.generation, textureStep.current.generation))
-          return;
-        if (!result) {
-          console.error('Quest menu texture failed: Menu texture module is unavailable.');
-          setTextureError('Menu texture module is unavailable.');
-        } else {
-          const name = questMenuMaterialName(result.uri);
-          ViroMaterials.createMaterials({
-            [name]: {
-              diffuseTexture: { uri: result.uri },
-              lightingModel: 'Constant',
-              blendMode: 'Alpha',
-              cullMode: 'None',
-            },
-          });
-          shownUri.current = result.uri;
-          setTextureUri(result.uri);
-          setMaterialName(name);
-          setTextureError(null);
-          console.warn(`Quest menu texture ${result.width}x${result.height} ${result.uri}`);
-        }
-      },
-      (error: unknown) => {
-        if (!cancel && menuTextureIsCurrent(step.generation, textureStep.current.generation)) {
-          const message = error instanceof Error ? error.message : String(error);
-          console.error(`Quest menu texture failed: ${message}`);
-          setTextureError(message);
-        }
-      }
-    );
-    return () => {
-      cancel = true;
-    };
-  }, [assets, menu.ops, menu.specKey, view.page]);
+    pipeline.request({
+      key: menu.specKey,
+      page: view.page,
+      acknowledged: view.acknowledged,
+      ops: menu.ops,
+    });
+  }, [assets, menu, pipeline, view.acknowledged, view.page]);
 
   const onAction = (action: QuestMenuAction) => {
+    logMenu('info', `action ${action} on ${display.page}`);
     if (action === 'solo') session.solo();
     else if (action === 'ready') session.ready();
     else if (action === 'back') session.back();
@@ -401,22 +446,23 @@ export default function QuestArenaScene() {
       <ViroDirectionalLight color="#ffffff" intensity={900} direction={[-0.4, -1, -0.3]} />
       {view.page === 'ring' ? <QuestRing view={view} session={session} /> : null}
       <QuestMenu
-        view={view}
-        textureUri={textureUri}
-        materialName={materialName}
-        textureError={textureError}
+        display={display}
+        lines={view.lines}
         onPress={(action, clickState, source) => {
-          resetInputForPage();
-          if (questTriggerPress(press.current, clickState, source) === 'activate') onAction(action);
+          if (!display.input || inputKeyRef.current !== inputKey) return;
+          const result = questTriggerPress(press.current, clickState, source);
+          logMenu('info', `click ${action} state ${clickState} source ${String(source)} ${result}`);
+          if (result === 'activate') onAction(action);
         }}
         onHover={(action, hovering, source) => {
-          resetInputForPage();
+          if (!display.input || inputKeyRef.current !== inputKey) return;
           let sourcesForButton = hoverSources.current.get(action);
           if (!sourcesForButton) {
             sourcesForButton = new Set();
             hoverSources.current.set(action, sourcesForButton);
           }
           const active = questPointerHover(sourcesForButton, hovering, source);
+          logMenu('info', `hover ${action} ${hovering} source ${String(source)}`);
           setHover((current) => {
             if (active) return action;
             return current === action ? null : current;
