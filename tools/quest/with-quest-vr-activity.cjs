@@ -4,11 +4,18 @@ const { withFinalizedMod } = require('@expo/config-plugins');
 
 const PATCH_MARKER = 'supersededByOtherActivity';
 
+const IMPORT_ANCHOR = 'import android.app.Activity';
 const FIELD_ANCHOR = '    private var expectingForeignPause = false';
 const DELEGATE_ANCHOR =
   '        object : DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled) {';
 const ON_RESUME_ANCHOR = '    override fun onResume() {';
 const ON_CREATE_ANCHOR = '    override fun onCreate(savedInstanceState: Bundle?) {';
+const DESTROY_CLEANUP_ANCHOR = [
+  '        lifecycleCallbacks?.let { application.unregisterActivityLifecycleCallbacks(it) }',
+  '        lifecycleCallbacks = null',
+  '        mainHandler.removeCallbacksAndMessages(null)',
+  '        super.onDestroy()',
+].join('\n');
 const RESUMED_CALLBACK_ANCHOR = [
   '            override fun onActivityResumed(other: Activity) {',
   '                if (other !== this@VRActivity && !isFinishing && !isDestroyed) {',
@@ -29,8 +36,10 @@ function replaceOnce(source, anchor, replacement, label) {
 }
 
 /**
- * Patches Viro's generated VRActivity.kt so returning to MainActivity after pressing Meta/Home
- * never pauses the shared ReactHost once MainActivity has already resumed.
+ * Patches Viro's generated VRActivity.kt so returning to MainActivity keeps
+ * ReactContext.currentActivity and ReactHost synchronized, avoids force-finishing
+ * VRActivity when Horizon OS brings MainActivity forward, and reports native
+ * VRActivity lifecycle transitions to JS.
  */
 function patchVRActivitySource(source) {
   const lineEnding = source.includes('\r\n') ? '\r\n' : '\n';
@@ -42,6 +51,17 @@ function patchVRActivitySource(source) {
 
   let patched = replaceOnce(
     normalized,
+    IMPORT_ANCHOR,
+    [
+      IMPORT_ANCHOR,
+      'import com.facebook.react.bridge.Arguments',
+      'import com.facebook.react.modules.core.DeviceEventManagerModule',
+    ].join('\n'),
+    'Activity import'
+  );
+
+  patched = replaceOnce(
+    patched,
     FIELD_ANCHOR,
     `${FIELD_ANCHOR}\n    private var ${PATCH_MARKER} = false`,
     'expectingForeignPause field'
@@ -54,9 +74,9 @@ function patchVRActivitySource(source) {
       DELEGATE_ANCHOR,
       '            override fun onPause() {',
       '                // Another in-app Activity (MainActivity) can resume before VRActivity.onPause()',
-      '                // runs from finish(). Skipping super.onPause() avoids calling',
-      '                // reactHost.onHostPause(VRActivity) while skipActivityIdentityAssertionOnHostPause',
-      '                // is active, which would pause Fabric mount dispatch and timers on MainActivity.',
+      '                // runs. Skipping super.onPause() avoids calling reactHost.onHostPause(VRActivity)',
+      '                // while skipActivityIdentityAssertionOnHostPause is active, which would pause',
+      '                // Fabric mount dispatch and timers on MainActivity.',
       '                val currentActivity = reactHost?.currentReactContext?.currentActivity',
       '                if (',
       `                    ${PATCH_MARKER} ||`,
@@ -74,7 +94,11 @@ function patchVRActivitySource(source) {
   patched = replaceOnce(
     patched,
     ON_RESUME_ANCHOR,
-    `${ON_RESUME_ANCHOR}\n        ${PATCH_MARKER} = false`,
+    [
+      ON_RESUME_ANCHOR,
+      `        ${PATCH_MARKER} = false`,
+      '        emitVRActivityState("resumed")',
+    ].join('\n'),
     'onResume override'
   );
 
@@ -82,9 +106,30 @@ function patchVRActivitySource(source) {
     patched,
     ON_CREATE_ANCHOR,
     [
+      '    private fun emitVRActivityState(state: String) {',
+      '        val reactContext = reactHost?.currentReactContext ?: return',
+      '        if (!reactContext.hasActiveReactInstance()) return',
+      '        try {',
+      '            val payload = Arguments.createMap().apply {',
+      '                putString("state", state)',
+      '                putBoolean("finishing", isFinishing || isDestroyed)',
+      '            }',
+      '            reactContext',
+      '                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)',
+      '                .emit("questVRActivityState", payload)',
+      '        } catch (_: Throwable) {',
+      '        }',
+      '    }',
+      '',
       '    override fun onPause() {',
       '        expectingForeignPause = false',
+      '        emitVRActivityState(if (isFinishing || isDestroyed) "finishing" else "paused")',
       '        super.onPause()',
+      '    }',
+      '',
+      '    override fun onStop() {',
+      '        emitVRActivityState(if (isFinishing || isDestroyed) "finishing" else "stopped")',
+      '        super.onStop()',
       '    }',
       '',
       ON_CREATE_ANCHOR,
@@ -101,13 +146,31 @@ function patchVRActivitySource(source) {
       `                    ${PATCH_MARKER} = true`,
       '                    expectingForeignPause = false',
       '                    mainHandler.removeCallbacksAndMessages(null)',
-      '                    if (!isFinishing && !isDestroyed) {',
-      '                        finish()',
+      '                    // ReactLifecycleStateManager.moveToOnHostResume skips updating',
+      '                    // ReactContext.mCurrentActivity when state is already RESUMED.',
+      '                    // Sync it to the resumed Activity so Compose HostViews never bind',
+      '                    // to a paused or destroyed VRActivity lifecycle.',
+      '                    val reactContext = reactHost?.currentReactContext',
+      '                    if (reactContext != null && reactContext.currentActivity !== other) {',
+      '                        reactContext.onHostResume(other)',
       '                    }',
       '                }',
       '            }',
     ].join('\n'),
     'onActivityResumed callback'
+  );
+
+  patched = replaceOnce(
+    patched,
+    DESTROY_CLEANUP_ANCHOR,
+    [
+      '        lifecycleCallbacks?.let { application.unregisterActivityLifecycleCallbacks(it) }',
+      '        lifecycleCallbacks = null',
+      '        mainHandler.removeCallbacksAndMessages(null)',
+      '        emitVRActivityState("destroyed")',
+      '        super.onDestroy()',
+    ].join('\n'),
+    'onDestroy cleanup'
   );
 
   return lineEnding === '\r\n' ? patched.replace(/\n/g, '\r\n') : patched;

@@ -99,7 +99,7 @@ On the headset: **Home → Quest VR Runtime → Enter VR**. The panel shows **Op
 
 1. Select **Exit VR** with a controller trigger. The panel shows **Back on the panel. Entered 1×**.
 2. Select **Enter VR**, then exit with the controller **Back** button.
-3. Enter, press the Meta/Home button, then reopen the app from the library. If the scene is still running behind the panel, the panel offers **Return to VR**.
+3. Enter, press the Meta/Home button, then reopen the app from the library. If the scene is paused or you returned to the panel, the panel offers **Re-enter VR**.
 4. Repeat Enter and Exit at least five times. After each step, check that `dumpsys activity activities` shows `VRActivity` only while the scene is open and that the app process has not restarted (`pidof`).
 
 Record the headset model, OS build, APK variant and git SHA, the panel counts, `quest-vrapi.log` (steady FPS, no repeated stale frames) and any `AndroidRuntime` or `ReactNativeJS` errors. If an error appears, the panel shows **VR needs another try** and the error text. A launch that does not mount within 10 s also reports there.

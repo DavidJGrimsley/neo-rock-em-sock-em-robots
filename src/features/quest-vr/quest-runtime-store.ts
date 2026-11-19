@@ -2,8 +2,13 @@ import { createStore } from 'zustand/vanilla';
 
 export type QuestRuntimeStatus = 'idle' | 'launching' | 'immersive' | 'returned' | 'error';
 
+export type QuestVRActivityState =
+  'unknown' | 'resumed' | 'paused' | 'stopped' | 'finishing' | 'destroyed';
+
 export interface QuestRuntimeSnapshot {
   status: QuestRuntimeStatus;
+  // Latest native VRActivity lifecycle state emitted by VRActivity.kt.
+  vrActivityState: QuestVRActivityState;
   // Successful scene entries, including re-entries.
   entries: number;
   // Explicit Enter presses after the first launch.
@@ -29,6 +34,7 @@ export const QUEST_LAUNCH_TIMEOUT_MS = 10_000;
 
 const initial: QuestRuntimeSnapshot = {
   status: 'idle',
+  vrActivityState: 'unknown',
   entries: 0,
   reentryCount: 0,
   sceneMounts: 0,
@@ -58,7 +64,14 @@ export function createQuestRuntime(
     /** Returns true when the caller should launch VRActivity. */
     requestEnter() {
       const state = store.getState();
-      if (state.status === 'launching' || state.status === 'immersive') return false;
+      if (state.status === 'launching') return false;
+      if (
+        state.status === 'immersive' &&
+        state.vrActivityState !== 'finishing' &&
+        state.vrActivityState !== 'destroyed'
+      ) {
+        return false;
+      }
       clearTimer();
       launchTimer = clock.schedule(() => {
         launchTimer = null;
@@ -70,6 +83,7 @@ export function createQuestRuntime(
       }, launchTimeoutMs);
       set({
         status: 'launching',
+        vrActivityState: 'unknown',
         reentryCount: state.reentryCount + (state.status === 'idle' ? 0 : 1),
         lastError: null,
       });
@@ -85,6 +99,10 @@ export function createQuestRuntime(
       const launched = state.status === 'launching' || state.status === 'error';
       set({
         status: 'immersive',
+        vrActivityState:
+          state.vrActivityState === 'finishing' || state.vrActivityState === 'destroyed'
+            ? 'unknown'
+            : state.vrActivityState,
         sceneMounts,
         entries: state.entries + (launched ? 1 : 0),
         exitRequest: null,
@@ -99,6 +117,28 @@ export function createQuestRuntime(
           ? { sceneMounts, status: 'returned' }
           : { sceneMounts }
       );
+    },
+    vrActivityStateChanged(nextState: QuestVRActivityState, finishing = false) {
+      const state = store.getState();
+      const effectiveState: QuestVRActivityState =
+        finishing && nextState !== 'destroyed' ? 'finishing' : nextState;
+      if (effectiveState === 'destroyed') {
+        set({
+          vrActivityState: 'destroyed',
+          sceneMounts: 0,
+          ...(state.status === 'immersive' ? { status: 'returned' as const } : {}),
+        });
+        return;
+      }
+      if (effectiveState === 'finishing') {
+        set(
+          state.status === 'immersive'
+            ? { vrActivityState: 'finishing', status: 'returned' }
+            : { vrActivityState: 'finishing' }
+        );
+        return;
+      }
+      set({ vrActivityState: effectiveState });
     },
     exitRequested(source: string) {
       if (store.getState().exitRequest === null) set({ exitRequest: source });

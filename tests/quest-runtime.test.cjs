@@ -46,7 +46,7 @@ function component(file, mocks) {
   });
   return module.exports;
 }
-const jsx = (type, props) => ({ type, props: props ?? {} });
+const jsx = (type, props, key) => ({ type, props: props ?? {}, key });
 const jsxRuntime = { jsx, jsxs: jsx, Fragment: 'Fragment' };
 function nodes(root) {
   const result = [];
@@ -260,6 +260,39 @@ test('launch timeout reports an error, a late mount recovers, and errors allow a
   assert.equal(runtime.getSnapshot().status, 'immersive');
 });
 
+test('vrActivityStateChanged keeps paused sessions resumable and reconciles finishing/destroyed scenes', () => {
+  const runtime = createQuestRuntime(fakeClock());
+  runtime.requestEnter();
+  runtime.sceneMounted();
+  runtime.vrActivityStateChanged('paused');
+  assert.equal(runtime.getSnapshot().status, 'immersive');
+  assert.equal(runtime.getSnapshot().vrActivityState, 'paused');
+
+  runtime.vrActivityStateChanged('stopped');
+  assert.equal(runtime.getSnapshot().status, 'immersive');
+  assert.equal(runtime.getSnapshot().vrActivityState, 'stopped');
+
+  runtime.vrActivityStateChanged('paused', true);
+  assert.equal(runtime.getSnapshot().vrActivityState, 'finishing');
+  assert.equal(runtime.getSnapshot().status, 'returned');
+  assert.equal(runtime.getSnapshot().sceneMounts, 1);
+
+  runtime.vrActivityStateChanged('destroyed');
+  assert.equal(runtime.getSnapshot().vrActivityState, 'destroyed');
+  assert.equal(runtime.getSnapshot().status, 'returned');
+  assert.equal(runtime.getSnapshot().sceneMounts, 0);
+
+  assert.equal(runtime.requestEnter(), true);
+  runtime.sceneMounted();
+  assert.equal(runtime.getSnapshot().vrActivityState, 'unknown');
+  assert.equal(runtime.getSnapshot().status, 'immersive');
+
+  // Direct destroyed event without prior finishing also reconciles immersive -> returned.
+  runtime.vrActivityStateChanged('destroyed');
+  assert.equal(runtime.getSnapshot().status, 'returned');
+  assert.equal(runtime.getSnapshot().sceneMounts, 0);
+});
+
 test('the shared onExitViro is stable and records the request on the shared store', () => {
   const { questOnExitViro: again } = require('../src/features/quest-vr/quest-runtime-store.ts');
   assert.equal(again, questOnExitViro);
@@ -298,8 +331,13 @@ test('routes and phone entry points never load @reactvision/react-viro staticall
 
 function screenHarness({ platform = quest3, launcher = true } = {}) {
   const states = [];
+  const effects = [];
   let stateIndex = 0;
+  let effectIndex = 0;
   const backs = [];
+  const vrStateListeners = new Set();
+  const appStateListeners = new Set();
+  const appState = { currentState: 'active' };
   const runtime = createQuestRuntime(fakeClock());
   let launched = 0;
   let nativeLaunches = 0;
@@ -310,7 +348,20 @@ function screenHarness({ platform = quest3, launcher = true } = {}) {
         Component: class {},
         lazy: () => 'QuestXRNavigator',
         Suspense: 'Suspense',
-        useEffect: (effect) => effect(),
+        useEffect: (effect, deps) => {
+          const index = effectIndex++;
+          const prev = effects[index];
+          const changed =
+            !prev ||
+            !deps ||
+            !prev.deps ||
+            deps.length !== prev.deps.length ||
+            deps.some((dep, i) => !Object.is(dep, prev.deps[i]));
+          if (changed) {
+            prev?.cleanup?.();
+            effects[index] = { deps, cleanup: effect() };
+          }
+        },
         useState: (initial) => {
           const index = stateIndex++;
           if (!(index in states)) states[index] = initial;
@@ -323,10 +374,27 @@ function screenHarness({ platform = quest3, launcher = true } = {}) {
       },
       'expo-router': { router: { dismissTo: () => {} } },
       'react-native': {
+        AppState: {
+          get currentState() {
+            return appState.currentState;
+          },
+          addEventListener: (event, handler) => {
+            if (event !== 'change') return { remove: () => {} };
+            appStateListeners.add(handler);
+            return { remove: () => appStateListeners.delete(handler) };
+          },
+        },
         BackHandler: {
           addEventListener: (_, handler) => {
             backs.push(handler);
             return { remove: () => backs.splice(backs.indexOf(handler), 1) };
+          },
+        },
+        DeviceEventEmitter: {
+          addListener: (event, handler) => {
+            if (event !== 'questVRActivityState') return { remove: () => {} };
+            vrStateListeners.add(handler);
+            return { remove: () => vrStateListeners.delete(handler) };
           },
         },
         NativeModules: launcher ? { VRLauncher: { launchVRScene: () => nativeLaunches++ } } : {},
@@ -345,16 +413,31 @@ function screenHarness({ platform = quest3, launcher = true } = {}) {
   const Screen = load().default;
   const render = () => {
     stateIndex = 0;
+    effectIndex = 0;
     return Screen();
   };
   const panelOf = (root) => nodes(root).find((node) => node.type === 'StatusPanel');
+  const panelWrapperOf = (root) =>
+    nodes(root).find(
+      (node) =>
+        node.type === 'View' &&
+        nodes(node.props?.children).some((child) => child.type === 'StatusPanel')
+    );
   const action = (root, label) => panelOf(root).props.actions.find((item) => item.label === label);
   return {
     render,
     runtime,
     panelOf,
+    panelKey: (root) => panelWrapperOf(root)?.key,
     action,
     backs,
+    emitVRActivityState: (state, finishing = false) => {
+      for (const listener of vrStateListeners) listener({ state, finishing });
+    },
+    emitAppState: (nextState) => {
+      appState.currentState = nextState;
+      for (const listener of appStateListeners) listener(nextState);
+    },
     launch: () => launched++,
     launched: () => launched,
     nativeLaunches: () => nativeLaunches,
@@ -366,6 +449,7 @@ test('the Quest panel mounts the navigator only on explicit Enter and re-enters 
   let root = h.render();
   assert.equal(h.panelOf(root).props.title, 'Quest VR runtime');
   assert.ok(!nodes(root).some((node) => node.type === 'QuestXRNavigator'));
+  const initialPanelKey = h.panelKey(root);
   h.action(root, 'Enter VR').onPress();
   root = h.render();
   const navigator = nodes(root).find((node) => node.type === 'QuestXRNavigator');
@@ -383,27 +467,74 @@ test('the Quest panel mounts the navigator only on explicit Enter and re-enters 
       .find((node) => node.type === 'QuestXRNavigator')
       .props.renderQuestPanel(h.launch);
     assert.equal(h.panelOf(panel).props.title, 'Back on the panel');
-    h.action(panel, 'Enter VR').onPress();
+    assert.match(h.panelOf(panel).props.message, /Select Re-enter VR/);
+    h.action(panel, 'Re-enter VR').onPress();
     assert.equal(h.launched(), round);
     h.runtime.sceneMounted();
     h.runtime.sceneUnmounted();
   }
   assert.equal(h.runtime.getSnapshot().reentryCount, 3);
-  // A panel shown while VRActivity survives offers to resume without a new launch request.
+  // A panel shown while VRActivity survives offers Re-enter VR and keeps paused vs active copy accurate.
   h.runtime.requestEnter();
   h.runtime.sceneMounted();
+  h.emitVRActivityState('paused');
   root = h.render();
   const paused = nodes(root)
     .find((node) => node.type === 'QuestXRNavigator')
     .props.renderQuestPanel(h.launch);
-  h.action(paused, 'Return to VR').onPress();
+  assert.equal(h.panelOf(paused).props.title, 'VR is paused');
+  assert.ok(
+    h.panelKey(paused) > initialPanelKey,
+    'returning from VRActivity remounts panel wrapper'
+  );
+  h.action(paused, 'Re-enter VR').onPress();
   assert.equal(h.launched(), 4);
   assert.equal(h.runtime.getSnapshot().status, 'immersive');
+
+  // Returning to MainActivity foreground via AppState also bumps panelMountKey for fresh HostViews.
+  const panelBeforeAppReturn = nodes(h.render())
+    .find((node) => node.type === 'QuestXRNavigator')
+    .props.renderQuestPanel(h.launch);
+  const keyBeforeAppReturn = h.panelKey(panelBeforeAppReturn);
+  assert.notEqual(keyBeforeAppReturn, undefined);
+  h.emitAppState('background');
+  h.emitAppState('active');
+  const panelAfterAppReturn = nodes(h.render())
+    .find((node) => node.type === 'QuestXRNavigator')
+    .props.renderQuestPanel(h.launch);
+  assert.ok(h.panelKey(panelAfterAppReturn) > keyBeforeAppReturn);
+
+  // When VRActivity finishes/destroys, the panel stops claiming the VR session is live and re-enters cleanly.
+  h.emitVRActivityState('destroyed');
+  const afterDestroy = nodes(h.render())
+    .find((node) => node.type === 'QuestXRNavigator')
+    .props.renderQuestPanel(h.launch);
+  assert.equal(h.panelOf(afterDestroy).props.title, 'Back on the panel');
+  h.action(afterDestroy, 'Re-enter VR').onPress();
+  assert.equal(h.launched(), 5);
+  assert.equal(h.runtime.getSnapshot().status, 'launching');
+  h.runtime.sceneMounted();
+
+  // Errors after a prior entry offer Re-enter VR and remount QuestXRNavigator even when launch is provided.
+  h.runtime.fail(new Error('scene crashed'));
+  const errored = nodes(h.render())
+    .find((node) => node.type === 'QuestXRNavigator')
+    .props.renderQuestPanel(h.launch);
+  assert.equal(h.panelOf(errored).props.title, 'VR needs another try');
+  h.action(errored, 'Re-enter VR').onPress();
+  assert.equal(
+    h.launched(),
+    5,
+    'error recovery remounts navigator rather than calling stale launch'
+  );
+  assert.equal(h.runtime.getSnapshot().status, 'launching');
+
   // A remounted screen has no navigator yet and relaunches the live VRActivity natively.
   const remounted = screenHarness();
   remounted.runtime.requestEnter();
   remounted.runtime.sceneMounted();
-  remounted.action(remounted.render(), 'Return to VR').onPress();
+  assert.equal(remounted.panelOf(remounted.render()).props.title, 'VR session active');
+  remounted.action(remounted.render(), 'Re-enter VR').onPress();
   assert.equal(remounted.nativeLaunches(), 1);
   assert.ok(!nodes(remounted.render()).some((node) => node.type === 'QuestXRNavigator'));
   assert.equal(h.nativeLaunches(), 0);
@@ -547,19 +678,33 @@ test('Quest VRActivity prebuild plugin patches Viro Meta/Home resume race and st
       patched,
       /object : DefaultReactActivityDelegate\(this, mainComponentName, fabricEnabled\) \{\s*override fun onPause\(\) \{[\s\S]*?val currentActivity = reactHost\?\.currentReactContext\?\.currentActivity[\s\S]*?supersededByOtherActivity \|\|\s*\(currentActivity != null && currentActivity !== this@VRActivity\)\s*\)\s*\{\s*return\s*\}\s*super\.onPause\(\)\s*\}/
     );
-    // VRActivity.onResume resets the flag; VRActivity.onPause clears expectingForeignPause.
+    // VRActivity.onResume resets the flag and emits state; onPause clears expectingForeignPause and emits paused/finishing; onStop emits stopped/finishing; onDestroy emits destroyed.
+    assert.match(patched, /import com\.facebook\.react\.bridge\.Arguments/);
+    assert.match(patched, /import com\.facebook\.react\.modules\.core\.DeviceEventManagerModule/);
     assert.match(
       patched,
-      /override fun onResume\(\) \{\s*supersededByOtherActivity = false\s*super\.onResume\(\)/
+      /override fun onResume\(\) \{\s*supersededByOtherActivity = false\s*emitVRActivityState\("resumed"\)\s*super\.onResume\(\)/
     );
     assert.match(
       patched,
-      /override fun onPause\(\) \{\s*expectingForeignPause = false\s*super\.onPause\(\)\s*\}/
+      /override fun onPause\(\) \{\s*expectingForeignPause = false\s*emitVRActivityState\(if \(isFinishing \|\| isDestroyed\) "finishing" else "paused"\)\s*super\.onPause\(\)\s*\}/
     );
-    // Resuming another Activity (MainActivity) supersedes VRActivity and cancels pending re-promotes before finish().
     assert.match(
       patched,
-      /override fun onActivityResumed\(other: Activity\) \{\s*if \(other !== this@VRActivity\) \{\s*supersededByOtherActivity = true\s*expectingForeignPause = false\s*mainHandler\.removeCallbacksAndMessages\(null\)\s*if \(!isFinishing && !isDestroyed\) \{\s*finish\(\)\s*\}\s*\}\s*\}/
+      /override fun onStop\(\) \{\s*emitVRActivityState\(if \(isFinishing \|\| isDestroyed\) "finishing" else "stopped"\)\s*super\.onStop\(\)\s*\}/
+    );
+    assert.match(
+      patched,
+      /mainHandler\.removeCallbacksAndMessages\(null\)\s*emitVRActivityState\("destroyed"\)\s*super\.onDestroy\(\)/
+    );
+    // Resuming another Activity (MainActivity) supersedes VRActivity, syncs ReactContext.currentActivity, and avoids force-finishing VRActivity.
+    assert.match(
+      patched,
+      /override fun onActivityResumed\(other: Activity\) \{\s*if \(other !== this@VRActivity\) \{\s*supersededByOtherActivity = true\s*expectingForeignPause = false\s*mainHandler\.removeCallbacksAndMessages\(null\)\s*[\s\S]*?val reactContext = reactHost\?\.currentReactContext\s*if \(reactContext != null && reactContext\.currentActivity !== other\) \{\s*reactContext\.onHostResume\(other\)\s*\}\s*\}\s*\}/
+    );
+    assert.doesNotMatch(
+      patched,
+      /override fun onActivityResumed\(other: Activity\)[\s\S]*?\bfinish\(\)/
     );
 
     // Re-running patchVRActivitySource and the finalized mod is idempotent.
