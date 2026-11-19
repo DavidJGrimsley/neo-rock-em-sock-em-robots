@@ -144,6 +144,7 @@ test('home actions retain the standalone app route and follow the measured viewp
       experiences: catalog,
       showcase: { name: 'XR Showcase', description: 'AR experiences' },
     },
+    '@/features/quest-vr/quest-platform': require('../src/features/quest-vr/quest-platform.ts'),
     '@/ui/game-button': { GameButton: 'GameButton' },
     '@/ui/game-text': { GameText: 'GameText' },
     '@/ui/use-game-window-dimensions': { useGameWindowDimensions: () => ({ width: 320 }) },
