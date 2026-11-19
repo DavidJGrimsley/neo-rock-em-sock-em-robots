@@ -51,6 +51,8 @@ Set-Location ..
 $out = "$stage\android\app\build"
 ```
 
+On `feat/quest-02-arena-menu`, build the Quest-only renderer before this prebuild. `docs/quest-02-arena-menu.md` has the command. Quest prebuild stops if `native/quest-viro-renderer/` is missing. That directory is gitignored build output. Phone prebuild does not use it and keeps the stock Viro AAR in `node_modules`.
+
 In a checkout that already has a short path, run the prebuild and Gradle steps there directly. Afterwards, run `git checkout -- package.json`, because prebuild rewrites the `android` and `ios` scripts.
 
 Merged manifests are in `$out\intermediates\merged_manifests\<variant>\process<Variant>Manifest\AndroidManifest.xml`. Merger reports are in `$out\outputs\logs\`.

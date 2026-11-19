@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { Asset } from 'expo-asset';
 import {
   Viro3DObject,
   ViroAmbientLight,
@@ -21,14 +22,20 @@ import {
   type QuestArenaView,
 } from './quest-arena-session.ts';
 import {
+  beginMenuTexture,
   buildQuestMenu,
+  menuTextureIsCurrent,
   QUEST_MENU_POSE,
   QUEST_MENU_SIZE,
   QUEST_RING_POSE,
   questMenuButtonFrame,
   questMenuButtons,
+  questMenuMaterialName,
+  type MenuTextureStep,
   type QuestMenuAction,
+  type QuestMenuAssets,
 } from './quest-menu-layout.ts';
+import { questPointerHover, questTriggerPress, type QuestPressState } from './quest-menu-input.ts';
 import { questRuntime } from './quest-runtime-store.ts';
 
 const sources = {
@@ -39,6 +46,16 @@ const sources = {
   blue: require('../../../assets/arena/Mike_Player1_Blue_Combat_AR.glb'),
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   red: require('../../../assets/arena/Mike_Player2_RedOrange_Combat_AR.glb'),
+};
+
+const menuAssetModules = {
+  background: require('../../../assets/arena/ui/menu-background.png'),
+  body: require('../../../assets/arena/ui/ArenaNotoSans.ttf'),
+  button: require('../../../assets/arena/ui/ArenaNotoSansSemibold.ttf'),
+  serif: require('../../../assets/arena/ui/ArenaNotoSerif.ttf'),
+  neo: require('../../../assets/arena/ui/quest-lettering/neo.png'),
+  rock: require('../../../assets/arena/ui/quest-lettering/rock.png'),
+  robots: require('../../../assets/arena/ui/quest-lettering/robots.png'),
 };
 
 const fighterScale: [number, number, number] = Array(3).fill(ARENA_LAYOUT.fighterScale) as [
@@ -55,14 +72,8 @@ const fighterY = ARENA_LAYOUT.floorHeight + ARENA_LAYOUT.footOffset;
 const idleAnimation = { name: 'IdleAggro', loop: true, run: true, interruptible: true };
 
 ViroMaterials.createMaterials({
-  questMenuBacking: { diffuseColor: '#101826', lightingModel: 'Constant' },
+  questMenuBacking: { diffuseColor: '#09090b', lightingModel: 'Constant' },
   questRingFloor: { diffuseColor: '#1f2937', lightingModel: 'Constant' },
-  questMenuHover: {
-    diffuseColor: '#ffffff33',
-    lightingModel: 'Constant',
-    blendMode: 'Alpha',
-    writesToDepthBuffer: false,
-  },
   // Stock Viro 3.0.3 reads colorWriteMask. The fragment keeps a missed mask from
   // painting an opaque quad over the texture. Hits are geometric, not pixels.
   questMenuHit: {
@@ -76,20 +87,6 @@ ViroMaterials.createMaterials({
   } as never,
 });
 
-let appliedMenuTexture: string | null = null;
-function ensureMenuTexture(uri: string) {
-  if (appliedMenuTexture === uri) return;
-  appliedMenuTexture = uri;
-  ViroMaterials.createMaterials({
-    questMenuTexture: {
-      diffuseTexture: { uri },
-      lightingModel: 'Constant',
-      blendMode: 'Alpha',
-      cullMode: 'None',
-    },
-  });
-}
-
 const fallbackStyle = {
   fontFamily: 'sans-serif',
   fontSize: 28,
@@ -99,10 +96,15 @@ const fallbackStyle = {
 } as const;
 
 function leave(session: QuestArenaSession) {
-  if (questRuntime.getSnapshot().exitRequest !== null) return;
   session.exit();
   questRuntime.exitRequested('scene-exit');
   exitVRScene();
+}
+
+async function localAssetUri(moduleId: number) {
+  const asset = Asset.fromModule(moduleId);
+  await asset.downloadAsync();
+  return asset.localUri ?? asset.uri;
 }
 
 function QuestFighter({
@@ -166,25 +168,20 @@ function QuestRing({ view, session }: { view: QuestArenaView; session: QuestAren
 
 function QuestMenu({
   view,
-  hover,
   textureUri,
+  materialName,
   textureError,
-  onAction,
+  onPress,
   onHover,
 }: {
   view: QuestArenaView;
-  hover: QuestMenuAction | null;
   textureUri: string | null;
+  materialName: string | null;
   textureError: string | null;
-  onAction: (action: QuestMenuAction) => void;
-  onHover: (action: QuestMenuAction, hovering: boolean) => void;
+  onPress: (action: QuestMenuAction, clickState: number, source: unknown) => void;
+  onHover: (action: QuestMenuAction, hovering: boolean, source: unknown) => void;
 }) {
   const pose = QUEST_MENU_POSE[view.page];
-  const hovered = hover
-    ? questMenuButtons(view.page).find((button) => button.action === hover)
-    : null;
-  const hoveredFrame = hovered ? questMenuButtonFrame(hovered) : null;
-  if (textureUri) ensureMenuTexture(textureUri);
   return (
     <ViroNode position={pose.position} rotation={pose.rotation}>
       <ViroQuad
@@ -192,13 +189,13 @@ function QuestMenu({
         height={QUEST_MENU_SIZE.heightM}
         materials={['questMenuBacking']}
       />
-      {textureUri ? (
+      {textureUri && materialName ? (
         <ViroQuad
           key={textureUri}
           position={[0, 0, 0.001]}
           width={QUEST_MENU_SIZE.widthM}
           height={QUEST_MENU_SIZE.heightM}
-          materials={['questMenuTexture']}
+          materials={[materialName]}
         />
       ) : null}
       {textureError ? (
@@ -210,15 +207,7 @@ function QuestMenu({
           style={fallbackStyle}
         />
       ) : null}
-      {hoveredFrame ? (
-        <ViroQuad
-          position={[hoveredFrame.position[0], hoveredFrame.position[1], 0.008]}
-          width={hoveredFrame.width}
-          height={hoveredFrame.height}
-          materials={['questMenuHover']}
-        />
-      ) : null}
-      {questMenuButtons(view.page).map((button) => {
+      {questMenuButtons(view.page, view.acknowledged).map((button) => {
         const frame = questMenuButtonFrame(button);
         return (
           <ViroQuad
@@ -227,8 +216,12 @@ function QuestMenu({
             width={frame.width}
             height={frame.height}
             materials={['questMenuHit']}
-            onClick={() => onAction(button.action)}
-            onHover={(isHovering: boolean) => onHover(button.action, isHovering)}
+            onClickState={(clickState: number, _position: unknown, source: unknown) =>
+              onPress(button.action, clickState, source)
+            }
+            onHover={(isHovering: boolean, _position: unknown, source: unknown) =>
+              onHover(button.action, isHovering, source)
+            }
           />
         );
       })}
@@ -240,12 +233,36 @@ export default function QuestArenaScene() {
   const [session] = useState(createQuestArenaSession);
   const view = useSyncExternalStore(session.subscribe, session.getSnapshot);
   const [hover, setHover] = useState<QuestMenuAction | null>(null);
+  const [assets, setAssets] = useState<QuestMenuAssets | null>(null);
   const [textureUri, setTextureUri] = useState<string | null>(null);
+  const [materialName, setMaterialName] = useState<string | null>(null);
   const [textureError, setTextureError] = useState<string | null>(null);
-  const menu = useMemo(() => buildQuestMenu(view.page, view.lines), [view.page, view.lines]);
-  const shownHover = questMenuButtons(view.page).some((button) => button.action === hover)
+  const textureStep = useRef<MenuTextureStep>({ generation: 0, page: null });
+  const shownUri = useRef<string | null>(null);
+  const press = useRef<QuestPressState>({ down: new Set() });
+  const hoverSources = useRef(new Map<QuestMenuAction, Set<number>>());
+  const inputPage = useRef(view.page);
+  const visibleHover = questMenuButtons(view.page, view.acknowledged).some(
+    (button) => button.action === hover
+  )
     ? hover
     : null;
+  const resetInputForPage = () => {
+    if (inputPage.current === view.page) return;
+    inputPage.current = view.page;
+    press.current.down.clear();
+    hoverSources.current.clear();
+    setHover(null);
+  };
+  const menu = useMemo(
+    () =>
+      buildQuestMenu(view.page, view.lines, {
+        hover: visibleHover,
+        acknowledged: view.acknowledged,
+        assets: assets ?? undefined,
+      }),
+    [assets, view.acknowledged, view.lines, view.page, visibleHover]
+  );
 
   useEffect(() => {
     questRuntime.sceneMounted();
@@ -257,23 +274,71 @@ export default function QuestArenaScene() {
 
   useEffect(() => {
     let cancel = false;
-    renderQuestMenuTexture(menu.ops).then(
-      (result) => {
+    Promise.all(
+      (Object.keys(menuAssetModules) as (keyof typeof menuAssetModules)[]).map(async (key) => [
+        key,
+        await localAssetUri(menuAssetModules[key]),
+      ])
+    ).then(
+      (entries) => {
         if (cancel) return;
-        if (!result) setTextureError('Menu texture module is unavailable.');
-        else {
-          setTextureUri(result.uri);
-          setTextureError(null);
-        }
+        const uri = Object.fromEntries(entries) as Record<keyof typeof menuAssetModules, string>;
+        setAssets({
+          backgroundUri: uri.background,
+          fonts: { body: uri.body, button: uri.button, serif: uri.serif },
+          titles: { neo: uri.neo, rock: uri.rock, robots: uri.robots },
+        });
       },
-      (error: unknown) => {
-        if (!cancel) setTextureError(error instanceof Error ? error.message : String(error));
+      () => {
+        if (!cancel) setAssets({});
       }
     );
     return () => {
       cancel = true;
     };
-  }, [menu.specKey, menu.ops]);
+  }, []);
+
+  useEffect(() => {
+    if (!assets) return;
+    const step = beginMenuTexture(textureStep.current, view.page);
+    textureStep.current = { generation: step.generation, page: step.page };
+    if (step.blank) {
+      shownUri.current = null;
+      setTextureUri(null);
+      setMaterialName(null);
+    }
+    const keep = step.blank || !shownUri.current ? [] : [shownUri.current];
+    let cancel = false;
+    renderQuestMenuTexture(menu.ops, keep).then(
+      (result) => {
+        if (cancel || !menuTextureIsCurrent(step.generation, textureStep.current.generation))
+          return;
+        if (!result) setTextureError('Menu texture module is unavailable.');
+        else {
+          const name = questMenuMaterialName(result.uri);
+          ViroMaterials.createMaterials({
+            [name]: {
+              diffuseTexture: { uri: result.uri },
+              lightingModel: 'Constant',
+              blendMode: 'Alpha',
+              cullMode: 'None',
+            },
+          });
+          shownUri.current = result.uri;
+          setTextureUri(result.uri);
+          setMaterialName(name);
+          setTextureError(null);
+        }
+      },
+      (error: unknown) => {
+        if (!cancel && menuTextureIsCurrent(step.generation, textureStep.current.generation))
+          setTextureError(error instanceof Error ? error.message : String(error));
+      }
+    );
+    return () => {
+      cancel = true;
+    };
+  }, [assets, menu.ops, menu.specKey, view.page]);
 
   const onAction = (action: QuestMenuAction) => {
     if (action === 'solo') session.solo();
@@ -290,11 +355,26 @@ export default function QuestArenaScene() {
       {view.page === 'ring' ? <QuestRing view={view} session={session} /> : null}
       <QuestMenu
         view={view}
-        hover={shownHover}
         textureUri={textureUri}
+        materialName={materialName}
         textureError={textureError}
-        onAction={onAction}
-        onHover={(action, hovering) => setHover(hovering ? action : null)}
+        onPress={(action, clickState, source) => {
+          resetInputForPage();
+          if (questTriggerPress(press.current, clickState, source) === 'activate') onAction(action);
+        }}
+        onHover={(action, hovering, source) => {
+          resetInputForPage();
+          let sourcesForButton = hoverSources.current.get(action);
+          if (!sourcesForButton) {
+            sourcesForButton = new Set();
+            hoverSources.current.set(action, sourcesForButton);
+          }
+          const active = questPointerHover(sourcesForButton, hovering, source);
+          setHover((current) => {
+            if (active) return action;
+            return current === action ? null : current;
+          });
+        }}
       />
     </ViroScene>
   );

@@ -7,19 +7,25 @@ const {
   QUEST_MENU_ACTIONS,
   QUEST_MENU_POSE,
   QUEST_MENU_SIZE,
+  QUEST_MENU_TAGLINE,
   QUEST_MENU_TEXTURE,
   QUEST_RING_POSE,
+  beginMenuTexture,
   buildQuestMenu,
+  menuTextureIsCurrent,
   questMenuButtonFrame,
   questMenuButtons,
   questMenuHit,
+  questMenuMaterialName,
   wrapMenuLine,
 } = require('../src/features/quest-vr/quest-menu-layout.ts');
+const { questPointerHover, questTriggerPress } = require('../src/features/quest-vr/quest-menu-input.ts');
 const {
   QUEST_ASSET_TIMEOUT_MS,
-  applyQuestReady,
+  QUEST_LEAVING,
+  QUEST_READY_SAVED,
   createQuestArenaSession,
-  questReadyDecision,
+  questReadyAcknowledgement,
 } = require('../src/features/quest-vr/quest-arena-session.ts');
 
 const source = (file) => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
@@ -82,44 +88,99 @@ test('menu pixels and controller frames describe the same buttons', () => {
     false
   );
   assert.ok(QUEST_RING_POSE.position[2] < QUEST_MENU_POSE.ring.position[2]);
-  assert.ok(QUEST_MENU_POSE.ring.position[1] > QUEST_MENU_POSE.menu.position[1]);
-  const menu = buildQuestMenu('ring', ['Ready did not start. Headset tracking was not asserted.']);
-  assert.match(menu.specKey, /Ready/);
-  assert.match(menu.specKey, /Back/);
+  assert.equal(QUEST_MENU_POSE.menu.position[2], -1.15);
+  assert.equal(QUEST_MENU_POSE.ring.position[2], -1.15);
+  assert.deepEqual(QUEST_MENU_SIZE, { widthM: 1.6, heightM: 0.9 });
+  const ringButtons = questMenuButtons('ring');
+  const gapM =
+    ((ringButtons[1].x - (ringButtons[0].x + ringButtons[0].width)) / QUEST_MENU_TEXTURE.widthPx) *
+    QUEST_MENU_SIZE.widthM;
+  assert.ok(gapM > 0.06, `button gap ${gapM} m`);
+  assert.ok(questMenuButtonFrame(ringButtons[0]).height >= 0.18);
+  const menu = buildQuestMenu('menu', ['Solo places both robots in the ring.']);
+  assert.match(menu.specKey, /Solo/);
+  assert.match(menu.specKey, /Exit/);
+  assert.match(menu.specKey, new RegExp(QUEST_MENU_TAGLINE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(menu.specKey, /#60a5fa/);
+  assert.match(menu.specKey, /#d99a9a/);
+  assert.match(menu.specKey, /#E818181B/);
+  assert.match(menu.specKey, /#09090b/);
+  assert.doesNotMatch(menu.specKey, /#0f766e|#991b1b|#101826/);
+  const ring = buildQuestMenu('ring', ['Both robots are in the ring.']);
+  assert.equal(ring.buttons.find((button) => button.action === 'ready').label, 'Ready');
+  const set = buildQuestMenu('ring', ['Both robots are in the ring.'], { acknowledged: true });
+  assert.equal(set.buttons.find((button) => button.action === 'ready').label, 'Set');
+  assert.equal(questMenuHit('ring', questMenuButtonFrame(set.buttons[0]).position[0], questMenuButtonFrame(set.buttons[0]).position[1], true), 'ready');
+  const hovered = buildQuestMenu('menu', ['Solo places both robots in the ring.'], { hover: 'solo' });
+  assert.notEqual(hovered.specKey, menu.specKey);
+  const solo = menu.buttons.find((button) => button.action === 'solo');
+  assert.match(hovered.specKey, new RegExp(`"x":${solo.x}`));
   assert.deepEqual(wrapMenuLine('one two three', 7), ['one two', 'three']);
+  const titled = buildQuestMenu('menu', ['Solo places both robots in the ring.'], {
+    assets: {
+      backgroundUri: 'file:///menu-background.png',
+      titles: {
+        neo: 'file:///neo.png',
+        rock: 'file:///rock.png',
+        robots: 'file:///robots.png',
+      },
+    },
+  });
+  assert.match(titled.specKey, /menu-background\.png/);
+  assert.match(titled.specKey, /rock\.png/);
 });
 
-test('Ready calls the real solo action only when it cannot start a fight', () => {
-  assert.deepEqual(questReadyDecision(false), { callReady: true, reason: 'not-ready' });
-  assert.deepEqual(questReadyDecision(true), {
-    callReady: false,
-    reason: 'combat-controls-absent',
-  });
-  let calls = 0;
-  const blocked = applyQuestReady({
-    getSnapshot: () => ({ canReady: true }),
-    ready: () => {
-      calls += 1;
-      return true;
-    },
-    invalidatePlacementReady() {
-      throw new Error('ready() should not have been called');
-    },
-  });
-  assert.equal(calls, 0);
-  assert.deepEqual(blocked, { called: false, started: false, reason: 'combat-controls-absent' });
+test('trigger presses and hover ignore gaze, grips, and repeat clicks', () => {
+  const state = { down: new Set() };
+  assert.equal(questTriggerPress(state, 1, 1), 'activate');
+  assert.equal(questTriggerPress(state, 1, 1), 'ignore');
+  assert.equal(questTriggerPress(state, 3, 1), 'ignore');
+  assert.equal(questTriggerPress(state, 2, 1), 'release');
+  assert.equal(questTriggerPress(state, 1, 1), 'activate');
+  assert.equal(questTriggerPress(state, 1, 4), 'activate');
+  for (const source of [3, 5, 6, 7, 8, 9, 12])
+    assert.equal(questTriggerPress({ down: new Set() }, 1, source), 'ignore', `source ${source}`);
+  const hover = new Set();
+  assert.equal(questPointerHover(hover, true, 12), false);
+  assert.equal(questPointerHover(hover, true, 1), true);
+  assert.equal(questPointerHover(hover, false, 12), true);
+  assert.equal(questPointerHover(hover, true, 8), true);
+  assert.equal(questPointerHover(hover, false, 1), false);
+});
 
-  let invalidated = 0;
-  const unexpected = applyQuestReady({
-    getSnapshot: () => ({ canReady: false }),
-    ready: () => true,
-    invalidatePlacementReady: () => {
-      invalidated += 1;
-    },
+test('a page change blanks the previous texture and a stale raster is dropped', () => {
+  let step = { generation: 0, page: null };
+  const first = beginMenuTexture(step, 'menu');
+  assert.equal(first.blank, false);
+  step = { generation: first.generation, page: first.page };
+  const samePage = beginMenuTexture(step, 'menu');
+  assert.equal(samePage.blank, false);
+  step = { generation: samePage.generation, page: samePage.page };
+  const nextPage = beginMenuTexture(step, 'ring');
+  assert.equal(nextPage.blank, true);
+  assert.equal(menuTextureIsCurrent(first.generation, nextPage.generation), false);
+  assert.equal(menuTextureIsCurrent(nextPage.generation, nextPage.generation), true);
+  const left = questMenuMaterialName('file:///panel-a.png');
+  const right = questMenuMaterialName('file:///panel-b.png');
+  assert.notEqual(left, right);
+  assert.equal(left, questMenuMaterialName('file:///panel-a.png'));
+  assert.match(left, /^questMenu-[0-9a-f]+$/);
+});
+
+test('Ready acknowledges the lobby and does not call ArenaMatch.ready', () => {
+  assert.deepEqual(questReadyAcknowledgement(false), {
+    called: false,
+    started: false,
+    reason: 'no-match',
   });
-  assert.equal(invalidated, 1);
-  assert.equal(unexpected.started, false);
-  assert.equal(unexpected.called, true);
+  assert.deepEqual(questReadyAcknowledgement(true), {
+    called: false,
+    started: false,
+    reason: 'acknowledged',
+  });
+  const sessionSource = source('src/features/quest-vr/quest-arena-session.ts');
+  assert.doesNotMatch(sessionSource, /match\.ready\(|invalidatePlacementReady|questReadyDecision/);
+  assert.doesNotMatch(sessionSource, /setTracking|setPlacement|tick\(/);
 });
 
 test('solo keeps ArenaMatch untracked and Ready does not leave the lobby', () => {
@@ -139,17 +200,23 @@ test('solo keeps ArenaMatch untracked and Ready does not leave the lobby', () =>
   assert.equal(opened.canReady, false);
   assert.equal(opened.localReady, false);
   assert.match(opened.message, /tracking is stable/);
-  assert.match(opened.lines.join('\n'), /not an AR plane/);
+  assert.doesNotMatch(opened.lines.join('\n'), /tracking/i);
+  assert.match(opened.lines.join('\n'), /stay idle/);
   const result = session.ready();
   const afterReady = session.getSnapshot();
-  assert.equal(result.called, true);
+  assert.equal(result.called, false);
   assert.equal(result.started, false);
-  assert.equal(result.reason, 'not-ready');
+  assert.equal(result.reason, 'acknowledged');
+  assert.equal(afterReady.acknowledged, true);
   assert.equal(afterReady.stage, 'lobby');
   assert.equal(afterReady.localReady, false);
   assert.equal(afterReady.tracking, false);
   assert.equal(afterReady.placed, false);
-  assert.match(afterReady.lines.join('\n'), /Headset tracking was not asserted/);
+  assert.match(afterReady.lines.join('\n'), new RegExp(QUEST_READY_SAVED));
+  const again = session.ready();
+  assert.equal(again.reason, 'acknowledged');
+  assert.equal(session.getSnapshot().stage, 'lobby');
+  assert.equal(session.getSnapshot().localReady, false);
 
   const staleLease = afterReady.lease;
   session.assetLoaded(staleLease, afterReady.token, afterReady.placementVersion, 'arena');
@@ -164,6 +231,8 @@ test('solo keeps ArenaMatch untracked and Ready does not leave the lobby', () =>
   assert.equal(session.back(), 'menu');
   assert.equal(session.getSnapshot().mode, null);
   assert.equal(session.getSnapshot().page, 'menu');
+  assert.equal(session.getSnapshot().acknowledged, false);
+  assert.doesNotMatch(session.getSnapshot().lines.join('\n'), /Ready saved/);
   session.assetLoaded(staleLease, afterReady.token, afterReady.placementVersion, 'arena');
   assert.equal(session.solo(), true);
   const reopened = session.getSnapshot();
@@ -173,6 +242,11 @@ test('solo keeps ArenaMatch untracked and Ready does not leave the lobby', () =>
   assert.equal(session.getSnapshot().assetsLoaded, 0);
   session.exit();
   assert.equal(session.getSnapshot().mode, null);
+  assert.equal(session.getSnapshot().page, 'menu');
+  assert.match(session.getSnapshot().lines.join('\n'), new RegExp(QUEST_LEAVING));
+  assert.equal(session.solo(), false);
+  session.exit();
+  assert.match(session.getSnapshot().lines.join('\n'), new RegExp(QUEST_LEAVING));
   session.dispose();
   session.dispose();
   assert.equal(session.solo(), false);
@@ -205,6 +279,17 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
   assert.match(scene, /ARENA_LAYOUT/);
   assert.match(scene, /questMenuHit/);
   assert.match(scene, /renderQuestMenuTexture/);
+  assert.match(scene, /questTriggerPress/);
+  assert.match(scene, /questPointerHover/);
+  assert.match(scene, /onClickState/);
+  assert.match(scene, /beginMenuTexture/);
+  assert.match(scene, /questMenuMaterialName/);
+  assert.match(scene, /menu-background\.png/);
+  assert.match(scene, /quest-lettering\/rock\.png/);
+  assert.match(scene, /session\.exit\(\)/);
+  assert.match(scene, /exitVRScene\(\)/);
+  assert.doesNotMatch(scene, /onClick=\{/);
+  assert.doesNotMatch(scene, /exitRequest !== null/);
   assert.doesNotMatch(
     scene,
     /ViroARScene|ViroXRSceneNavigator|setTracking|setPlacement|ViroGameLoop/
@@ -215,6 +300,10 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
     fs.existsSync(path.join(__dirname, '../src/features/quest-vr/quest-smoke-scene.native.tsx')),
     false
   );
+  assert.match(moduleSource, /"image"/);
+  assert.match(moduleSource, /Typeface\.createFromFile/);
+  assert.match(moduleSource, /keep/);
+  assert.doesNotMatch(moduleSource, /dropLast/);
   assert.doesNotMatch(moduleSource, /viro_renderer|OpenXR|XrSession|nativeDraw/);
   assert.doesNotMatch(source('app.config.ts'), /QUEST_COMPOSITOR|quest-compositor/);
 });

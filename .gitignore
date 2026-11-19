@@ -29,3 +29,6 @@ android
 app.local.config.json
 credentials.json
 tools/medical/__pycache__/
+
+# Quest renderer output from tools/quest/build-viro-renderer.mjs
+native/quest-viro-renderer/

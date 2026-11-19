@@ -118,7 +118,9 @@ test('Quest config selects fully virtual OpenXR, keeps expo-camera silent and bl
   assert.deepEqual(pluginNames(quest), [
     ...pluginNames(phone),
     './tools/quest/with-quest-vr-activity.cjs',
+    './tools/quest/with-quest-viro-renderer.cjs',
   ]);
+  assert.ok(!pluginNames(phone).includes('./tools/quest/with-quest-viro-renderer.cjs'));
   const camera = quest.plugins.find((plugin) => plugin[0] === 'expo-camera')[1];
   assert.equal(camera.recordAudioAndroid, false);
   for (const permission of [

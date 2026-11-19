@@ -22,7 +22,8 @@ export function questMenuTextureAvailable() {
 }
 
 export async function renderQuestMenuTexture(
-  ops: QuestMenuDrawOp[]
+  ops: QuestMenuDrawOp[],
+  keep: string[] = []
 ): Promise<QuestMenuTextureResult | null> {
   if (!native) return null;
   const parsed = JSON.parse(
@@ -31,6 +32,7 @@ export async function renderQuestMenuTexture(
         width: QUEST_MENU_TEXTURE.widthPx,
         height: QUEST_MENU_TEXTURE.heightPx,
         ops,
+        keep,
       })
     )
   ) as Partial<QuestMenuTextureResult>;

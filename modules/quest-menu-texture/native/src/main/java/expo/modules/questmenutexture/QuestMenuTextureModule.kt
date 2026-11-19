@@ -1,6 +1,7 @@
 package expo.modules.questmenutexture
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -19,6 +20,20 @@ import java.io.FileOutputStream
 // Rasterizes the headset menu to a cache PNG. Drawing stays in this process.
 class QuestMenuTextureModule : Module() {
   private val drawLock = Any()
+  private val typefaces = HashMap<String, Typeface>()
+
+  private fun fileFromUri(value: String): File {
+    val path = if (value.startsWith("file:")) Uri.parse(value).path else value
+    require(!path.isNullOrEmpty()) { "Menu texture file path is empty." }
+    return File(path)
+  }
+
+  private fun typeface(path: String): Typeface {
+    typefaces[path]?.let { return it }
+    val face = Typeface.createFromFile(fileFromUri(path))
+    typefaces[path] = face
+    return face
+  }
 
   private fun renderToFile(json: String): String {
     val spec = JSONObject(json)
@@ -26,7 +41,7 @@ class QuestMenuTextureModule : Module() {
     val height = spec.getInt("height")
     val ops = spec.getJSONArray("ops")
     require(width in 1..4096 && height in 1..4096) { "Menu texture size is out of range." }
-    require(ops.length() in 1..64) { "Menu texture has no drawing operations." }
+    require(ops.length() in 1..160) { "Menu texture has no drawing operations." }
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     try {
       val canvas = Canvas(bitmap)
@@ -50,6 +65,27 @@ class QuestMenuTextureModule : Module() {
               paint
             )
           }
+          "image" -> {
+            val source = BitmapFactory.decodeFile(fileFromUri(op.getString("uri")).absolutePath)
+              ?: error("Menu texture image could not be decoded.")
+            try {
+              paint.style = Paint.Style.FILL
+              paint.color = Color.WHITE
+              canvas.drawBitmap(
+                source,
+                null,
+                RectF(
+                  op.getDouble("x").toFloat(),
+                  op.getDouble("y").toFloat(),
+                  (op.getDouble("x") + op.getDouble("width")).toFloat(),
+                  (op.getDouble("y") + op.getDouble("height")).toFloat()
+                ),
+                paint
+              )
+            } finally {
+              source.recycle()
+            }
+          }
           "text" -> {
             val text = op.optString("text")
             if (text.isEmpty()) continue
@@ -58,7 +94,11 @@ class QuestMenuTextureModule : Module() {
             val glyph = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
             glyph.color = Color.parseColor(op.optString("color", "#f8fafc"))
             glyph.textSize = size
-            glyph.typeface = if (op.optBoolean("bold")) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            val font = op.optString("font")
+            glyph.typeface =
+              if (font.isNotEmpty()) typeface(font)
+              else if (op.optBoolean("bold")) Typeface.DEFAULT_BOLD
+              else Typeface.DEFAULT
             glyph.textAlign =
               if (op.optString("align") == "center") Paint.Align.CENTER else Paint.Align.LEFT
             val shown = TextUtils.ellipsize(
@@ -75,6 +115,7 @@ class QuestMenuTextureModule : Module() {
               glyph
             )
           }
+          else -> error("Unknown menu draw operation.")
         }
       }
       val context = appContext.reactContext ?: error("Menu texture has no Android context.")
@@ -85,7 +126,17 @@ class QuestMenuTextureModule : Module() {
         if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream))
           error("Menu texture PNG encoding failed.")
       }
-      directory.listFiles()?.sortedBy { it.name }?.dropLast(2)?.forEach { it.delete() }
+      val keep = mutableSetOf(file.absolutePath)
+      val keepJson = spec.optJSONArray("keep")
+      if (keepJson != null) {
+        for (index in 0 until keepJson.length()) {
+          val value = keepJson.optString(index)
+          if (value.isNotEmpty()) keep.add(fileFromUri(value).absolutePath)
+        }
+      }
+      directory.listFiles()?.forEach { cached ->
+        if (cached.absolutePath !in keep && cached.name.startsWith("panel-")) cached.delete()
+      }
       return JSONObject()
         .put("uri", Uri.fromFile(file).toString())
         .put("width", width)
