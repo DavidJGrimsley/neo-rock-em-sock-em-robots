@@ -118,7 +118,9 @@ test('Quest config selects fully virtual OpenXR, keeps expo-camera silent and bl
   assert.deepEqual(pluginNames(quest), [
     ...pluginNames(phone),
     './tools/quest/with-quest-vr-activity.cjs',
+    './tools/quest/with-quest-viro-renderer.cjs',
   ]);
+  assert.ok(!pluginNames(phone).includes('./tools/quest/with-quest-viro-renderer.cjs'));
   const camera = quest.plugins.find((plugin) => plugin[0] === 'expo-camera')[1];
   assert.equal(camera.recordAudioAndroid, false);
   for (const permission of [
@@ -322,11 +324,16 @@ test('routes and phone entry points never load @reactvision/react-viro staticall
   assert.match(navigator, /onExitViro=\{questOnExitViro\}/);
   assert.match(navigator, /passthroughEnabled=\{false\}/);
   assert.match(navigator, /VRQuestNavigatorBridge\.onQuestError/);
-  const scene = source('src/features/quest-vr/quest-smoke-scene.native.tsx');
+  const scene = source('src/features/quest-vr/quest-arena-scene.native.tsx');
   assert.match(scene, /<ViroScene>/);
-  assert.doesNotMatch(scene, /ViroARScene/);
-  assert.match(scene, /text="Quest VR test"/);
+  assert.doesNotMatch(scene, /ViroARScene|ViroXRSceneNavigator|setTracking|setPlacement/);
   assert.match(scene, /exitVRScene\(\)/);
+  assert.match(navigator, /quest-arena-scene\.native/);
+  assert.doesNotMatch(navigator, /quest-smoke-scene/);
+  assert.match(
+    source('src/features/quest-vr/quest-vr-screen.native.tsx'),
+    /headset menu and the fixed ring/
+  );
 });
 
 function screenHarness({ platform = quest3, launcher = true } = {}) {

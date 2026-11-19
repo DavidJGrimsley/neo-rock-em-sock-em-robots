@@ -111,7 +111,8 @@ export function questPanelModel(
     default:
       return {
         title: 'Quest VR runtime',
-        message: 'A black immersive test scene with a fixed reference. Exit with Back or Exit VR.',
+        message:
+          'Enter VR for the headset menu and the fixed ring. This panel is only the launcher.',
         canEnter: true,
         label: 'Enter VR',
       };

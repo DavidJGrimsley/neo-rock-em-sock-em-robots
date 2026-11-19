@@ -1,10 +1,10 @@
 import { useEffect, type ReactNode } from 'react';
 import { VRQuestNavigatorBridge, ViroXRSceneNavigator } from '@reactvision/react-viro';
 
-import QuestSmokeScene from './quest-smoke-scene.native';
+import QuestArenaScene from './quest-arena-scene.native';
 import { questOnExitViro, questRuntime } from './quest-runtime-store';
 
-const vrInitialScene = { scene: QuestSmokeScene };
+const vrInitialScene = { scene: QuestArenaScene };
 
 // Mounting launches VRActivity once. Later entries go through `enter` from renderQuestPanel.
 export default function QuestXRNavigator({
