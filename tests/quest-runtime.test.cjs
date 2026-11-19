@@ -112,10 +112,13 @@ test('Quest config selects fully virtual OpenXR, keeps expo-camera silent and bl
   assert.equal(viro.provider, 'none');
   assert.deepEqual(viro.ios, viroOptions(phone).ios);
   assert.equal(quest.android.package, phone.android.package);
-  assert.deepEqual(
-    quest.plugins.map((plugin) => (Array.isArray(plugin) ? plugin[0] : plugin)),
-    phone.plugins.map((plugin) => (Array.isArray(plugin) ? plugin[0] : plugin))
-  );
+  const pluginNames = (config) =>
+    config.plugins.map((plugin) => (Array.isArray(plugin) ? plugin[0] : plugin));
+  assert.ok(!pluginNames(phone).includes('./tools/quest/with-quest-vr-activity.cjs'));
+  assert.deepEqual(pluginNames(quest), [
+    ...pluginNames(phone),
+    './tools/quest/with-quest-vr-activity.cjs',
+  ]);
   const camera = quest.plugins.find((plugin) => plugin[0] === 'expo-camera')[1];
   assert.equal(camera.recordAudioAndroid, false);
   for (const permission of [
@@ -469,5 +472,124 @@ test('root layout registers the Quest route without the portrait default', () =>
   assert.match(
     source('src/navigation/root-layout.tsx'),
     /name="quest-vr"\s+options=\{\{ title: 'Quest VR Runtime', orientation: 'default', headerShown: false \}\}/
+  );
+});
+
+test('Quest VRActivity prebuild plugin patches Viro Meta/Home resume race and stays idempotent', async () => {
+  const os = require('node:os');
+  const path = require('node:path');
+  const { compileModsAsync, withDangerousMod, withStaticPlugin } = require('@expo/config-plugins');
+  const withQuestVRActivity = require('../tools/quest/with-quest-vr-activity.cjs');
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'quest-vr-activity-test-'));
+  try {
+    const androidRoot = path.join(tmpRoot, 'android');
+    const appMain = path.join(androidRoot, 'app', 'src', 'main');
+    const pkgDir = path.join(appMain, 'java', 'com', 'djleg', 'neorobots');
+    fs.mkdirSync(pkgDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(appMain, 'AndroidManifest.xml'),
+      [
+        '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.djleg.neorobots">',
+        '  <uses-permission android:name="android.permission.INTERNET"/>',
+        '  <application android:name=".MainApplication">',
+        '    <activity android:name=".MainActivity"/>',
+        '  </application>',
+        '</manifest>',
+        '',
+      ].join('\n')
+    );
+    fs.writeFileSync(path.join(androidRoot, 'build.gradle'), 'allprojects { repositories {} }\n');
+    fs.writeFileSync(path.join(androidRoot, 'gradle.properties'), '\n');
+    fs.writeFileSync(path.join(androidRoot, 'settings.gradle'), "rootProject.name = 'test'\n");
+    fs.writeFileSync(
+      path.join(androidRoot, 'app', 'build.gradle'),
+      'android {\n    defaultConfig {\n        minSdkVersion 24\n    }\n}\n'
+    );
+    fs.writeFileSync(
+      path.join(pkgDir, 'MainApplication.kt'),
+      'package com.djleg.neorobots\nclass MainApplication {\n  val packages = PackageList(this).packages\n}\n'
+    );
+    fs.writeFileSync(
+      path.join(pkgDir, 'MainActivity.kt'),
+      'package com.djleg.neorobots\nclass MainActivity : ReactActivity() {}\n'
+    );
+
+    // Strip plugins unrelated to Android native file generation (e.g. expo-router) while keeping
+    // the exact Quest Viro options and local plugin resolved via Expo's static plugin loader.
+    const questConfig = configure({ QUEST_BUILD: '1' });
+    const viroEntry = questConfig.plugins.find(
+      (plugin) => Array.isArray(plugin) && plugin[0] === '@reactvision/react-viro'
+    );
+    const questActivityPlugin = questConfig.plugins.find(
+      (plugin) => plugin === './tools/quest/with-quest-vr-activity.cjs'
+    );
+    assert.ok(questActivityPlugin, 'expected Quest config to include with-quest-vr-activity.cjs');
+    const repoRoot = path.resolve(__dirname, '..');
+    let modConfig = withStaticPlugin(
+      { ...questConfig, plugins: [viroEntry], _internal: { projectRoot: repoRoot } },
+      { plugin: viroEntry, projectRoot: repoRoot }
+    );
+    modConfig = withStaticPlugin(modConfig, {
+      plugin: questActivityPlugin,
+      projectRoot: repoRoot,
+    });
+
+    await compileModsAsync(modConfig, { projectRoot: tmpRoot, platforms: ['android'] });
+
+    const vrActivityPath = path.join(pkgDir, 'VRActivity.kt');
+    assert.ok(fs.existsSync(vrActivityPath), 'expected Viro plugin to generate VRActivity.kt');
+    const patched = fs.readFileSync(vrActivityPath, 'utf8');
+
+    // Guard blocks shared ReactHost pause when MainActivity has already resumed (Meta/Home -> reopen).
+    assert.match(patched, /private var supersededByOtherActivity = false/);
+    assert.match(
+      patched,
+      /object : DefaultReactActivityDelegate\(this, mainComponentName, fabricEnabled\) \{\s*override fun onPause\(\) \{[\s\S]*?val currentActivity = reactHost\?\.currentReactContext\?\.currentActivity[\s\S]*?supersededByOtherActivity \|\|\s*\(currentActivity != null && currentActivity !== this@VRActivity\)\s*\)\s*\{\s*return\s*\}\s*super\.onPause\(\)\s*\}/
+    );
+    // VRActivity.onResume resets the flag; VRActivity.onPause clears expectingForeignPause.
+    assert.match(
+      patched,
+      /override fun onResume\(\) \{\s*supersededByOtherActivity = false\s*super\.onResume\(\)/
+    );
+    assert.match(
+      patched,
+      /override fun onPause\(\) \{\s*expectingForeignPause = false\s*super\.onPause\(\)\s*\}/
+    );
+    // Resuming another Activity (MainActivity) supersedes VRActivity and cancels pending re-promotes before finish().
+    assert.match(
+      patched,
+      /override fun onActivityResumed\(other: Activity\) \{\s*if \(other !== this@VRActivity\) \{\s*supersededByOtherActivity = true\s*expectingForeignPause = false\s*mainHandler\.removeCallbacksAndMessages\(null\)\s*if \(!isFinishing && !isDestroyed\) \{\s*finish\(\)\s*\}\s*\}\s*\}/
+    );
+
+    // Re-running patchVRActivitySource and the finalized mod is idempotent.
+    assert.equal(withQuestVRActivity.patchVRActivitySource(patched), patched);
+    let secondConfig = withDangerousMod({ ...questConfig, plugins: [] }, ['android', (c) => c]);
+    secondConfig = withQuestVRActivity(secondConfig);
+    await compileModsAsync(secondConfig, { projectRoot: tmpRoot, platforms: ['android'] });
+    assert.equal(fs.readFileSync(vrActivityPath, 'utf8'), patched);
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('Quest VRActivity prebuild plugin fails loudly on missing file or unknown template', () => {
+  const os = require('node:os');
+  const path = require('node:path');
+  const withQuestVRActivity = require('../tools/quest/with-quest-vr-activity.cjs');
+
+  const missingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'quest-vr-missing-'));
+  try {
+    assert.throws(
+      () => withQuestVRActivity.applyQuestVRActivityPatch(missingRoot, 'com.djleg.neorobots'),
+      /Expected Viro Quest VRActivity\.kt/
+    );
+  } finally {
+    fs.rmSync(missingRoot, { recursive: true, force: true });
+  }
+
+  assert.throws(
+    () => withQuestVRActivity.patchVRActivitySource('class VRActivity {}'),
+    /Unexpected VRActivity\.kt template/
   );
 });

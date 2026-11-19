@@ -90,6 +90,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           recordAudioAndroid: false,
         },
       ],
+      ...(quest ? ['./tools/quest/with-quest-vr-activity.cjs'] : []),
     ],
     ...(quest
       ? {
