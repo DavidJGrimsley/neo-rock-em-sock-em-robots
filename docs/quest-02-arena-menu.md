@@ -53,7 +53,7 @@ Use `docs/quest-01-dev-build.md` for the short-path Windows build, release APK, 
 
 Renderer in the APK: the stock Viro 3.0.3 library from `node_modules/@reactvision/react-viro`. Confirm the packaged library is that dependency and not a patched AAR before installing.
 
-A staged arm64 debug and release build on 2026-11-18 did that check. `libviro_renderer.so` in both APKs matched `viro_renderer-release.aar` (SHA-256 `2b3280493c4a788cc14319e263f1c2769bf3e54b22c9e4cc7673319967ccacd4`). `QuestMenuTextureModule` was in the generated Expo package list. The APK was not installed. That compile is not a headset result.
+A staged arm64 debug and release build of rebased commit `c68a65a97ddeb4abb06bc00ebb91b7c5ca9f8d48` on 2026-11-18 did that check. `libviro_renderer.so` in both APKs matched `viro_renderer-release.aar` (SHA-256 `2b3280493c4a788cc14319e263f1c2769bf3e54b22c9e4cc7673319967ccacd4`). `QuestMenuTextureModule` was in the generated Expo package list. `MainApplication` uses `ViroPlatform.QUEST`, and the generated `VRActivity` includes the Quest 01 resume patch. The release APK was not installed. That compile is not a headset result. An earlier APK from before the rebase does not validate this commit.
 
 ## Headset checklist
 
