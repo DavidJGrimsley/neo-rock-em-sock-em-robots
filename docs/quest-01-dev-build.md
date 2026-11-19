@@ -2,6 +2,8 @@
 
 Stage 01 proves a fully immersive Meta Quest runtime: a 2D panel, an explicit **Enter VR**, a black `ViroScene` with a fixed reference cube 2 m ahead, a `Quest VR test` label and an **Exit VR** target. It is not gameplay.
 
+On `feat/quest-02-arena-menu` the reference cube is replaced by the headset menu and fixed ring in `docs/quest-02-arena-menu.md`. The build, install, and permission steps below still apply. Do not expect the cube or the `Quest VR test` label on that branch.
+
 `QUEST_BUILD=1` is the only switch. Without it, `app.config.ts` produces the unchanged phone AR configuration. With it, Viro uses `xRMode: ["QUEST"]` (VRActivity, OpenXR) for Quest 3/3S, with colocation, eye tracking and the passthrough camera disabled, and `android.blockedPermissions` removes the phone-only and mixed-reality permissions. The package name stays `com.djleg.neorobots`, so the phone and Quest builds replace each other on one device. Set `META_QUEST_APP_ID` (numeric) only for a store build. Viro then also forces the panel activity to landscape.
 
 Never commit `android/`. Always use `--clean` when switching variants. Otherwise `VRActivity.kt`, `gradle.properties` and `MainApplication.kt` from the other variant remain.
