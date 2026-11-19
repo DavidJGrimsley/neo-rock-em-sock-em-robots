@@ -1,6 +1,6 @@
 # Quest 02 arena menu
 
-- Status: ACTIVE. Pull request https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2 is open against `main`. The worn `ed03ede` release showed a white panel. Logcat from a fresh VR entry on that build showed the cause: the panel quad mounted before Viro registered its material. Commit `5fcd3e3` registers and checks the material natively before the quad mounts. Its release is installed on the connected Quest 3S. Headset gates remain pending. Roadmap checkbox 02 is not done.
+- Status: ACTIVE. Pull request https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2 is open against `main`. The worn `ed03ede` release showed a white panel. Logcat from a fresh VR entry on that build showed the cause: the panel quad mounted before Viro registered its material. Commit `5fcd3e3` registers and checks the material natively before the quad mounts. Its release is installed on the connected Quest 3S. A headset capture shows the branded panel, and logcat shows Solo, Ready, and Back working with no material errors. The gates remain pending the user's sign-off. Roadmap checkbox 02 is not done.
 - Task source: `project/agent/handoffs/2026-11-18-quest-02-arena-menu.md`
 - Control bootstrap: `79aff298941ea4b94acc788d2e3d3f1e344911fe` (packet and control `todo.md` were not edited)
 - Branch: `feat/quest-02-arena-menu`
@@ -114,7 +114,7 @@ The installed release was byte-identical to `%TEMP%\nrq-apks\app-release.apk` (`
 
 ## 2026-11-19 white panel: root cause and readiness fix
 
-Evidence, from a live logcat stream filtered to app uid 10183. It was streamed to the host; logs were not cleared and buffer sizes were not changed. The user exited and re-entered VR on the installed `ed03ede` release at 18:32:21 device time. Excerpt: `%TEMP%q02-evidenceed03ede-reentry-excerpt.log`.
+Evidence, from a live logcat stream filtered to app uid 10183. It was streamed to the host; logs were not cleared and buffer sizes were not changed. The user exited and re-entered VR on the installed `ed03ede` release at 18:32:21 device time. Excerpt: `%TEMP%\q02-evidence\ed03ede-reentry-excerpt.log`.
 
 - `18:32:21.564 ReactNativeJS: Quest menu texture 2048x1152 …/panel-75569709966940.png`
 - `18:32:21.568 VRTNodeManager: Error applying materials: Material [questMenu-f1c760af] not found` (`questMenu-f1c760af` is the FNV name of that URI)
@@ -146,26 +146,39 @@ Validation:
 - Release APK `90065614387039383122abd6e45471347092b887c995607fa6fb5c6854025019` (137,296,705 bytes): same signer `fac61745…`, patched `.so` `182db849…`, not debuggable.
 - Installed with `adb install -r` at 18:36:56. The pulled `base.apk` matches. `firstInstallTime` was unchanged.
 
-Not shown by this: the headset image. A host watcher (`%TEMP%q02-toolscapture-when-shown.sh`) takes one Meta capture when the log reports `QuestMenu shown`, but only if the headset is awake in `VRActivity`.
+The user entered VR on `5fcd3e3` at 18:39:46. Excerpt: `%TEMP%\q02-evidence\5fcd3e3-session-excerpt.log`.
+- `QuestMenuTexture: prepared questMenu-5bc82169 2048x1152 in 131ms`, then `QuestMenu shown menu questMenu-5bc82169`.
+- 17 `shown` and 18 `released` lines. No `Error applying materials`, no `Could not download image`, and no `failed:` in the session.
+- Solo, Back, Solo, Ready ×3, Back, Solo: each `state 1 source 1 activate`, once per press. Release and clicked were ignored.
+- Hover came from source 1 (14 lines) and from gaze, source 12 (28 lines, logged before the filter and ignored).
+
+The host watcher (`%TEMP%\q02-tools\capture-when-shown.sh`) requested a Meta capture after the first `shown` line, with the headset awake in `VRActivity`. Meta logged `ms_screenshot_success` at 18:40:18 and saved `/sdcard/Oculus/Screenshots/com.djleg.neorobots-20261119-184018.jpg`, copied to `%TEMP%\q02-evidence`. Whether that capture came from this request or from the user is not known.
+
+It shows the branded ring page: lettering, the session lines, Ready, Back, and Exit, with the ring and both robots below. It does not show the ray or hit dot.
 
 Medical-viewer compositor: the evaluation is in `docs/quest-02-arena-menu.md`. An underlay or an overlay are both possible without passthrough. Neither has been built or worn.
 
 ## Blockers
 
 - Quest 01 headset gate: pending. PR #1 is merged, and this branch no longer contains the reference cube. The cube gate was not run on a headset.
-- Quest 02 headset gate: pending. The `5fcd3e3` release replaced the white-panel `ed03ede` release on the headset. Checklist is in `docs/quest-02-arena-menu.md`. Do not claim pointer alignment, menu readability, Ready, Back, or Exit until this installed release is worn.
+- Quest 02 headset gate: pending the user's sign-off. On `5fcd3e3`:
+  - The branded panel rendered (headset capture).
+  - Solo, Ready, and Back activated once per press (logcat).
+
+  Not yet confirmed by the user: readability, ray origin and depth, hit-dot and hover placement, Exit, controller Back, and "no second OpenXR session". Checklist is in `docs/quest-02-arena-menu.md`.
 - Roadmap checkbox 02 stays open. The control `todo.md` was not edited.
 - Pull request: https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2. Updates use a normal push. No force push.
 
 ## Next action
 
-Wear the `5fcd3e3` release installed at 2026-11-19 18:36:56 device time (Quest 3S `3487C10J3706TQ`, SHA-256 `90065614…`). From the launcher, Enter VR. The host log stream and the capture watcher should already be running.
+The user judges the `5fcd3e3` session already worn, or wears it again (Quest 3S `3487C10J3706TQ`, SHA-256 `90065614…`).
 
 Record:
-- Whether the panel shows the phone lettering, the tagline, and Solo/Exit.
-- Whether hover follows the ray.
-- Whether Solo moves to the ring, Ready shows Set and stays in the lobby, and Back and Exit work.
-- Whether the ray starts at the controller.
-- The `QuestMenu` and `QuestMenuTexture` lines described in checklist item 9.
+- Is the panel readable, and are the lettering and tagline faithful to the phone?
+- Does the ray start at the controller and stop on the panel with the hit dot on the aimed button?
+- Does the hover highlight follow the ray quickly enough? Each hover redraws the texture, about 50 ms to register.
+- Does Ready show Set?
+- Do Exit and controller Back leave VR?
+- Branch 01 lifecycle.
 
 Leave roadmap checkbox 02 unchecked until that gate and the branch 01 gate both pass.

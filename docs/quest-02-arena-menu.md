@@ -197,6 +197,34 @@ Build of commit `5fcd3e3`, staged at `%TEMP%\nrq-w` from the working tree:
 
 These checks prove what the APK contains. They do not prove what the headset shows.
 
+### First headset session on `5fcd3e3`
+
+The user entered VR at 18:39:46 device time. The host stream (app uid, nothing cleared) recorded the following; the excerpt is `%TEMP%\q02-evidence\5fcd3e3-session-excerpt.log`.
+
+- First panel:
+  - `QuestMenu drawn menu 2048x1152 probe FF252628,FF60A5FA,FF2B2C2A`
+  - `QuestMenuTexture: prepared questMenu-5bc82169 2048x1152 in 131ms`
+  - `QuestMenu shown menu questMenu-5bc82169`
+
+  Later preparations took 51–56 ms.
+- 17 `shown` lines and 18 `released` lines. There were no `Error applying materials`, no `Could not download image`, and no `failed:` lines in the whole session.
+- Controller actions, all `state 1 source 1 activate`, each followed by one action:
+  - Solo, then the ring page was prepared and shown.
+  - Back, then the menu was shown.
+  - Solo again.
+  - Ready three times. Each press activated once, and release (2) and clicked (3) were ignored.
+  - Back.
+  - Solo.
+- Hover events came from source 1 (14 lines) and from head gaze, source 12 (28 lines). Gaze lines are logged before the filter and do not change the highlight.
+
+A Meta capture taken at 18:40:18 (`/sdcard/Oculus/Screenshots/com.djleg.neorobots-20261119-184018.jpg`, copied to `%TEMP%\q02-evidence`) shows the ring page:
+- The phone Neo / Rock 'Em Sock 'Em / Robots lettering.
+- "Both robots are in the ring. They stay idle until a later stage."
+- Ready (blue), Back (black with a white ring), and Exit (pink).
+- The ring with both robots below the panel.
+
+The panel's left edge is outside the capture's field of view. The capture does not show the controller ray or hit dot, so it says nothing about pointer alignment. Readability at full headset resolution, ray origin and depth, hover placement, Exit, controller Back, and the branch 01 lifecycle are still for the user to judge.
+
 ## Headset checklist
 
 Both gates below are **pending**. A passing JS test or a successful native compile does not close them. This document does not claim a worn test.
@@ -233,7 +261,7 @@ Branch 02, pending, after those:
   - `fda2d67b…` showed the clipped "Menu" fallback.
   - `02b17343…` (`ed03ede`) showed a white panel, explained above.
 
-  The `5fcd3e3` release is installed. Its VR panel, ray, hover, and Solo/Ready/Back/Exit have not been seen. A "material prepared" or "shown" log line proves Viro holds the texture before the quad mounts, not that the panel is readable.
+  On the `5fcd3e3` release, one headset capture shows the branded ring-page panel, and logcat shows Solo, Ready, and Back activating once per trigger press. The user has not yet signed off on readability, pointer alignment, Exit, or the branch 01 lifecycle. A "material prepared" or "shown" log line proves Viro held the texture before the quad mounted, not that the panel is readable.
 - Hover is baked into the PNG, so each hover change redraws and re-registers a 2048×1152 texture. Expect a visible delay before the highlight; it has not been measured on the headset.
 - Viro's HDR tone mapper is on for this scene and compresses Constant colours (white was about 227/255). Brand colours may look slightly darker than on the phone.
 - Head gaze still moves the reticle when no controller ray is tracked. The left controller does not move the reticle until its own trigger goes down.
