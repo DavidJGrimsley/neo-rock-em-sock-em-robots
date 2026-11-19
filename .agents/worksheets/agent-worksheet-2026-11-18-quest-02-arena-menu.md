@@ -1,6 +1,6 @@
 # Quest 02 arena menu
 
-- Status: ACTIVE. Pull request https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2 is open against `main`. The 2026-11-19 menu and OpenXR pointer fix is implemented and compiled. Headset gates remain pending. Roadmap checkbox 02 is not done.
+- Status: ACTIVE. Pull request https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2 is open against `main`. The worn release showed a clipped "Menu" because release drawables were passed to `BitmapFactory.decodeFile`. A replacement release is installed on the connected Quest 3S. Headset gates remain pending. Roadmap checkbox 02 is not done.
 - Task source: `project/agent/handoffs/2026-11-18-quest-02-arena-menu.md`
 - Control bootstrap: `79aff298941ea4b94acc788d2e3d3f1e344911fe` (packet and control `todo.md` were not edited)
 - Branch: `feat/quest-02-arena-menu`
@@ -45,6 +45,8 @@ The 2026-11-18 decision to keep the stock renderer, and the Ready path that call
 - `tests/quest-runtime.test.cjs` — scene file assertion and Quest plugin list
 - `tests/quest-renderer.test.cjs` — pointer patch pin and settings rewrite
 - `src/features/quest-vr/quest-menu-input.ts` — trigger source filter
+- `src/features/quest-vr/quest-menu-asset-uri.ts` — release resource names are copied to files before Canvas
+- `tests/quest-menu-release-assets.test.cjs` — release drawable names and packaged PNG/font bytes
 - `assets/arena/ui/quest-lettering/` — phone title PNGs
 - `tools/quest/build-viro-renderer.mjs` — pinned Quest renderer build
 - `tools/quest/with-quest-viro-renderer.cjs` — Quest-only Gradle project pointer
@@ -100,13 +102,23 @@ Commands ran in the worktree unless noted. Exit codes are the script exit codes.
 - Phone prebuild with `QUEST_BUILD` unset — exit 0. `settings.gradle` points `:viro_renderer` at the stock `node_modules` project. `MainApplication` uses `ViroPlatform.AR`. That phone tree was not assembled.
 - Worktree `package.json` was not rewritten. The control `todo.md` was not edited. No upstream pull request was opened.
 
+## 2026-11-19 release texture regression
+
+The installed release was byte-identical to `%TEMP%\nrq-apks\app-release.apk` (`fda2d67bddce372ffabbf05813832ed907c877c2616fe9c83b786d92880816da`, 137,269,925 bytes). On Quest 3S `3487C10J3706TQ` it showed a dark panel and the clipped word "Menu". That string is the `ViroText` fallback at font size 28. The patched renderer `.so` was already in that APK, and `QuestMenuTexture` was in `classes5.dex`. `aapt2` shows the menu PNGs and Noto fonts as `drawable/assets_arena_ui_*` and `raw/assets_arena_ui_*`, with PNG dimensions matching the repo files. They are not loose `assets/` files. `expo-asset` keeps those image resource names as `localUri` and skips the cache copy. `BitmapFactory.decodeFile` then fails. A pid log slice did not contain the exception because it was not logged. Controller "space not locatable" warnings were present and do not explain the word "Menu".
+
+- `npm test` — exit 0. `test:quest` 29. The new test reads the release APK and checks the packaged PNG and font bytes.
+- Quest stage `%TEMP%\nrq-w`, existing patched AAR, `QUEST_BUILD=1` prebuild, then the documented Gradle assemble. `BUILD SUCCESSFUL in 6m 35s`.
+- New release SHA-256 `02b17343c8b2b49b2910f037bf94a0dd5fb4dd75b992f3823aee30157dd56b63`, 137,289,097 bytes, 2026-11-19 22:42 UTC. Patched `.so` hash unchanged. Bundle contains `Menu asset did not copy to a file`. Signing certificate SHA-256 `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`, same as the installed app.
+- Exactly one Quest 3S was attached. `adb install -r` succeeded. Pulled `base.apk` matches that hash. `firstInstallTime` stayed `2026-11-18 19:01:45`. `lastUpdateTime` is `2026-11-19 17:43:55`. No uninstall and no data clear.
+- `am start` of `MainActivity` logged `ReactNativeJS: Running "main"` (pid 22490) with no fatal line in the sample. The VR scene was not opened. The release package is not debuggable, so the cache PNG was not read. This is not a worn pass.
+
 ## Blockers
 
 - Quest 01 headset gate: pending. PR #1 is merged, and this branch no longer contains the reference cube. The cube gate was not run on a headset.
-- Quest 02 headset gate: pending. Checklist is in `docs/quest-02-arena-menu.md`. The compile above does not close it. Do not claim pointer alignment, menu readability, Ready, Back, or Exit until the release APK from this commit is worn.
+- Quest 02 headset gate: pending. The clipped "Menu" release is replaced on the headset. Checklist is in `docs/quest-02-arena-menu.md`. Do not claim pointer alignment, menu readability, Ready, Back, or Exit until this installed release is worn.
 - Roadmap checkbox 02 stays open. The control `todo.md` was not edited.
 - Pull request: https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2. Updates use a normal push. No force push.
 
 ## Next action
 
-Install the release APK built from the commit that contains this menu and pointer fix, not the older `c68a65a` APK. Run the branch 02 checklist. Record the headset model, OS build, git SHA, and whether the ray starts at the controller, Ready stays in the lobby, and Back and Exit leave the right state. Leave roadmap checkbox 02 unchecked until that gate and the branch 01 gate both pass.
+Wear the release installed on 2026-11-19 17:43:55 device time (Quest 3S `3487C10J3706TQ`, SHA-256 `02b17343c8b2b49b2910f037bf94a0dd5fb4dd75b992f3823aee30157dd56b63`). Enter VR and run the branch 02 checklist. Record whether the panel shows the phone lettering and Solo/Ready/Back/Exit, whether the ray starts at the controller, and whether Ready stays in the lobby. Leave roadmap checkbox 02 unchecked until that gate and the branch 01 gate both pass.

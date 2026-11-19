@@ -300,8 +300,13 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
     fs.existsSync(path.join(__dirname, '../src/features/quest-vr/quest-smoke-scene.native.tsx')),
     false
   );
+  assert.match(scene, /resolveQuestMenuAssetFile/);
+  assert.doesNotMatch(scene, /localUri \?\? asset\.uri/);
   assert.match(moduleSource, /"image"/);
   assert.match(moduleSource, /Typeface\.createFromFile/);
+  assert.match(moduleSource, /getIdentifier/);
+  assert.match(moduleSource, /android_res/);
+  assert.match(moduleSource, /quest-menu-src/);
   assert.match(moduleSource, /keep/);
   assert.doesNotMatch(moduleSource, /dropLast/);
   assert.doesNotMatch(moduleSource, /viro_renderer|OpenXR|XrSession|nativeDraw/);

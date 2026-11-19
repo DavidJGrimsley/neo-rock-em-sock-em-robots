@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { requireNativeModule } from 'expo';
 import { Asset } from 'expo-asset';
 import {
   Viro3DObject,
@@ -35,6 +36,7 @@ import {
   type QuestMenuAction,
   type QuestMenuAssets,
 } from './quest-menu-layout.ts';
+import { resolveQuestMenuAssetFile } from './quest-menu-asset-uri.ts';
 import { questPointerHover, questTriggerPress, type QuestPressState } from './quest-menu-input.ts';
 import { questRuntime } from './quest-runtime-store.ts';
 
@@ -89,7 +91,9 @@ ViroMaterials.createMaterials({
 
 const fallbackStyle = {
   fontFamily: 'sans-serif',
-  fontSize: 28,
+  // Point size on a metre-sized quad. 28pt clipped the failure string to "Menu"
+  // on a Quest 3S. This text is only the failure path.
+  fontSize: 4,
   color: '#f8fafc',
   textAlign: 'left',
   textAlignVertical: 'top',
@@ -101,10 +105,35 @@ function leave(session: QuestArenaSession) {
   exitVRScene();
 }
 
+async function copyPackagedMenuAsset(uri: string, hash: string | null, type: string) {
+  const copied = await requireNativeModule<{
+    downloadAsync(uri: string, hash: string | null, type: string): Promise<unknown>;
+  }>('ExpoAsset').downloadAsync(uri, hash, type);
+  if (typeof copied === 'string') return copied;
+  if (copied && typeof copied === 'object' && 'uri' in copied) {
+    const nested = copied.uri;
+    if (typeof nested === 'string') return nested;
+  }
+  const text = copied == null ? '' : String(copied);
+  if (!text || text === '[object Object]') {
+    throw new Error('ExpoAsset.downloadAsync did not return a URI.');
+  }
+  return text;
+}
+
 async function localAssetUri(moduleId: number) {
   const asset = Asset.fromModule(moduleId);
-  await asset.downloadAsync();
-  return asset.localUri ?? asset.uri;
+  // Asset.downloadAsync() returns immediately for a release image whose localUri
+  // is still the drawable resource name. Copy that name through ExpoAsset.
+  return resolveQuestMenuAssetFile(
+    {
+      uri: asset.uri,
+      localUri: asset.localUri,
+      hash: asset.hash,
+      type: asset.type,
+    },
+    copyPackagedMenuAsset
+  );
 }
 
 function QuestFighter({
@@ -274,25 +303,37 @@ export default function QuestArenaScene() {
 
   useEffect(() => {
     let cancel = false;
+    const keys = Object.keys(menuAssetModules) as (keyof typeof menuAssetModules)[];
     Promise.all(
-      (Object.keys(menuAssetModules) as (keyof typeof menuAssetModules)[]).map(async (key) => [
-        key,
-        await localAssetUri(menuAssetModules[key]),
-      ])
-    ).then(
-      (entries) => {
-        if (cancel) return;
-        const uri = Object.fromEntries(entries) as Record<keyof typeof menuAssetModules, string>;
-        setAssets({
-          backgroundUri: uri.background,
-          fonts: { body: uri.body, button: uri.button, serif: uri.serif },
-          titles: { neo: uri.neo, rock: uri.rock, robots: uri.robots },
-        });
-      },
-      () => {
-        if (!cancel) setAssets({});
-      }
-    );
+      keys.map(async (key) => {
+        try {
+          return [key, await localAssetUri(menuAssetModules[key])] as const;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`Quest menu asset ${key} failed: ${message}`);
+          return [key, null] as const;
+        }
+      })
+    ).then((entries) => {
+      if (cancel) return;
+      const uri = Object.fromEntries(entries) as Record<
+        keyof typeof menuAssetModules,
+        string | null
+      >;
+      setAssets({
+        ...(uri.background ? { backgroundUri: uri.background } : {}),
+        fonts: {
+          ...(uri.body ? { body: uri.body } : {}),
+          ...(uri.button ? { button: uri.button } : {}),
+          ...(uri.serif ? { serif: uri.serif } : {}),
+        },
+        titles: {
+          ...(uri.neo ? { neo: uri.neo } : {}),
+          ...(uri.rock ? { rock: uri.rock } : {}),
+          ...(uri.robots ? { robots: uri.robots } : {}),
+        },
+      });
+    });
     return () => {
       cancel = true;
     };
@@ -313,8 +354,10 @@ export default function QuestArenaScene() {
       (result) => {
         if (cancel || !menuTextureIsCurrent(step.generation, textureStep.current.generation))
           return;
-        if (!result) setTextureError('Menu texture module is unavailable.');
-        else {
+        if (!result) {
+          console.error('Quest menu texture failed: Menu texture module is unavailable.');
+          setTextureError('Menu texture module is unavailable.');
+        } else {
           const name = questMenuMaterialName(result.uri);
           ViroMaterials.createMaterials({
             [name]: {
@@ -328,11 +371,15 @@ export default function QuestArenaScene() {
           setTextureUri(result.uri);
           setMaterialName(name);
           setTextureError(null);
+          console.warn(`Quest menu texture ${result.width}x${result.height} ${result.uri}`);
         }
       },
       (error: unknown) => {
-        if (!cancel && menuTextureIsCurrent(step.generation, textureStep.current.generation))
-          setTextureError(error instanceof Error ? error.message : String(error));
+        if (!cancel && menuTextureIsCurrent(step.generation, textureStep.current.generation)) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`Quest menu texture failed: ${message}`);
+          setTextureError(message);
+        }
       }
     );
     return () => {

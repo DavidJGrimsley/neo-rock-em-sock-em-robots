@@ -103,9 +103,37 @@ Quest native build the same day, staged at `%TEMP%\nrq-w` from the working tree,
 - `libviro_renderer.so` in both `app-release.apk` and `app-debug.apk` is the patched hash above, 7115456 bytes. The stock AAR in the staged `node_modules` and in the worktree stayed `2b3280493c4a788cc14319e263f1c2769bf3e54b22c9e4cc7673319967ccacd4`.
 - A second prebuild with `QUEST_BUILD` unset pointed `:viro_renderer` at `../node_modules/@reactvision/react-viro/android/viro_renderer` and set `ViroPlatform.AR`. That phone tree was not assembled.
 - Release permissions: `INTERNET`, `MODIFY_AUDIO_SETTINGS`, `VIBRATE`, `ACCESS_NETWORK_STATE`, `WAKE_LOCK`, and `com.djleg.neorobots.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`. Camera, autofocus, accelerometer, and gyroscope are `required=false`. OpenGL ES 3.0 (`0x00030000`) and `android.hardware.vr.headtracking` are `required=true`. Hand tracking, passthrough, `android.software.vr.mode`, and `android.hardware.vr.high_performance` are `required=false`. `com.google.ar.core` is `optional`. `com.oculus.supportedDevices` is `quest3|quest3s`. Activities include `MainActivity` and `VRActivity`.
-- Release APK: `%TEMP%\nrq-apks\app-release.apk` (137,269,925 bytes, 2026-11-19 16:08 UTC). Debug APK is beside it (118,904,436 bytes). TEMP can delete both. Neither APK was installed.
+- Release APK: `%TEMP%\nrq-apks\app-release.apk` (137,269,925 bytes, SHA-256 `fda2d67bddce372ffabbf05813832ed907c877c2616fe9c83b786d92880816da`, 2026-11-19 16:08 UTC). Debug APK is beside it (118,904,436 bytes). That release was later installed on the Quest. It is the build that showed the clipped "Menu" panel.
 
 The earlier stock-renderer APK from `c68a65a` does not validate this menu or this pointer patch.
+
+## Release texture regression
+
+The worn screenshot of that installed release is a dark panel and the clipped word "Menu". That is the scene's `ViroText` fallback. Its string starts with "Menu texture failed." and its font size was 28 points on a metre-sized quad, so the rest of the error was clipped. It is not the 2048×1152 branded PNG.
+
+The installed APK was byte-identical to the release above. `libviro_renderer.so` inside it was the patched hash `182db849a9a7a59db6d2abb4535fa8c93956c4820edd8bd447beb1c90a27872e`. The public-tag JNI gap did not cause this panel. `QuestMenuTexture` is in the APK. A live `logcat` slice from the running VR process did not contain the texture exception, because the scene stored it in React state and did not log it. That slice did show one OpenXR layer at about 72 fps and controller "space not locatable" warnings. Those warnings do not produce the word "Menu".
+
+`aapt2 dump resources` on that APK names the menu files as Android resources, and their bytes match the repo files:
+
+| Resource | Packaged entry | Repo file |
+| --- | --- | --- |
+| `drawable/assets_arena_ui_menubackground` | `res/dw.png` | `assets/arena/ui/menu-background.png` |
+| `drawable/assets_arena_ui_questlettering_neo` | `res/7X.png` | `assets/arena/ui/quest-lettering/neo.png` |
+| `drawable/assets_arena_ui_questlettering_rock` | `res/yq.png` | `assets/arena/ui/quest-lettering/rock.png` |
+| `drawable/assets_arena_ui_questlettering_robots` | `res/0W.png` | `assets/arena/ui/quest-lettering/robots.png` |
+| `raw/assets_arena_ui_arenanotosans` | `res/EP.ttf` | `assets/arena/ui/ArenaNotoSans.ttf` |
+| `raw/assets_arena_ui_arenanotosanssemibold` | `res/00.ttf` | `assets/arena/ui/ArenaNotoSansSemibold.ttf` |
+| `raw/assets_arena_ui_arenanotoserif` | `res/F6.ttf` | `assets/arena/ui/ArenaNotoSerif.ttf` |
+
+PNG width and height match. None of these paths is a loose file under `assets/`. In a release build, `expo-asset` marks an image with a size as already downloaded and sets `localUri` to the drawable name, such as `assets_arena_ui_menubackground`. `Asset.downloadAsync()` then returns without copying. `BitmapFactory.decodeFile` cannot open a resource name, so the canvas throws "Menu texture image could not be decoded." Fonts do not take that shortcut, but the background image fails first.
+
+The scene now copies a non-file URI through `ExpoAsset.downloadAsync` before drawing. The canvas module also opens a raw or drawable resource, or `file:///android_res/`, and caches the bytes under `quest-menu-src`. A real `file:` URI is used as-is. Failures are logged as `Quest menu texture failed:`. The fallback text is 4 points so a later failure is not only the word "Menu".
+
+`npm test` after this change exited 0. `test:quest` is 29, including the release resource names and a read of the release APK's packaged PNG and font bytes.
+
+Quest rebuild at `%TEMP%\nrq-w`, same renderer AAR, JDK 17.0.16, NDK `27.1.12297006`: `QUEST_BUILD=1 npx expo prebuild -p android --clean --no-install`, then the documented Gradle release and debug assemble. `BUILD SUCCESSFUL in 6m 35s`. The new release is 137,289,097 bytes, SHA-256 `02b17343c8b2b49b2910f037bf94a0dd5fb4dd75b992f3823aee30157dd56b63` (2026-11-19 22:42 UTC). It still contains the patched `.so` hash above. Its JavaScript bundle contains `Menu asset did not copy to a file`. The debug signing certificate SHA-256 is `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`, the same certificate as the installed app.
+
+Exactly one device was attached: serial `3487C10J3706TQ`, model Quest 3S, device `panther`, incremental `4183210015200610`. `adb install -r` of that release succeeded. The pulled `base.apk` matches the hash above. `firstInstallTime` stayed `2026-11-18 19:01:45`. `lastUpdateTime` became `2026-11-19 17:43:55`. There was no uninstall and no data clear. Starting `MainActivity` reached `ReactNativeJS: Running "main"` (pid 22490) with no fatal exception in the sampled log. That launch is the 2D launcher, not the VR menu. The release package is not debuggable, so the generated cache PNG was not pulled. No worn view of this build was captured.
 
 ## Headset checklist
 
@@ -133,7 +161,7 @@ Branch 02, pending, after those:
 
 ## Known limits
 
-- No headset observation for branch 01 or branch 02. The APKs above were not installed.
+- No worn observation of this menu. The previous release was worn and showed only the clipped "Menu" fallback. The replacement release is installed, and the 2D launcher started, but the VR panel, ray, hover, and Solo/Ready/Back/Exit have not been observed on this build.
 - Head gaze still moves the reticle when no controller ray is tracked. The left controller does not move the reticle until its own trigger goes down.
 - There is no controller model. The origin marker is a sphere, not a licensed controller mesh.
 - Public-tag rebuilds omit ReactVisionCCA and the ARCore image-tracker JNI that the published binary has. Phone builds keep the published binary.

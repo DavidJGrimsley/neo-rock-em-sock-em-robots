@@ -1,5 +1,7 @@
 package expo.modules.questmenutexture
 
+import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -16,22 +18,82 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
+import java.security.MessageDigest
 
 // Rasterizes the headset menu to a cache PNG. Drawing stays in this process.
 class QuestMenuTextureModule : Module() {
   private val drawLock = Any()
   private val typefaces = HashMap<String, Typeface>()
 
-  private fun fileFromUri(value: String): File {
-    val path = if (value.startsWith("file:")) Uri.parse(value).path else value
-    require(!path.isNullOrEmpty()) { "Menu texture file path is empty." }
-    return File(path)
+  private fun existingFile(value: String): File? {
+    if (value.startsWith("file:///android_res/")) return null
+    val path = when {
+      value.startsWith("file:") -> Uri.parse(value).path
+      value.startsWith("/") -> value
+      else -> null
+    } ?: return null
+    if (path.startsWith("/android_res/")) return null
+    val file = File(path)
+    return if (file.isFile && file.length() > 0L) file else null
+  }
+
+  @SuppressLint("DiscouragedApi")
+  private fun openPackaged(context: Context, value: String): InputStream? {
+    if (value.startsWith("file:///android_res/")) {
+      val segments = Uri.parse(value).pathSegments
+      if (segments.size < 3) return null
+      val directory = segments[1].substringBefore('-')
+      val name = segments[2].substringBeforeLast('.', segments[2])
+      val id = context.resources.getIdentifier(name, directory, context.packageName)
+      return if (id != 0) context.resources.openRawResource(id) else null
+    }
+    if (value.contains(":")) return null
+    val id = context.resources.getIdentifier(value, "raw", context.packageName).takeIf { it != 0 }
+      ?: context.resources.getIdentifier(value, "drawable", context.packageName).takeIf { it != 0 }
+      ?: return null
+    return context.resources.openRawResource(id)
+  }
+
+  private fun sourceCacheName(value: String, extension: String): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
+    val hex = digest.joinToString("") { byte -> "%02x".format(byte) }.take(20)
+    val suffix = extension.lowercase().filter { it.isLetterOrDigit() }.ifEmpty { "bin" }
+    return "src-$hex.$suffix"
+  }
+
+  // Release drawables and raw fonts are resource names, not filesystem paths.
+  // Copy those bytes into the cache once so Canvas and Typeface can read them.
+  private fun materialize(value: String, extension: String): File {
+    existingFile(value)?.let { return it }
+    val context = appContext.reactContext ?: error("Menu texture has no Android context.")
+    val input = openPackaged(context, value) ?: error("Menu texture asset is not a file: $value")
+    val directory = File(context.cacheDir, "quest-menu-src")
+    if (!directory.isDirectory && !directory.mkdirs()) error("Menu texture cache directory was not created.")
+    val file = File(directory, sourceCacheName(value, extension))
+    if (file.isFile && file.length() > 0L) {
+      input.close()
+      return file
+    }
+    try {
+      input.use { stream ->
+        FileOutputStream(file).use { out ->
+          val copied = stream.copyTo(out)
+          if (copied <= 0L) error("Menu texture asset was empty: $value")
+        }
+      }
+    } catch (failure: Exception) {
+      file.delete()
+      throw failure
+    }
+    return file
   }
 
   private fun typeface(path: String): Typeface {
-    typefaces[path]?.let { return it }
-    val face = Typeface.createFromFile(fileFromUri(path))
-    typefaces[path] = face
+    val file = materialize(path, "ttf")
+    typefaces[file.absolutePath]?.let { return it }
+    val face = Typeface.createFromFile(file)
+    typefaces[file.absolutePath] = face
     return face
   }
 
@@ -66,8 +128,9 @@ class QuestMenuTextureModule : Module() {
             )
           }
           "image" -> {
-            val source = BitmapFactory.decodeFile(fileFromUri(op.getString("uri")).absolutePath)
-              ?: error("Menu texture image could not be decoded.")
+            val imageUri = op.getString("uri")
+            val source = BitmapFactory.decodeFile(materialize(imageUri, "png").absolutePath)
+              ?: error("Menu texture image could not be decoded: $imageUri")
             try {
               paint.style = Paint.Style.FILL
               paint.color = Color.WHITE
@@ -131,7 +194,10 @@ class QuestMenuTextureModule : Module() {
       if (keepJson != null) {
         for (index in 0 until keepJson.length()) {
           val value = keepJson.optString(index)
-          if (value.isNotEmpty()) keep.add(fileFromUri(value).absolutePath)
+          if (value.isNotEmpty()) {
+            val kept = existingFile(value)
+            if (kept != null) keep.add(kept.absolutePath)
+          }
         }
       }
       directory.listFiles()?.forEach { cached ->
