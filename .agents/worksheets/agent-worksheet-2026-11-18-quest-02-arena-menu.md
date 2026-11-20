@@ -1,6 +1,6 @@
 # Quest 02 arena menu
 
-- Status: ACTIVE. Pull request https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2 is open against `main`. The worn `ed03ede` release showed a white panel. Logcat from a fresh VR entry on that build showed the cause: the panel quad mounted before Viro registered its material. Commit `5fcd3e3` registers and checks the material natively before the quad mounts. Its release is installed on the connected Quest 3S. A headset capture shows the branded panel, and logcat shows Solo, Ready, and Back working with no material errors. The gates remain pending the user's sign-off. Roadmap checkbox 02 is not done.
+- Status: BLOCKED. Wrap-up stopped before any merge. Pull request https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2 is merged into `main` at 2026-11-19T23:52:38Z, merge commit `455bac694f5dfc607882f758c0729edd2c928ac7`. Roadmap checkbox 02 stays unchecked. The user reported that the headset is working, including exiting and re-entering, and that screenshot `C:/Users/DJLeg/AppData/Local/Temp/codex-clipboard-e3e9c130-dca5-4361-9fe1-4b5512544d57.png` shows the branded menu and ring. That report does not complete the checkbox gate. The earlier white-panel cause and `5fcd3e3` material fix remain as recorded below.
 - Task source: `project/agent/handoffs/2026-11-18-quest-02-arena-menu.md`
 - Control bootstrap: `79aff298941ea4b94acc788d2e3d3f1e344911fe` (packet and control `todo.md` were not edited)
 - Branch: `feat/quest-02-arena-menu`
@@ -166,27 +166,43 @@ The log stream stopped at its 2-hour limit with zero material or image-load erro
 
 At 20:29:33 device time, another session installed a different APK (`20beef8d…`, with a Quest 03 `posture` action) over `5fcd3e3`. This session did not reinstall over it. Before the user judges branch 02, reinstall `%TEMP%\nrq-apks-5fcd3e3\app-release.apk` with `adb install -r`, or coordinate with the Quest 03 owner.
 
+## 2026-11-19 wrap-up
+
+The implementation owner, Claude PID 40012 (`claude.exe`, started 2026-11-19 18:21:36), had exited before this note was written. No other Claude process referenced this worktree.
+
+User report, in the user's words: the headset is working, including exiting and re-entering. The cited screenshot shows the branded menu and the ring. This note does not add Ready, Back, or Solo selections, a Quest 01 device-gate result, or pointer observations to that report.
+
+The same screenshot shows the title, the sentence "Both robots are in the ring. They stay idle until a later stage.", and buttons labeled Ready, Back, and Exit, with a ring below the panel. The robots are not clearly distinguishable in that capture. Visible labels are not a report that those controls were selected.
+
+Checkbox gate, still unmet as a whole: on Quest, select Solo, Start, Back, and Exit, see both robots and the arena, and return safely. Dependency: 01 merged and its device gate passed. PR #1 is merged. This user report does not say the Quest 01 device gate passed. Exiting and re-entering is the lifecycle part the user did report.
+
+Match behavior in the current source: Solo constructs `ArenaMatch('solo')` and calls `setLandscape(true)` only. It throws if that setup asserts tracking or an AR placement. Ready does not call `ArenaMatch.ready()`. `questReadyAcknowledgement` returns `called: false` and `started: false`. The saved line is "Ready saved. Both robots stay idle. Combat controls are not in this stage." A playable match remains task 07.
+
+`project/todo.md` was not edited. Checkbox 02 is still `[ ]`. The control repo was left `ahead 2`, with its existing `todo.md` modification and untracked `agent/handoffs/2026-11-19-quest-03-head-rig.md`.
+
+PR #2: https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2
+
+- State: MERGED. Base `main`. Merged head `077298c09baa2877d711b6fb29cbab69d300384c` is reachable from `origin/main` (`455bac694f5dfc607882f758c0729edd2c928ac7`).
+- GitHub check `verify` on that pull request completed with SUCCESS.
+- One Codex review thread on `modules/quest-menu-texture/native/src/main/java/expo/modules/questmenutexture/QuestMenuTextureModule.kt` is unresolved and outdated. Current `render()` puts the new PNG on the keep list before it deletes other `panel-*` files. No code was changed for that thread.
+- Feature-branch tip `9e7acfb63ae361923db50e4a334fb84cd5c0be88` is not on `origin/main`. Commits only on the feature branch before this note: `986fc44` and `9e7acfb`.
+- No `project/release-policy.json`. Nothing was merged to `main` by this wrap-up.
+
+Doctor ran before this commit:
+
+`mds doctor F:\ReactNativeApps\neo-rock-em-sock-em-robots-i2Workspace\neo-rock-em-sock-em-robots-quest-02-arena-menu --ci --timeout-ms 600000`
+
+Exit 1. Score 81/100. 1 error, 2 warnings, 13 passed, 4 skipped. Lint, typecheck, tests, and `npm run build` passed. `npm run expo-doctor` failed 1 of 21 checks: patch mismatches for `@expo/ui` 57.0.23 vs ~57.0.26, `expo` 57.0.28 vs ~57.0.33, `expo-asset` 57.0.19 vs ~57.0.21, `expo-constants` 57.0.21 vs ~57.0.24, `expo-dev-client` 57.0.20 vs ~57.0.21, `expo-linking` 57.0.12 vs ~57.0.14, `expo-router` 57.0.26 vs ~57.0.31, and `expo-splash-screen` 57.0.10 vs ~57.0.11. `package.json` and `package-lock.json` match `origin/main`, so those versions were not changed. Warnings: the source checkout has no `info.md`, `todo.md`, or `guidelines.md`, and React Doctor reported 0 errors and 27 warnings. The MDS Doctor MCP server was not connected. This run used the `mds` CLI on PATH.
+
 ## Blockers
 
-- Quest 01 headset gate: pending. PR #1 is merged, and this branch no longer contains the reference cube. The cube gate was not run on a headset.
-- Quest 02 headset gate: pending the user's sign-off. On `5fcd3e3`:
-  - The branded panel rendered (headset capture).
-  - Solo, Ready, and Back activated once per press (logcat).
-
-  Not yet confirmed by the user: readability, ray origin and depth, hit-dot and hover placement, Exit, controller Back, and "no second OpenXR session". Checklist is in `docs/quest-02-arena-menu.md`.
-- Roadmap checkbox 02 stays open. The control `todo.md` was not edited.
-- Pull request: https://github.com/DavidJGrimsley/neo-rock-em-sock-em-robots/pull/2. Updates use a normal push. No force push.
+- Quest 01 headset gate: still not reported. PR #1 is merged. This user report does not pass that gate.
+- Quest 02 checkbox gate: not complete. The user reported a working headset, exiting and re-entering, and a screenshot of the branded menu and ring. The report does not include Solo, Start, Back, or Exit selections, a clear view of both robots, or pointer alignment.
+- Earlier `5fcd3e3` logcat, kept above, recorded Solo, Ready, and Back activations and a later Exit. That log is not restated here as this user's wrap-up report.
+- Roadmap checkbox 02 stays unchecked. The control `todo.md` was not edited.
+- `mds doctor --ci` failed on the inherited Expo patch mismatch. No dependency change was made.
+- Pull request #2 is already merged. Feature-branch documentation after `077298c` is not on `main`. No force push and no merge were used.
 
 ## Next action
 
-The user judges the `5fcd3e3` session already worn, or wears it again (Quest 3S `3487C10J3706TQ`, SHA-256 `90065614…`).
-
-Record:
-- Is the panel readable, and are the lettering and tagline faithful to the phone?
-- Does the ray start at the controller and stop on the panel with the hit dot on the aimed button?
-- Does the hover highlight follow the ray quickly enough? Each hover redraws the texture, about 50 ms to register.
-- Does Ready show Set?
-- Do Exit and controller Back leave VR?
-- Branch 01 lifecycle.
-
-Leave roadmap checkbox 02 unchecked until that gate and the branch 01 gate both pass.
+A person needs to merge any follow-up if the feature-branch notes should land on `main`. Checkbox 02 stays unchecked until the full Quest 02 gate and the Quest 01 device gate are both verified. This wrap-up does not request another headset session and does not merge to `main`.
