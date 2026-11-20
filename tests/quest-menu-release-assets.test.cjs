@@ -3,9 +3,10 @@ const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const { questMenuFileUri, resolveQuestMenuAssetFile } = require(
-  '../src/features/quest-vr/quest-menu-asset-uri.ts'
-);
+const {
+  questMenuFileUri,
+  resolveQuestMenuAssetFile,
+} = require('../src/features/quest-vr/quest-menu-asset-uri.ts');
 
 // Same transform as @react-native/assets-registry/path-support.js
 // getAndroidResourceIdentifier. Expo's embedded httpServerLocation for this
@@ -36,22 +37,25 @@ const FONTS = {
 };
 
 function releaseApk() {
-  const candidates = [
-    process.env.QUEST_RELEASE_APK,
-    process.env.TEMP && path.join(process.env.TEMP, 'nrq-apks', 'app-release.apk'),
-    process.env.TEMP && path.join(process.env.TEMP, 'nrq-device', 'base.apk'),
-  ].filter(Boolean);
-  return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+  const apk = process.env.QUEST_RELEASE_APK;
+  return apk && fs.existsSync(apk) ? apk : null;
 }
 
 function aapt2() {
-  const roots = [process.env.ANDROID_HOME, process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Android', 'sdk')].filter(Boolean);
+  const roots = [
+    process.env.ANDROID_HOME,
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Android', 'sdk'),
+  ].filter(Boolean);
   for (const root of roots) {
     const tools = path.join(root, 'build-tools');
     if (!fs.existsSync(tools)) continue;
     const versions = fs.readdirSync(tools).sort().reverse();
     for (const version of versions) {
-      const candidate = path.join(tools, version, process.platform === 'win32' ? 'aapt2.exe' : 'aapt2');
+      const candidate = path.join(
+        tools,
+        version,
+        process.platform === 'win32' ? 'aapt2.exe' : 'aapt2'
+      );
       if (fs.existsSync(candidate)) return candidate;
     }
   }
@@ -92,7 +96,10 @@ test('a release drawable name is not a Canvas file and must be copied', async ()
     assert.equal(questMenuFileUri(file), file);
   }
 
-  assert.equal(questMenuFileUri('file:///android_res/drawable/assets_arena_ui_menubackground'), null);
+  assert.equal(
+    questMenuFileUri('file:///android_res/drawable/assets_arena_ui_menubackground'),
+    null
+  );
   await assert.rejects(
     () =>
       resolveQuestMenuAssetFile(
@@ -104,7 +111,12 @@ test('a release drawable name is not a Canvas file and must be copied', async ()
   const cached = 'file:///data/user/0/com.djleg.neorobots/cache/ExponentAsset-ready.png';
   let calls = 0;
   const ready = await resolveQuestMenuAssetFile(
-    { uri: 'http://127.0.0.1:8081/assets/menu-background.png', localUri: cached, hash: 'ready', type: 'png' },
+    {
+      uri: 'http://127.0.0.1:8081/assets/menu-background.png',
+      localUri: cached,
+      hash: 'ready',
+      type: 'png',
+    },
     async () => {
       calls += 1;
       return 'file:///should-not-be-used.png';
@@ -114,71 +126,53 @@ test('a release drawable name is not a Canvas file and must be copied', async ()
   assert.equal(calls, 0);
 });
 
-test('the release APK stores menu art as resources, not loose asset files', () => {
+test('the release APK packages the compositor panel module, patched renderer, and clean bundle without Quest branding', () => {
   const apk = releaseApk();
-  const aapt = aapt2();
-  if (!apk || !aapt) {
-    assert.ok(true, 'release APK or aapt2 is not on this machine');
+  if (!apk) {
+    assert.ok(true, 'QUEST_RELEASE_APK is not set on this run');
     return;
   }
-  const dump = execFileSync(aapt, ['dump', 'resources', apk], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-  const packaged = new Map();
-  let current = null;
-  for (const line of dump.split(/\r?\n/)) {
-    const named = line.match(/(?:drawable|raw)\/(assets_arena_ui_[a-z0-9_]+)\s*$/);
-    if (named && line.includes('resource ')) {
-      current = named[1];
-      if (!packaged.has(current)) packaged.set(current, []);
-      continue;
-    }
-    const file = line.match(/\(file\)\s+(\S+)/);
-    if (current && file) packaged.get(current).push(file[1]);
-  }
-
+  const crypto = require('node:crypto');
   const entries = readZipListing(apk);
-  for (const name of ['menu-background.png', 'quest-lettering/neo.png', 'ArenaNotoSans.ttf']) {
+  for (const name of [
+    'quest-lettering/neo.png',
+    'quest-lettering/rock.png',
+    'quest-lettering/robots.png',
+  ]) {
     assert.equal(
-      entries.some((entry) => entry.endsWith(name)),
+      entries.some((entry) => entry.includes(name) || entry.includes('questlettering')),
       false,
-      `${name} must not be a loose APK asset path`
+      `${name} must not be packaged in the clean compositor APK`
     );
   }
-
-  const expected = [
-    ['assets_arena_ui_menubackground', 'assets/arena/ui/menu-background.png', 'png'],
-    ['assets_arena_ui_questlettering_neo', 'assets/arena/ui/quest-lettering/neo.png', 'png'],
-    ['assets_arena_ui_questlettering_rock', 'assets/arena/ui/quest-lettering/rock.png', 'png'],
-    ['assets_arena_ui_questlettering_robots', 'assets/arena/ui/quest-lettering/robots.png', 'png'],
-    ['assets_arena_ui_arenanotosans', 'assets/arena/ui/ArenaNotoSans.ttf', 'ttf'],
-    ['assets_arena_ui_arenanotosanssemibold', 'assets/arena/ui/ArenaNotoSansSemibold.ttf', 'ttf'],
-    ['assets_arena_ui_arenanotoserif', 'assets/arena/ui/ArenaNotoSerif.ttf', 'ttf'],
-  ];
-  for (const [resourceName, repoFile, kind] of expected) {
-    const files = packaged.get(resourceName);
-    assert.ok(files && files.length > 0, `missing packaged resource ${resourceName}`);
-    const entry = files[0];
-    assert.equal(entries.includes(entry), true, entry);
-    const packed = readZipEntry(apk, entry);
-    const source = fs.readFileSync(path.join(__dirname, '..', repoFile));
-    if (kind === 'png') {
-      assert.deepEqual(pngSize(packed), pngSize(source), resourceName);
-    } else {
-      assert.equal(packed.subarray(0, 4).toString('hex'), source.subarray(0, 4).toString('hex'));
-      assert.ok(packed.length > 1000, resourceName);
-    }
-    assert.equal(questMenuFileUri(resourceName), null);
+  assert.equal(entries.includes('lib/arm64-v8a/libviro_renderer.so'), true);
+  const provenanceFile = path.join(__dirname, '../native/quest-viro-renderer/provenance.json');
+  if (fs.existsSync(provenanceFile)) {
+    const provenance = JSON.parse(fs.readFileSync(provenanceFile, 'utf8'));
+    const soBytes = readZipEntry(apk, 'lib/arm64-v8a/libviro_renderer.so');
+    const soSha = crypto.createHash('sha256').update(soBytes).digest('hex');
+    assert.equal(soSha, provenance.rendererSha256);
   }
+  const dexEntries = entries.filter((entry) => /^classes\d*\.dex$/.test(entry));
+  assert.ok(dexEntries.length > 0, 'release APK has dex files');
+  const hasQuestPanelModule = dexEntries.some((entry) =>
+    readZipEntry(apk, entry).includes('QuestPanelModule')
+  );
+  assert.equal(hasQuestPanelModule, true, 'QuestPanelModule must be compiled into APK dex');
 
   const bundle = readZipEntry(apk, 'assets/index.android.bundle');
-  assert.ok(bundle.includes('Menu texture failed'));
-  if (process.env.QUEST_REQUIRE_MENU_FIX === '1') {
-    assert.ok(bundle.includes('Menu asset did not copy to a file'));
-    assert.ok(bundle.includes('Quest menu texture failed:'));
-  }
+  assert.ok(bundle.includes('QuestHeadRig'));
+  assert.ok(bundle.includes('questMenuLayerMask'));
+  assert.ok(bundle.includes('QuestPanel'));
+  assert.equal(bundle.includes('Menu texture failed'), false);
+  assert.equal(bundle.includes('quest-lettering'), false);
 });
 
 function readZipListing(apk) {
-  return execFileSync(process.execPath, ['-e', zipScript('list'), apk], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
+  return execFileSync(process.execPath, ['-e', zipScript('list'), apk], {
+    encoding: 'utf8',
+    maxBuffer: 8 * 1024 * 1024,
+  })
     .split(/\r?\n/)
     .filter(Boolean);
 }

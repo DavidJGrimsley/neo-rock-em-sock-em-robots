@@ -21,6 +21,11 @@ export default function QuestXRNavigator({
       vrInitialScene={vrInitialScene}
       passthroughEnabled={false}
       handTrackingEnabled={false}
+      // Keep HDR/bloom off so Viro renders straight to the OpenXR eye swapchain
+      // instead of alpha-blending the tone-map blit over the opaque clear (which
+      // would overwrite the zero-alpha compositor mask hole back to alpha 1).
+      hdrEnabled={false}
+      bloomEnabled={false}
       onExitViro={questOnExitViro}
       renderQuestPanel={renderQuestPanel}
     />

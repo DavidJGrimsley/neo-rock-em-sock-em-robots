@@ -1,21 +1,24 @@
-// Pixel rectangles and metre frames are the same buttons. The texture draws the
-// pixels; invisible controller targets use the metre frames. Y is up in metres
-// and down in pixels. Colors are the phone dark theme. Android Canvas reads
-// #AARRGGBB, so translucent fills are converted from the CSS #RRGGBBAA values.
+// Pixel rectangles and metre frames are the same buttons. The headset menu
+// layer (quest-menu-compositor.ts) draws the pixels with Android Canvas;
+// invisible controller targets use the metre frames. Y is up in metres and
+// down in pixels.
 
 export const QUEST_MENU_TEXTURE = { widthPx: 2048, heightPx: 1152 } as const;
 export const QUEST_MENU_SIZE = { widthM: 1.6, heightM: 0.9 } as const;
 
 // Child of menuFrame(cal). Default calibration is the identity, so these metres
-// match OpenXR LOCAL at eye height y = 0. The ring panel is upright and below
-// the opponent: center (0, -0.78, -0.5), about 0.93 m from the eye.
+// match OpenXR LOCAL at eye height y = 0. Art and hit targets share this node.
+// - menu: center 1.50 m away, 3 degrees below eye level, about 56 degrees wide.
+// - ring: upright, center 1.60 m away and 32 degrees down, about 61 degrees
+//   wide. The opponent's head and torso stay above it. Its lower legs (the
+//   bottom 0.49-0.64 m of the 1.92 m robot) are behind the panel.
 export const QUEST_MENU_POSE = {
   menu: {
-    position: [0, 0.08, -1.15] as [number, number, number],
+    position: [0, -0.08, -1.5] as [number, number, number],
     rotation: [0, 0, 0] as [number, number, number],
   },
   ring: {
-    position: [0, -0.78, -0.5] as [number, number, number],
+    position: [0, -0.85, -1.35] as [number, number, number],
     rotation: [0, 0, 0] as [number, number, number],
   },
 };
@@ -25,25 +28,18 @@ export type QuestMenuAction = (typeof QUEST_MENU_ACTIONS)[number];
 export type QuestMenuPage = 'menu' | 'ring';
 export type QuestMenuPosture = 'standing' | 'seated';
 
-export const QUEST_MENU_TAGLINE = 'Bring the fight to your table.';
-// Body lines use size 36, step 44. Six lines finish at y <= 736, keeping the
+// Body lines use size 38, step 54. Six lines finish at y <= 552, keeping the
 // top button row (y = 764) clear on both menu and ring pages.
 export const QUEST_MENU_TEXT_LINES_MAX = 6;
 
-// Phone lettering.svg viewBoxes, used only to place the pre-rasterized PNGs.
-const TITLE_ASPECT = {
-  neo: 180.2 / 66,
-  rock: 797 / 106,
-  robots: 310 / 108,
-} as const;
-
 const INK = '#09090b';
 const PAPER = '#f8fafc';
+const MUTED_PAPER = '#e2e8f0';
 const PRIMARY = '#60a5fa';
-const SECONDARY = '#a78bfa';
+const SELECTED = '#075985';
 const DANGER = '#d99a9a';
-const CARD = '#E818181B';
-const TAG_BG = '#A809090B';
+const CARD = '#0f172a';
+const DIVIDER = '#334155';
 const PANEL = '#09090b';
 
 export interface QuestMenuButton {
@@ -56,7 +52,7 @@ export interface QuestMenuButton {
 }
 
 export interface QuestMenuDrawOp {
-  op: 'roundRect' | 'text' | 'image';
+  op: 'roundRect' | 'text';
   x: number;
   y: number;
   width?: number;
@@ -68,14 +64,6 @@ export interface QuestMenuDrawOp {
   align?: 'left' | 'center';
   bold?: boolean;
   maxWidth?: number;
-  font?: string;
-  uri?: string;
-}
-
-export interface QuestMenuAssets {
-  backgroundUri?: string;
-  fonts?: { body?: string; button?: string; serif?: string };
-  titles?: { neo?: string; rock?: string; robots?: string };
 }
 
 export interface QuestMenuModel {
@@ -89,7 +77,6 @@ export interface QuestMenuBuildOptions {
   hover?: QuestMenuAction | null;
   acknowledged?: boolean;
   posture?: QuestMenuPosture;
-  assets?: QuestMenuAssets;
 }
 
 const buttonWidth = 520;
@@ -199,7 +186,7 @@ export function questMenuHit(
   return null;
 }
 
-export function wrapMenuLine(text: string, maxChars = 64): string[] {
+export function wrapMenuLine(text: string, maxChars = 62): string[] {
   const words = text.split(/\s+/).filter(Boolean);
   const lines: string[] = [];
   let current = '';
@@ -214,21 +201,14 @@ export function wrapMenuLine(text: string, maxChars = 64): string[] {
   return lines.length > 0 ? lines : [''];
 }
 
-export function questMenuMaterialName(uri: string) {
-  // FNV-1a gives a short valid Viro material name that changes whenever the PNG URI does.
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < uri.length; index += 1) {
-    hash ^= uri.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return `questMenu-${(hash >>> 0).toString(16)}`;
-}
-
-function buttonColors(action: QuestMenuAction, hovered: boolean) {
+function buttonColors(action: QuestMenuAction, hovered: boolean, acknowledged: boolean) {
   if (action === 'exit') return { fill: hovered ? '#e6b2b2' : DANGER, text: INK };
-  if (action === 'back') return { fill: hovered ? '#27272a' : INK, text: PAPER };
+  if (action === 'back') return { fill: hovered ? '#334155' : '#1e293b', text: PAPER };
   if (action === 'recenter') return { fill: hovered ? '#2563eb' : '#1e3a8a', text: PAPER };
-  if (action === 'posture') return { fill: hovered ? '#a16207' : '#854d0e', text: PAPER };
+  if (action === 'posture') return { fill: hovered ? '#475569' : '#334155', text: PAPER };
+  if (action === 'ready' && acknowledged) {
+    return { fill: hovered ? '#0369a1' : SELECTED, text: PAPER };
+  }
   return { fill: hovered ? '#93c5fd' : PRIMARY, text: INK };
 }
 
@@ -236,10 +216,10 @@ function pushButton(
   ops: QuestMenuDrawOp[],
   button: QuestMenuButton,
   hovered: boolean,
-  font: string | undefined
+  acknowledged: boolean
 ) {
-  const colors = buttonColors(button.action, hovered);
-  const inset = button.action === 'back' ? 8 : 0;
+  const colors = buttonColors(button.action, hovered, acknowledged);
+  const inset = button.action === 'back' ? 6 : 0;
   if (inset > 0) {
     ops.push({
       op: 'roundRect',
@@ -247,8 +227,8 @@ function pushButton(
       y: button.y,
       width: button.width,
       height: button.height,
-      radius: 40,
-      color: PAPER,
+      radius: 36,
+      color: '#94a3b8',
     });
     ops.push({
       op: 'roundRect',
@@ -256,7 +236,7 @@ function pushButton(
       y: button.y + inset,
       width: button.width - inset * 2,
       height: button.height - inset * 2,
-      radius: 32,
+      radius: 30,
       color: colors.fill,
     });
   } else {
@@ -266,11 +246,11 @@ function pushButton(
       y: button.y,
       width: button.width,
       height: button.height,
-      radius: 40,
+      radius: 36,
       color: colors.fill,
     });
   }
-  const size = 56;
+  const size = 54;
   ops.push({
     op: 'text',
     text: button.label,
@@ -281,59 +261,7 @@ function pushButton(
     align: 'center',
     bold: true,
     maxWidth: button.width - 64,
-    ...(font ? { font } : {}),
   });
-}
-
-function pushTitles(ops: QuestMenuDrawOp[], assets: QuestMenuAssets | undefined) {
-  const titles = assets?.titles;
-  const rockWidth = 860;
-  const rockHeight = rockWidth / TITLE_ASPECT.rock;
-  const neoHeight = rockHeight * 0.7;
-  const neoWidth = neoHeight * TITLE_ASPECT.neo;
-  const robotsHeight = rockHeight;
-  const robotsWidth = robotsHeight * TITLE_ASPECT.robots;
-  const center = QUEST_MENU_TEXTURE.widthPx / 2;
-  let y = 56;
-  const useImages = Boolean(titles?.neo && titles.rock && titles.robots);
-  const place = (
-    uri: string | undefined,
-    text: string,
-    width: number,
-    height: number,
-    color: string
-  ) => {
-    const top = Math.round(y);
-    const drawnHeight = Math.round(height);
-    if (useImages && uri) {
-      ops.push({
-        op: 'image',
-        uri,
-        x: Math.round(center - width / 2),
-        y: top,
-        width: Math.round(width),
-        height: drawnHeight,
-      });
-    } else {
-      ops.push({
-        op: 'text',
-        text,
-        x: center,
-        y: top + Math.max(0, (drawnHeight - 54) / 2),
-        size: 54,
-        color,
-        align: 'center',
-        bold: true,
-        maxWidth: 1800,
-        ...(assets?.fonts?.button ? { font: assets.fonts.button } : {}),
-      });
-    }
-    y += drawnHeight + 8;
-  };
-  place(titles?.neo, 'Neo', neoWidth, neoHeight, SECONDARY);
-  place(titles?.rock, "Rock 'Em Sock 'Em", rockWidth, rockHeight, PRIMARY);
-  place(titles?.robots, 'Robots', robotsWidth, robotsHeight, PRIMARY);
-  return Math.round(y);
 }
 
 export function buildQuestMenu(
@@ -346,19 +274,8 @@ export function buildQuestMenu(
   const acknowledged = options.acknowledged === true;
   const posture = options.posture ?? 'standing';
   const buttons = questMenuButtons(page, { acknowledged, posture });
-  const assets = options.assets;
-  const ops: QuestMenuDrawOp[] = [];
-  if (assets?.backgroundUri) {
-    ops.push({
-      op: 'image',
-      uri: assets.backgroundUri,
-      x: 0,
-      y: 0,
-      width: QUEST_MENU_TEXTURE.widthPx,
-      height: QUEST_MENU_TEXTURE.heightPx,
-    });
-  } else {
-    ops.push({
+  const ops: QuestMenuDrawOp[] = [
+    {
       op: 'roundRect',
       x: 0,
       y: 0,
@@ -366,66 +283,58 @@ export function buildQuestMenu(
       height: QUEST_MENU_TEXTURE.heightPx,
       radius: 0,
       color: PANEL,
-    });
-  }
-  ops.push({
-    op: 'roundRect',
-    x: 48,
-    y: 36,
-    width: QUEST_MENU_TEXTURE.widthPx - 96,
-    height: QUEST_MENU_TEXTURE.heightPx - 72,
-    radius: 48,
-    color: CARD,
-  });
-  let textY = pushTitles(ops, assets) + 10;
-  if (page === 'menu') {
-    const size = 40;
-    const pillWidth = 880;
-    const pillHeight = 60;
-    const pillX = Math.round((QUEST_MENU_TEXTURE.widthPx - pillWidth) / 2);
-    ops.push({
+    },
+    {
       op: 'roundRect',
-      x: pillX,
-      y: textY,
-      width: pillWidth,
-      height: pillHeight,
-      radius: 20,
-      color: TAG_BG,
-    });
-    ops.push({
+      x: 48,
+      y: 36,
+      width: QUEST_MENU_TEXTURE.widthPx - 96,
+      height: QUEST_MENU_TEXTURE.heightPx - 72,
+      radius: 44,
+      color: CARD,
+    },
+    {
       op: 'text',
-      text: QUEST_MENU_TAGLINE,
+      text: page === 'menu' ? 'Quest VR Menu' : 'Solo Ring',
       x: QUEST_MENU_TEXTURE.widthPx / 2,
-      y: textY + (pillHeight - size) / 2,
-      size,
+      y: 72,
+      size: 58,
       color: PAPER,
       align: 'center',
-      bold: false,
-      maxWidth: pillWidth - 48,
-      ...(assets?.fonts?.serif ? { font: assets.fonts.serif } : {}),
-    });
-    textY += pillHeight + 14;
-  }
+      bold: true,
+      maxWidth: 1760,
+    },
+    {
+      op: 'roundRect',
+      x: 112,
+      y: 184,
+      width: QUEST_MENU_TEXTURE.widthPx - 224,
+      height: 4,
+      radius: 2,
+      color: DIVIDER,
+    },
+  ];
+
+  let textY = 228;
   for (const line of lines
     .flatMap((line) => wrapMenuLine(line))
     .slice(0, QUEST_MENU_TEXT_LINES_MAX)) {
-    if (textY + 36 > topRowY - 16) break;
+    if (textY + 40 > topRowY - 24) break;
     ops.push({
       op: 'text',
       text: line,
       x: QUEST_MENU_TEXTURE.widthPx / 2,
       y: textY,
-      size: 36,
-      color: PAPER,
+      size: 38,
+      color: MUTED_PAPER,
       align: 'center',
       bold: false,
       maxWidth: 1760,
-      ...(assets?.fonts?.body ? { font: assets.fonts.body } : {}),
     });
-    textY += 44;
+    textY += 54;
   }
   for (const button of buttons) {
-    pushButton(ops, button, options.hover === button.action, assets?.fonts?.button);
+    pushButton(ops, button, options.hover === button.action, acknowledged);
   }
   return {
     page,

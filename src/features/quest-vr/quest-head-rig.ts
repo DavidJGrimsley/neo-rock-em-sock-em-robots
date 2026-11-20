@@ -134,6 +134,16 @@ export function eyeRingLocal(anchor: RigAnchor): Vec3 {
   ];
 }
 
+/**
+ * Ring-local floor point under the robot eyes. The rig puts those eyes on the
+ * calibrated head, so a marker here sits under the wearer rather than under
+ * the fighter's feet, which are ROBOT_EYE_MODEL z behind the eyes.
+ */
+export function stanceMarkerRingLocal(anchor: RigAnchor): Vec3 {
+  const eye = eyeRingLocal(anchor);
+  return [eye[0], ARENA_LAYOUT.floorHeight, eye[2]];
+}
+
 export interface RigTransform {
   position: Vec3;
   rotationY: number;
@@ -249,6 +259,85 @@ export function calibrateFromSamples(
   }
 
   return { ok: true, origin, yaw: meanYaw };
+}
+
+// A reference-frame change (Horizon system recenter or a tracking-origin reset)
+// moves every LOCAL pose by one yaw-plus-translation between two frames. Viro
+// 3.0.3 sees XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING natively but
+// does not forward it to JS, so the only evidence is the raw head samples. A
+// head cannot cover 0.25 m or turn 45 degrees in one 72 Hz frame, so only a step
+// above both the floor and a generous head-speed bound counts. Longer gaps are
+// never treated as a jump: the wearer may really have moved.
+export const REFERENCE_JUMP_MAX_DT_MS = 100;
+export const REFERENCE_JUMP_MIN_POSITION_M = 0.25;
+export const REFERENCE_JUMP_MIN_YAW_DEG = 45;
+const HEAD_MAX_SPEED_M_PER_S = 4;
+const HEAD_MAX_YAW_RATE_DEG_PER_S = 900;
+
+export interface HeadStep {
+  dt: number;
+  delta: Vec3;
+  distance: number;
+  yawDelta: number | null;
+}
+
+export function headStep(previous: HeadSample, next: HeadSample): HeadStep {
+  const delta: Vec3 = [
+    next.position[0] - previous.position[0],
+    next.position[1] - previous.position[1],
+    next.position[2] - previous.position[2],
+  ];
+  const fromYaw = yawFromForward(previous.forward);
+  const toYaw = yawFromForward(next.forward);
+  return {
+    dt: next.t - previous.t,
+    delta,
+    distance: Math.hypot(delta[0], delta[1], delta[2]),
+    yawDelta: fromYaw === null || toYaw === null ? null : wrap180(toYaw - fromYaw),
+  };
+}
+
+/** True only for a near-instant step no real head motion could produce. */
+export function isReferenceDiscontinuity(step: HeadStep): boolean {
+  if (!(step.dt > 0) || step.dt > REFERENCE_JUMP_MAX_DT_MS) return false;
+  const seconds = step.dt / 1000;
+  const positionLimit = Math.max(REFERENCE_JUMP_MIN_POSITION_M, HEAD_MAX_SPEED_M_PER_S * seconds);
+  const yawLimit = Math.max(REFERENCE_JUMP_MIN_YAW_DEG, HEAD_MAX_YAW_RATE_DEG_PER_S * seconds);
+  return (
+    step.distance >= positionLimit ||
+    (step.yawDelta !== null && Math.abs(step.yawDelta) >= yawLimit)
+  );
+}
+
+/**
+ * Moves the calibration through the same yaw-plus-translation that took the
+ * head from `from` to `to`, so the world keeps its place around the wearer.
+ * Pitch and roll are never touched. Returns null when either yaw is unknown.
+ */
+export function rebaseCalibration(
+  cal: Calibration,
+  from: HeadSample,
+  to: HeadSample
+): Calibration | null {
+  const fromYaw = yawFromForward(from.forward);
+  const toYaw = yawFromForward(to.forward);
+  if (fromYaw === null || toYaw === null) return null;
+  const turn = wrap180(toYaw - fromYaw);
+  const r = (turn * Math.PI) / 180;
+  const cos = Math.cos(r);
+  const sin = Math.sin(r);
+  const ox = cal.origin[0] - from.position[0];
+  const oy = cal.origin[1] - from.position[1];
+  const oz = cal.origin[2] - from.position[2];
+  return {
+    ...cal,
+    origin: [
+      to.position[0] + ox * cos + oz * sin,
+      to.position[1] + oy,
+      to.position[2] - ox * sin + oz * cos,
+    ],
+    yaw: wrap180(cal.yaw + turn),
+  };
 }
 
 export interface GameplayHeadPose {

@@ -12,11 +12,16 @@ const {
   ROBOT_EYE_MODEL,
   applyRig,
   calibrateFromSamples,
+  REFERENCE_JUMP_MAX_DT_MS,
   eyeRingLocal,
   gameplayHeadPose,
   headSampleFromViro,
+  headStep,
+  isReferenceDiscontinuity,
   menuFrame,
   questRigTransform,
+  rebaseCalibration,
+  stanceMarkerRingLocal,
   wrap180,
   yawFromForward,
 } = require('../src/features/quest-vr/quest-head-rig.ts');
@@ -95,11 +100,7 @@ function makeSample(t, position, yawDeg, pitchDeg = 0, rollDeg = 0) {
   const yr = (yawDeg * Math.PI) / 180;
   const pr = (pitchDeg * Math.PI) / 180;
   const rr = (rollDeg * Math.PI) / 180;
-  const upNoRoll = [
-    -Math.sin(yr) * Math.sin(pr),
-    Math.cos(pr),
-    -Math.cos(yr) * Math.sin(pr),
-  ];
+  const upNoRoll = [-Math.sin(yr) * Math.sin(pr), Math.cos(pr), -Math.cos(yr) * Math.sin(pr)];
   const rightNoRoll = [-Math.cos(yr), 0, Math.sin(yr)];
   const up = [
     upNoRoll[0] * Math.cos(rr) + rightNoRoll[0] * Math.sin(rr),
@@ -252,9 +253,15 @@ test('wrap180 and yawFromForward handle cardinal directions, pitch/roll invarian
 });
 
 test('headSampleFromViro rejects invalid inputs and normalizes forward/up', () => {
-  assert.equal(headSampleFromViro(NaN, { position: [0, 0, 0], forward: [0, 0, -1], up: [0, 1, 0] }), null);
+  assert.equal(
+    headSampleFromViro(NaN, { position: [0, 0, 0], forward: [0, 0, -1], up: [0, 1, 0] }),
+    null
+  );
   assert.equal(headSampleFromViro(10, {}), null);
-  assert.equal(headSampleFromViro(10, { position: [0, 0], forward: [0, 0, -1], up: [0, 1, 0] }), null);
+  assert.equal(
+    headSampleFromViro(10, { position: [0, 0], forward: [0, 0, -1], up: [0, 1, 0] }),
+    null
+  );
   assert.equal(
     headSampleFromViro(10, { position: [0, Infinity, 0], forward: [0, 0, -1], up: [0, 1, 0] }),
     null
@@ -406,9 +413,142 @@ test('gameplayHeadPose computes signs, posture bounds, excess, outOfBounds, and 
   // Out of bounds when excess > QUEST_OUT_OF_BOUNDS_EXCESS (0.30).
   const walkPast = gameplayHeadPose(
     cal180,
-    makeSample(50, [origin[0] + QUEST_HEAD_BOUNDS.standing.lateral + QUEST_OUT_OF_BOUNDS_EXCESS + 0.05, origin[1], origin[2]], 180)
+    makeSample(
+      50,
+      [
+        origin[0] + QUEST_HEAD_BOUNDS.standing.lateral + QUEST_OUT_OF_BOUNDS_EXCESS + 0.05,
+        origin[1],
+        origin[2],
+      ],
+      180
+    )
   );
   assert.equal(walkPast.clamped, true);
   assert.ok(walkPast.excess > QUEST_OUT_OF_BOUNDS_EXCESS);
   assert.equal(walkPast.outOfBounds, true);
+});
+
+test('stance marker is centered under the calibrated eye, not the fighter feet', () => {
+  const blue = { x: -ARENA_RULES.spawn, z: 0, yaw: 90 };
+  const marker = stanceMarkerRingLocal(blue);
+  const eye = eyeRingLocal(blue);
+  assert.equal(marker[0], eye[0]);
+  assert.equal(marker[2], eye[2]);
+  assert.equal(marker[1], ARENA_LAYOUT.floorHeight);
+  // The eye sits ROBOT_EYE_MODEL z in front of the feet: 0.244 m in VR here.
+  const feetToEye = Math.hypot(marker[0] - blue.x, marker[2] - blue.z) * QUEST_WORLD_SCALE;
+  assert.ok(Math.abs(feetToEye - ROBOT_EYE_MODEL[2] * ARENA_LAYOUT.fighterScale * 16) < 1e-9);
+  assert.ok(Math.abs(feetToEye - 0.2436) < 0.001);
+
+  // Through any calibration, the marker lands directly below the head origin.
+  for (const cal of [
+    DEFAULT_CALIBRATION,
+    { ...DEFAULT_CALIBRATION, origin: [0.4, 1.3, -0.2], yaw: 73, source: 'solo', entry: 1 },
+  ]) {
+    const rig = questRigTransform(cal, blue);
+    const placed = applyRig(rig, marker);
+    assert.ok(Math.abs(placed[0] - cal.origin[0]) < 1e-9);
+    assert.ok(Math.abs(placed[2] - cal.origin[2]) < 1e-9);
+    assert.ok(placed[1] < cal.origin[1] - 1.3);
+    const feet = applyRig(rig, [blue.x, ARENA_LAYOUT.floorHeight, blue.z]);
+    assert.ok(Math.hypot(feet[0] - cal.origin[0], feet[2] - cal.origin[2]) > 0.24);
+  }
+});
+
+test('headStep and isReferenceDiscontinuity separate real head motion from frame jumps', () => {
+  const frame = 1000 / 72;
+  const at = (t, position, yaw, pitch = 0) => makeSample(t, position, yaw, pitch);
+
+  // A 0.2 m lean over 300 ms, frame by frame, never counts.
+  for (let i = 1; i <= 22; i += 1) {
+    const prev = at((i - 1) * frame, [0, 1.4, -(i - 1) * (0.2 / 22)], 180);
+    const next = at(i * frame, [0, 1.4, -i * (0.2 / 22)], 180);
+    assert.equal(isReferenceDiscontinuity(headStep(prev, next)), false);
+  }
+  // A fast 400 deg/s head turn and a 3 m/s duck in one frame do not count.
+  assert.equal(
+    isReferenceDiscontinuity(headStep(at(0, [0, 1.4, 0], 180), at(frame, [0, 1.4, 0], 174.4))),
+    false
+  );
+  assert.equal(
+    isReferenceDiscontinuity(headStep(at(0, [0, 1.4, 0], 180), at(frame, [0, 1.358, 0], 180))),
+    false
+  );
+  // A whole 0.2 m lean dropped into a single frame is still below the floor.
+  assert.equal(
+    isReferenceDiscontinuity(headStep(at(0, [0, 1.4, 0], 180), at(frame, [0.2, 1.4, 0], 180))),
+    false
+  );
+  // Recenter-like steps in one frame count: position alone, or yaw alone.
+  assert.equal(
+    isReferenceDiscontinuity(headStep(at(0, [0.5, 1.4, 0.3], 180), at(frame, [0, 1.4, 0], 180))),
+    true
+  );
+  assert.equal(
+    isReferenceDiscontinuity(headStep(at(0, [0, 1.4, 0], 70), at(frame, [0, 1.4, 0], 180))),
+    true
+  );
+  // The bound grows with dt, and anything slower than the max dt is real motion.
+  const slow = REFERENCE_JUMP_MAX_DT_MS;
+  assert.equal(
+    isReferenceDiscontinuity(headStep(at(0, [0, 1.4, 0], 180), at(slow, [0, 1.4, 0], 130))),
+    false
+  );
+  assert.equal(
+    isReferenceDiscontinuity(headStep(at(0, [0, 1.4, 0], 180), at(slow + 1, [3, 1.4, 0], 0))),
+    false
+  );
+  assert.equal(
+    isReferenceDiscontinuity(headStep(at(0, [0, 1.4, 0], 180), at(0, [3, 1.4, 0], 0))),
+    false
+  );
+  // Looking straight down has no yaw: only position can count.
+  const down = headStep(at(0, [0, 1.4, 0], 180, -89), at(frame, [0, 1.4, 0], 0, -89));
+  assert.equal(down.yawDelta, null);
+  assert.equal(isReferenceDiscontinuity(down), false);
+});
+
+test('rebaseCalibration keeps the gameplay pose continuous across a yaw-plus-translation jump', () => {
+  const cal = {
+    ...DEFAULT_CALIBRATION,
+    origin: [0.3, 1.25, -0.4],
+    yaw: 140,
+    posture: 'seated',
+    source: 'recenter',
+    entry: 2,
+  };
+  // The wearer leans a little inside bounds, then the frame turns 109.4 degrees
+  // and shifts, like the logged incident.
+  const before = makeSample(1000, [0.38, 1.18, -0.33], 151, -10, 4);
+  const turn = 109.4;
+  const r = (turn * Math.PI) / 180;
+  const shift = [-0.42, 0.06, 0.51];
+  const move = (p) => [
+    shift[0] + p[0] * Math.cos(r) + p[2] * Math.sin(r),
+    shift[1] + p[1],
+    shift[2] - p[0] * Math.sin(r) + p[2] * Math.cos(r),
+  ];
+  const after = makeSample(1014, move(before.position), 151 + turn, -10, 4);
+
+  const stale = gameplayHeadPose(cal, after);
+  assert.equal(stale.clamped, true);
+
+  const rebased = rebaseCalibration(cal, before, after);
+  assert.ok(rebased);
+  assert.equal(rebased.posture, 'seated');
+  assert.equal(rebased.source, 'recenter');
+  assert.equal(rebased.entry, 2);
+  assert.ok(Math.abs(wrap180(rebased.yaw - (140 + turn))) < 1e-9);
+  const expectOrigin = move(cal.origin);
+  for (let i = 0; i < 3; i += 1) assert.ok(Math.abs(rebased.origin[i] - expectOrigin[i]) < 1e-9);
+
+  const prior = gameplayHeadPose(cal, before);
+  const now = gameplayHeadPose(rebased, after);
+  assert.equal(now.clamped, false);
+  for (const key of ['lateral', 'vertical', 'forward', 'yawRelative']) {
+    assert.ok(Math.abs(now[key] - prior[key]) < 1e-9, key);
+  }
+
+  // No yaw, no rebase.
+  assert.equal(rebaseCalibration(cal, makeSample(0, [0, 1, 0], 0, -90), after), null);
 });

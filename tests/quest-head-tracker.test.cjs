@@ -1,7 +1,12 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { DEFAULT_CALIBRATION, wrap180 } = require('../src/features/quest-vr/quest-head-rig.ts');
+const {
+  DEFAULT_CALIBRATION,
+  gameplayHeadPose,
+  headSampleFromViro,
+  wrap180,
+} = require('../src/features/quest-vr/quest-head-rig.ts');
 const {
   QUEST_RECENTER_FAILURE_MESSAGE,
   createQuestHeadTracker,
@@ -55,6 +60,40 @@ function viroPose(position, yawDeg, pitchDeg = 0) {
 }
 
 const blueAnchor = { x: -0.095, z: 0, yaw: 90 };
+const FRAME_MS = 14;
+
+function feed(tracker, clock, position, yaw, count = 1, pitch = 0) {
+  for (let i = 0; i < count; i += 1) {
+    tracker.onCameraTransform(viroPose(position, yaw, pitch));
+    clock.advance(FRAME_MS);
+  }
+}
+
+function trackerWithLog(entries = () => 1) {
+  const clock = makeClock(1000);
+  const logs = [];
+  const tracker = createQuestHeadTracker({
+    now: clock.now,
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+    entries,
+    log: (message) => logs.push(message),
+  });
+  return { clock, logs, tracker };
+}
+
+// The same yaw-plus-translation a frame change applies to every LOCAL pose.
+function frameJump(turnDeg, shift) {
+  const r = (turnDeg * Math.PI) / 180;
+  return {
+    pos: (p) => [
+      shift[0] + p[0] * Math.cos(r) + p[2] * Math.sin(r),
+      shift[1] + p[1],
+      shift[2] - p[0] * Math.sin(r) + p[2] * Math.cos(r),
+    ],
+    yaw: (yaw) => wrap180(yaw + turnDeg),
+  };
+}
 
 test('hot path stores samples without synchronous publish, enforces <= 5 Hz, and keeps snapshot stable', () => {
   const clock = makeClock(1000);
@@ -209,6 +248,8 @@ test('entry lifetime preserves Back->Solo and pre-Solo menu Recenter, and re-cal
   assert.deepEqual(tracker.getSnapshot().anchor, blueAnchor);
 
   // Move user and press Back -> Solo in same entry: calibration must NOT change.
+  // The walk takes real time; an instant 1.8 m step would read as a frame jump.
+  clock.advance(1000);
   for (let i = 0; i < 10; i += 1) {
     tracker.onCameraTransform(viroPose([1.8, 1.2, -1.0], -120));
     clock.advance(50);
@@ -306,34 +347,46 @@ test('recenter ignores pre-press samples, times out cleanly, succeeds on stable 
   tracker.dispose();
 });
 
-test('cyclePosture updates only bounds, and no sample sequence alone ever changes calibration', () => {
-  const clock = makeClock(1000);
-  const tracker = createQuestHeadTracker({
-    now: clock.now,
-    schedule: clock.schedule,
-    cancel: clock.cancel,
-    entries: () => 1,
-  });
+test('cyclePosture updates only bounds; walking out, clamping, glitches and gaps never move calibration', () => {
+  const { clock, logs, tracker } = trackerWithLog();
 
   for (let i = 0; i < 8; i += 1) {
     tracker.onCameraTransform(viroPose([1.0, 1.5, -0.5], 180));
     clock.advance(40);
   }
   const cal = tracker.calibrateForSolo(blueAnchor);
+  logs.length = 0;
 
-  // Adversarial sample patterns: jump to origin (system-recenter lookalike), tracking-loss NaNs, huge offsets.
-  for (let i = 0; i < 50; i += 1) {
-    tracker.onCameraTransform(viroPose([2.5, 1.8, -2.5], 45));
-    clock.advance(20);
+  // Walk 2.5 m out of bounds and turn 135 degrees at a brisk real pace.
+  for (let i = 1; i <= 180; i += 1) {
+    const k = i / 180;
+    feed(tracker, clock, [1.0 + 1.5 * k, 1.5 + 0.3 * k, -0.5 - 2.0 * k], 180 - 135 * k);
   }
-  tracker.onCameraTransform({ position: [NaN, 0, 0], forward: [0, 0, -1], up: [0, 1, 0] });
-  for (let i = 0; i < 50; i += 1) {
-    tracker.onCameraTransform(viroPose([0, 0, 0], 180));
-    clock.advance(20);
-  }
+  clock.advance(250);
+  const out = tracker.getSnapshot();
+  assert.equal(out.pose.clamped, true);
+  assert.equal(out.outOfBounds, true);
+  // Clamped and out of bounds for a long time: the world still does not move.
+  feed(tracker, clock, [2.5, 1.8, -2.5], 45, 300);
   assert.deepEqual(tracker.getSnapshot().calibration, cal);
 
+  // A tracking-loss NaN is dropped.
+  tracker.onCameraTransform({ position: [NaN, 0, 0], forward: [0, 0, -1], up: [0, 1, 0] });
+  // A one-frame spike that comes straight back is a glitch.
+  feed(tracker, clock, [0, 0, 0], 180, 1);
+  feed(tracker, clock, [2.5, 1.8, -2.5], 45, 20);
+  // A big change across a long sample gap may be real movement.
+  clock.advance(800);
+  feed(tracker, clock, [0, 0, 0], 180, 20);
+  assert.deepEqual(tracker.getSnapshot().calibration, cal);
+  assert.equal(tracker.getSnapshot().referenceResets, 0);
+  assert.ok(logs.some((line) => /reference jump rejected reason=second-discontinuity/.test(line)));
+  assert.ok(!logs.some((line) => /reference reset rebase/.test(line)));
+  // Sparse: 500+ samples produced only a couple of event lines.
+  assert.ok(logs.length <= 4, logs.join('\n'));
+
   // Crouch -0.35 m: unclamped in standing, clamped to -0.25 after cyclePosture -> seated.
+  clock.advance(250);
   tracker.onCameraTransform(viroPose([1.0, 1.15, -0.5], 180));
   clock.advance(250);
   assert.equal(tracker.getSnapshot().pose.clamped, false);
@@ -349,7 +402,7 @@ test('cyclePosture updates only bounds, and no sample sequence alone ever change
   tracker.dispose();
 });
 
-test('dispose cancels all pending timers and preserves calibration', () => {
+test('dispose cancels all pending timers and resets session calibration while preserving posture', () => {
   const clock = makeClock(1000);
   const tracker = createQuestHeadTracker({
     now: clock.now,
@@ -362,7 +415,8 @@ test('dispose cancels all pending timers and preserves calibration', () => {
     tracker.onCameraTransform(viroPose([0.3, 1.4, -0.2], 120));
     clock.advance(40);
   }
-  const cal = tracker.calibrateForSolo(blueAnchor);
+  tracker.calibrateForSolo(blueAnchor);
+  tracker.cyclePosture();
 
   tracker.recenter();
   tracker.onCameraTransform(viroPose([0.3, 1.4, -0.2], 120));
@@ -370,10 +424,16 @@ test('dispose cancels all pending timers and preserves calibration', () => {
 
   tracker.dispose();
   assert.equal(clock.pending.size, 0);
-  assert.deepEqual(tracker.getSnapshot().calibration, cal);
+  const afterDispose = tracker.getSnapshot();
+  assert.deepEqual(afterDispose.calibration, { ...DEFAULT_CALIBRATION, posture: 'seated' });
+  assert.equal(afterDispose.anchor, null);
+  assert.equal(afterDispose.status, 'uncalibrated');
+  assert.equal(afterDispose.message, null);
+  assert.equal(afterDispose.samplesSeen, 0);
+  assert.equal(afterDispose.pose, null);
 });
 
-test('dispose while recenter is sampling restores prior non-ready status and message', () => {
+test('dispose while recenter is sampling resets cleanly to uncalibrated without stale ready state', () => {
   const clock = makeClock(1000);
   const tracker = createQuestHeadTracker({
     now: clock.now,
@@ -395,8 +455,118 @@ test('dispose while recenter is sampling restores prior non-ready status and mes
   tracker.dispose();
 
   const afterDispose = tracker.getSnapshot();
-  assert.equal(afterDispose.status, 'no-samples');
-  assert.equal(afterDispose.message, 'Head pose unavailable.');
-  assert.deepEqual(afterDispose.calibration, beforeRecenter.calibration);
+  assert.equal(afterDispose.status, 'uncalibrated');
+  assert.equal(afterDispose.message, null);
+  assert.deepEqual(afterDispose.calibration, DEFAULT_CALIBRATION);
   assert.equal(clock.pending.size, 0);
+});
+
+test('a realistic abrupt origin/yaw jump is confirmed, then rebases to the same bounded pose', () => {
+  const { clock, logs, tracker } = trackerWithLog();
+  tracker.cyclePosture();
+  feed(tracker, clock, [0.2, 1.2, -0.1], 160, 40);
+  const cal = tracker.calibrateForSolo(blueAnchor);
+  assert.equal(cal.posture, 'seated');
+
+  // A normal 0.2 m lean and back over ~0.6 s never triggers anything.
+  for (let i = 0; i <= 20; i += 1) feed(tracker, clock, [0.2, 1.2, -0.1 - 0.01 * i], 160 + i * 0.5);
+  for (let i = 20; i >= 0; i -= 1) feed(tracker, clock, [0.2, 1.2, -0.1 - 0.01 * i], 160 + i * 0.5);
+  assert.deepEqual(tracker.getSnapshot().calibration, cal);
+  assert.ok(!logs.some((line) => /reference jump/.test(line)));
+
+  // Settle with a small lean, then the frame turns 109.4 degrees and shifts.
+  const lean = [0.27, 1.12, -0.18];
+  // Hold the lean for ~280 ms of continuous frames so the snapshot publishes.
+  feed(tracker, clock, lean, 172, 20);
+  const before = tracker.getSnapshot().pose;
+  assert.equal(before.clamped, false);
+
+  const jump = frameJump(109.4, [-0.6, 0.3, 0.45]);
+  const jumped = jump.pos(lean);
+  feed(tracker, clock, jumped, jump.yaw(172), 1);
+  // Not confirmed yet: calibration is untouched, and the stale pose clamps.
+  assert.deepEqual(tracker.getSnapshot().calibration, cal);
+  const staleSample = headSampleFromViro(0, viroPose(jumped, jump.yaw(172)));
+  assert.equal(gameplayHeadPose(cal, staleSample).clamped, true);
+  feed(tracker, clock, jumped, jump.yaw(172), 20);
+
+  const after = tracker.getSnapshot();
+  assert.equal(after.referenceResets, 1);
+  assert.equal(after.calibration.posture, 'seated');
+  assert.equal(after.calibration.source, cal.source);
+  assert.equal(after.calibration.entry, cal.entry);
+  assert.ok(Math.abs(wrap180(after.calibration.yaw - jump.yaw(cal.yaw))) < 1e-9);
+  assert.equal(after.pose.clamped, false);
+  for (const key of ['lateral', 'vertical', 'forward', 'yawRelative']) {
+    assert.ok(Math.abs(after.pose[key] - before[key]) < 1e-6, key);
+  }
+  assert.equal(after.status, 'ready');
+  const candidate = logs.find((line) => line.startsWith('reference jump candidate'));
+  assert.match(
+    candidate,
+    /dt=14ms delta=\[.*\] dpos=\d+\.\d{3}m dyaw=109\.4 from=\[.*\]@172\.0 to=/
+  );
+  assert.match(candidate, /origin=\[0\.200,1\.200,-0\.100\] calYaw=160\.0 src=solo/);
+  assert.ok(
+    logs.some((line) =>
+      /reference reset rebase origin=\[.*\]->\[.*\] yaw=160\.0->-90\.6 resets=1/.test(line)
+    )
+  );
+
+  // Movement after the rebase stays 1:1: 0.1 m further along old -Z.
+  for (let i = 1; i <= 10; i += 1) {
+    feed(tracker, clock, jump.pos([0.27, 1.12, -0.18 - 0.01 * i]), jump.yaw(172));
+  }
+  feed(tracker, clock, jump.pos([0.27, 1.12, -0.28]), jump.yaw(172), 20);
+  const moved = tracker.getSnapshot().pose;
+  const expectedForward = before.forward - 0.1 * Math.cos((160 * Math.PI) / 180);
+  assert.ok(Math.abs(moved.forward - expectedForward) < 1e-6);
+  assert.equal(tracker.getSnapshot().referenceResets, 1);
+  tracker.dispose();
+  assert.equal(tracker.getSnapshot().referenceResets, 0);
+});
+
+test('a jump before any calibration, or calibrated after the jump, is not applied', () => {
+  // Default frame: pre-Solo menu content follows LOCAL, so a system recenter is left alone.
+  {
+    const { clock, logs, tracker } = trackerWithLog();
+    feed(tracker, clock, [0.5, 1.3, 0.4], 100, 20);
+    feed(tracker, clock, [0, 1.3, 0], 180, 10);
+    assert.deepEqual(tracker.getSnapshot().calibration, DEFAULT_CALIBRATION);
+    assert.ok(logs.some((line) => /action=none reason=default-frame-follows-local/.test(line)));
+  }
+  // An in-app Recenter running across the jump ends in the new frame, exactly once.
+  {
+    const { clock, logs, tracker } = trackerWithLog();
+    feed(tracker, clock, [0.5, 1.3, 0.4], 100, 40);
+    tracker.calibrateForSolo(blueAnchor);
+    tracker.recenter();
+    feed(tracker, clock, [0.5, 1.3, 0.4], 100, 3);
+    feed(tracker, clock, [0, 1.25, 0], 180, 40);
+    const snap = tracker.getSnapshot();
+    assert.equal(snap.status, 'ready');
+    assert.equal(snap.calibration.source, 'recenter');
+    assert.deepEqual(snap.calibration.origin, [0, 1.25, 0]);
+    assert.ok(Math.abs(wrap180(snap.calibration.yaw - 180)) < 1e-9);
+    assert.ok(
+      logs.some((line) =>
+        /calibrated src=recenter reason=recenter origin=\[0\.000,1\.250,0\.000\]/.test(line)
+      )
+    );
+  }
+  // A Solo calibration inside the confirm window is already in the new frame.
+  {
+    let entries = 1;
+    const { clock, logs, tracker } = trackerWithLog(() => entries);
+    feed(tracker, clock, [0.5, 1.3, 0.4], 100, 40);
+    tracker.calibrateForSolo(blueAnchor);
+    feed(tracker, clock, [0, 1.25, 0], 180, 2);
+    entries = 2;
+    const fresh = tracker.calibrateForSolo(blueAnchor);
+    feed(tracker, clock, [0, 1.25, 0], 180, 20);
+    assert.deepEqual(tracker.getSnapshot().calibration, fresh);
+    assert.deepEqual(fresh.origin, [0, 1.25, 0]);
+    assert.equal(tracker.getSnapshot().referenceResets, 0);
+    assert.ok(logs.some((line) => /action=none reason=calibrated-after-jump/.test(line)));
+  }
 });

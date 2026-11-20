@@ -3,12 +3,17 @@ import {
   calibrateFromSamples,
   gameplayHeadPose,
   headSampleFromViro,
+  headStep,
+  isReferenceDiscontinuity,
+  rebaseCalibration,
+  REFERENCE_JUMP_MAX_DT_MS,
   yawFromForward,
   type Calibration,
   type GameplayHeadPose,
   type HeadSample,
   type Posture,
   type RigAnchor,
+  type Vec3,
 } from './quest-head-rig.ts';
 import { questRuntime } from './quest-runtime-store.ts';
 
@@ -17,6 +22,10 @@ const PUBLISH_INTERVAL_MS = 200;
 const RECENTER_WINDOW_MS = 500;
 const RECENTER_TIMEOUT_MS = 2000;
 const RECENTER_MAX_SAMPLES = 128;
+// A candidate jump is kept only after this many continuous samples follow it
+// (about 80 ms at 72 Hz). Another discontinuity inside that window is a glitch
+// and cancels it, and no new candidate starts until the stream settles again.
+const REFERENCE_JUMP_CONFIRM_SAMPLES = 6;
 
 export const QUEST_RECENTER_FAILURE_MESSAGE = 'Hold still and select Recenter again';
 const NO_SAMPLES_MESSAGE = 'Head pose unavailable.';
@@ -30,14 +39,24 @@ export interface QuestHeadTrackerSnapshot {
   pose: GameplayHeadPose | null;
   outOfBounds: boolean;
   samplesSeen: number;
+  /** Latest raw LOCAL head sample, for sparse logs only. */
+  raw: { position: Vec3; yaw: number | null } | null;
+  /** Calibrations moved through a detected reference-frame jump this session. */
+  referenceResets: number;
 }
+
+const fmt = (v: Vec3) => `[${v.map((n) => n.toFixed(3)).join(',')}]`;
+const fmtYaw = (yaw: number | null) => (yaw === null ? '--' : yaw.toFixed(1));
 
 export function createQuestHeadTracker(deps: {
   now: () => number;
   schedule: (cb: () => void, ms: number) => unknown;
   cancel: (h: unknown) => void;
   entries: () => number;
+  /** Sparse event log: calibration changes and reference jumps, never per frame. */
+  log?: (message: string) => void;
 }) {
+  const log = deps.log ?? (() => {});
   const listeners = new Set<() => void>();
   const ring: (HeadSample | null)[] = new Array(SAMPLE_BUFFER_CAPACITY).fill(null);
   let ringHead = 0;
@@ -61,8 +80,18 @@ export function createQuestHeadTracker(deps: {
   let recenterActive = false;
   let recenterTimer: unknown = null;
   let recenterSamples: HeadSample[] = [];
-  let preRecenterStatus: QuestHeadTrackerSnapshot['status'] = status;
-  let preRecenterMessage: string | null = message;
+
+  // Bumped whenever origin/yaw is set, so a jump confirmed after a fresh
+  // calibration (already in the new frame) is not applied twice.
+  let calibrationVersion = 0;
+  let pendingJump: {
+    from: HeadSample;
+    to: HeadSample;
+    version: number;
+    confirmations: number;
+  } | null = null;
+  let jumpCooldown = 0;
+  let referenceResets = 0;
 
   let snapshot: QuestHeadTrackerSnapshot = buildSnapshot();
 
@@ -77,6 +106,10 @@ export function createQuestHeadTracker(deps: {
       pose,
       outOfBounds: pose ? pose.outOfBounds : false,
       samplesSeen,
+      raw: latestSample
+        ? { position: latestSample.position, yaw: yawFromForward(latestSample.forward) }
+        : null,
+      referenceResets,
     };
   }
 
@@ -124,6 +157,81 @@ export function createQuestHeadTracker(deps: {
     return result;
   }
 
+  function logCalibration(reason: string) {
+    log(
+      `calibrated src=${calibration.source} reason=${reason} origin=${fmt(calibration.origin)} yaw=${calibration.yaw.toFixed(1)} posture=${calibration.posture} entry=${calibration.entry}`
+    );
+  }
+
+  function commitJump(jump: NonNullable<typeof pendingJump>) {
+    if (calibration.source === 'default') {
+      log('reference jump confirmed action=none reason=default-frame-follows-local');
+      return;
+    }
+    if (jump.version !== calibrationVersion) {
+      log('reference jump confirmed action=none reason=calibrated-after-jump');
+      return;
+    }
+    const rebased = rebaseCalibration(calibration, jump.from, jump.to);
+    if (!rebased) {
+      log('reference jump confirmed action=none reason=yaw-unknown');
+      return;
+    }
+    const before = calibration;
+    calibration = rebased;
+    calibrationVersion += 1;
+    referenceResets += 1;
+    log(
+      `reference reset rebase origin=${fmt(before.origin)}->${fmt(calibration.origin)} yaw=${before.yaw.toFixed(1)}->${calibration.yaw.toFixed(1)} resets=${referenceResets}`
+    );
+    publishNow();
+  }
+
+  // Raw sample-to-sample check. The clamped gameplay pose is never consulted:
+  // being out of bounds alone never moves the world.
+  function trackReferenceFrame(previous: HeadSample | null, sample: HeadSample) {
+    if (!previous) return;
+    const step = headStep(previous, sample);
+    const jump = isReferenceDiscontinuity(step);
+    if (pendingJump) {
+      if (jump || step.dt > REFERENCE_JUMP_MAX_DT_MS) {
+        log(
+          `reference jump rejected reason=${jump ? 'second-discontinuity' : 'sample-gap'} dt=${step.dt}ms`
+        );
+        pendingJump = null;
+        jumpCooldown = REFERENCE_JUMP_CONFIRM_SAMPLES;
+        return;
+      }
+      pendingJump.confirmations += 1;
+      if (pendingJump.confirmations >= REFERENCE_JUMP_CONFIRM_SAMPLES) {
+        const confirmed = pendingJump;
+        pendingJump = null;
+        commitJump(confirmed);
+      }
+      return;
+    }
+    if (!jump) {
+      if (jumpCooldown > 0) jumpCooldown -= 1;
+      return;
+    }
+    if (jumpCooldown > 0 || step.yawDelta === null) {
+      // Logged once per settled stream, so a glitching tracker cannot spam.
+      if (jumpCooldown === 0) {
+        log(
+          `reference jump ignored reason=yaw-unknown dt=${step.dt}ms dpos=${step.distance.toFixed(3)}m`
+        );
+      }
+      jumpCooldown = REFERENCE_JUMP_CONFIRM_SAMPLES;
+      return;
+    }
+    pendingJump = { from: previous, to: sample, version: calibrationVersion, confirmations: 0 };
+    // Recenter samples from before the jump belong to the old frame.
+    if (recenterActive) recenterSamples = [];
+    log(
+      `reference jump candidate dt=${step.dt}ms delta=${fmt(step.delta)} dpos=${step.distance.toFixed(3)}m dyaw=${fmtYaw(step.yawDelta)} from=${fmt(previous.position)}@${fmtYaw(yawFromForward(previous.forward))} to=${fmt(sample.position)}@${fmtYaw(yawFromForward(sample.forward))} origin=${fmt(calibration.origin)} calYaw=${calibration.yaw.toFixed(1)} src=${calibration.source}`
+    );
+  }
+
   function applyRecenterSuccess(origin: Calibration['origin'], yaw: number) {
     clearRecenterTimer();
     recenterActive = false;
@@ -138,8 +246,10 @@ export function createQuestHeadTracker(deps: {
       source: 'recenter',
       entry,
     };
+    calibrationVersion += 1;
     status = 'ready';
     message = null;
+    logCalibration('recenter');
     publishNow();
   }
 
@@ -148,6 +258,7 @@ export function createQuestHeadTracker(deps: {
     const sample = headSampleFromViro(t, e);
     if (!sample) return;
 
+    const previous = latestSample;
     ring[ringHead] = sample;
     ringHead = (ringHead + 1) % SAMPLE_BUFFER_CAPACITY;
     if (ringCount < SAMPLE_BUFFER_CAPACITY) ringCount += 1;
@@ -164,6 +275,8 @@ export function createQuestHeadTracker(deps: {
     } else {
       sampleHz = null;
     }
+
+    trackReferenceFrame(previous, sample);
 
     if (recenterActive) {
       recenterSamples.push(sample);
@@ -241,16 +354,14 @@ export function createQuestHeadTracker(deps: {
       }
     }
 
+    calibrationVersion += 1;
+    logCalibration(result.ok ? 'solo-window' : status === 'ready' ? 'solo-latest' : 'solo-default');
     publishNow();
     return calibration;
   }
 
   function recenter() {
     clearRecenterTimer();
-    if (!recenterActive) {
-      preRecenterStatus = status;
-      preRecenterMessage = message;
-    }
     recenterActive = true;
     recenterSamples = [];
     status = 'sampling';
@@ -277,13 +388,32 @@ export function createQuestHeadTracker(deps: {
   function dispose() {
     clearPublishTimer();
     clearRecenterTimer();
-    if (recenterActive) {
-      recenterActive = false;
-      recenterSamples = [];
-      status = preRecenterStatus;
-      message = preRecenterMessage;
-      snapshot = buildSnapshot();
-    }
+    recenterActive = false;
+    recenterSamples = [];
+    pendingJump = null;
+    jumpCooldown = 0;
+    referenceResets = 0;
+    calibrationVersion += 1;
+    // Clear previous-session origin/yaw and samples so a new VRActivity entry
+    // opens its pre-Solo menu in front of the wearer instead of anchored to
+    // the destroyed OpenXR session, while keeping the user's posture choice.
+    ring.fill(null);
+    ringHead = 0;
+    ringCount = 0;
+    samplesSeen = 0;
+    latestSample = null;
+    sampleHz = null;
+    lastPublishAt = null;
+    calibratedEntry = null;
+    anchor = null;
+    status = 'uncalibrated';
+    message = null;
+    calibration = {
+      ...DEFAULT_CALIBRATION,
+      origin: [...DEFAULT_CALIBRATION.origin],
+      posture: calibration.posture,
+    };
+    snapshot = buildSnapshot();
   }
 
   return {
@@ -307,4 +437,6 @@ export const questHeadTracker = createQuestHeadTracker({
   schedule: (cb, ms) => setTimeout(cb, ms),
   cancel: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
   entries: () => questRuntime.getSnapshot().entries,
+  // console.warn reaches logcat as ReactNativeJS in release builds.
+  log: (message) => console.warn(`[QuestHeadRig] ${message}`),
 });
