@@ -1,6 +1,6 @@
 # Quest 02 arena menu
 
-Stage 02 replaces the stage 01 reference cube with an in-headset menu and a fixed virtual ring. It is not a fight, and it has not been worn on a headset. Branch 01's device gate is also still pending. Neither stage is merged.
+Stage 02 replaces the stage 01 reference cube with an in-headset menu and a fixed virtual ring. It is not a fight, and it has not been worn on a headset. Branch 01's device gate is also still pending. Neither stage is merged. Stage 03 (`feat/quest-03-head-rig`) replaces the tabletop ring pose with the first-person robot-eye rig documented in `docs/quest-03-head-rig.md`.
 
 The 2D route at `/quest-vr` is only the launcher. Solo, Ready, Back, and Exit are inside the existing `ViroXRSceneNavigator` scene. There is one OpenXR session, the one stage 01 already opens. Passthrough stays off. Solo still places both robots in the ring.
 

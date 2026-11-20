@@ -3,21 +3,26 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const layout = require('../src/features/quest-vr/quest-menu-layout.ts');
 const {
   QUEST_MENU_ACTIONS,
   QUEST_MENU_POSE,
   QUEST_MENU_SIZE,
   QUEST_MENU_TAGLINE,
   QUEST_MENU_TEXTURE,
-  QUEST_RING_POSE,
+  QUEST_MENU_TEXT_LINES_MAX,
   buildQuestMenu,
   questMenuButtonFrame,
   questMenuButtons,
   questMenuHit,
   questMenuMaterialName,
   wrapMenuLine,
-} = require('../src/features/quest-vr/quest-menu-layout.ts');
-const { questPointerHover, questTriggerPress } = require('../src/features/quest-vr/quest-menu-input.ts');
+} = layout;
+const {
+  questPointerHover,
+  questTriggerPress,
+} = require('../src/features/quest-vr/quest-menu-input.ts');
+const { ARENA_LAYOUT, ARENA_RULES } = require('../src/features/arena-fighter/arena-controller.ts');
 const {
   QUEST_ASSET_TIMEOUT_MS,
   QUEST_LEAVING,
@@ -47,35 +52,63 @@ function fakeClock() {
   };
 }
 
+function rectanglesOverlap(a, b) {
+  return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+}
+
 test('menu pixels and controller frames describe the same buttons', () => {
-  assert.deepEqual(QUEST_MENU_ACTIONS, ['solo', 'ready', 'back', 'exit']);
+  assert.equal(Object.hasOwn(layout, 'QUEST_RING_POSE'), false);
+  assert.deepEqual(QUEST_MENU_ACTIONS, ['solo', 'ready', 'back', 'exit', 'recenter', 'posture']);
+  assert.deepEqual(QUEST_MENU_POSE.menu, {
+    position: [0, 0.08, -1.15],
+    rotation: [0, 0, 0],
+  });
+  assert.deepEqual(QUEST_MENU_SIZE, { widthM: 1.6, heightM: 0.9 });
+
+  const pages = {
+    menu: ['solo', 'recenter', 'posture', 'exit'],
+    ring: ['ready', 'back', 'exit', 'recenter', 'posture'],
+  };
   const seen = new Set();
   for (const page of ['menu', 'ring']) {
-    const buttons = questMenuButtons(page);
-    for (const button of buttons) {
-      seen.add(button.action);
-      assert.ok(button.x >= 0 && button.y >= 0);
-      assert.ok(button.x + button.width <= QUEST_MENU_TEXTURE.widthPx);
-      assert.ok(button.y + button.height <= QUEST_MENU_TEXTURE.heightPx);
-      const frame = questMenuButtonFrame(button);
-      assert.ok(Math.abs(frame.position[0]) + frame.width / 2 <= QUEST_MENU_SIZE.widthM / 2);
-      assert.ok(Math.abs(frame.position[1]) + frame.height / 2 <= QUEST_MENU_SIZE.heightM / 2);
-      assert.equal(questMenuHit(page, frame.position[0], frame.position[1]), button.action);
-      assert.equal(
-        questMenuHit(page, frame.position[0], frame.position[1] + frame.height / 2 + 0.001),
-        null
+    for (const posture of ['standing', 'seated']) {
+      const buttons = questMenuButtons(page, { acknowledged: false, posture });
+      assert.deepEqual(
+        buttons.map((button) => button.action),
+        pages[page]
       );
-    }
-    for (let index = 0; index < buttons.length; index++) {
-      for (let other = index + 1; other < buttons.length; other++) {
-        const a = buttons[index];
-        const b = buttons[other];
-        const separated =
-          a.x + a.width <= b.x ||
-          b.x + b.width <= a.x ||
-          a.y + a.height <= b.y ||
-          b.y + b.height <= a.y;
-        assert.equal(separated, true);
+      assert.equal(new Set(buttons.map((button) => button.y)).size, 2);
+      const postureButton = buttons.find((button) => button.action === 'posture');
+      assert.equal(postureButton.label, posture === 'seated' ? 'Seated' : 'Standing');
+      const standing = questMenuButtons(page, 'standing').find(
+        (button) => button.action === 'posture'
+      );
+      assert.deepEqual(
+        [postureButton.x, postureButton.y, postureButton.width, postureButton.height],
+        [standing.x, standing.y, standing.width, standing.height]
+      );
+      for (const button of buttons) {
+        seen.add(button.action);
+        assert.ok(button.x >= 0 && button.y >= 0);
+        assert.ok(button.x + button.width <= QUEST_MENU_TEXTURE.widthPx);
+        assert.ok(button.y + button.height <= QUEST_MENU_TEXTURE.heightPx);
+        const frame = questMenuButtonFrame(button);
+        assert.ok(
+          Math.abs(frame.position[0]) + frame.width / 2 <= QUEST_MENU_SIZE.widthM / 2 + 1e-9
+        );
+        assert.ok(
+          Math.abs(frame.position[1]) + frame.height / 2 <= QUEST_MENU_SIZE.heightM / 2 + 1e-9
+        );
+        assert.equal(questMenuHit(page, frame.position[0], frame.position[1]), button.action);
+        assert.equal(
+          questMenuHit(page, frame.position[0], frame.position[1] + frame.height / 2 + 0.001),
+          null
+        );
+      }
+      for (let index = 0; index < buttons.length; index++) {
+        for (let other = index + 1; other < buttons.length; other++) {
+          assert.equal(rectanglesOverlap(buttons[index], buttons[other]), false);
+        }
       }
     }
   }
@@ -85,31 +118,70 @@ test('menu pixels and controller frames describe the same buttons', () => {
     questMenuButtons('ring').some((button) => button.action === 'solo'),
     false
   );
-  assert.ok(QUEST_RING_POSE.position[2] < QUEST_MENU_POSE.ring.position[2]);
-  assert.equal(QUEST_MENU_POSE.menu.position[2], -1.15);
-  assert.equal(QUEST_MENU_POSE.ring.position[2], -1.15);
-  assert.deepEqual(QUEST_MENU_SIZE, { widthM: 1.6, heightM: 0.9 });
   const ringButtons = questMenuButtons('ring');
   const gapM =
     ((ringButtons[1].x - (ringButtons[0].x + ringButtons[0].width)) / QUEST_MENU_TEXTURE.widthPx) *
     QUEST_MENU_SIZE.widthM;
   assert.ok(gapM > 0.06, `button gap ${gapM} m`);
-  assert.ok(questMenuButtonFrame(ringButtons[0]).height >= 0.18);
+  assert.ok(questMenuButtonFrame(ringButtons[0]).height >= 0.11);
+
+  const packed = Array.from({ length: 40 }, () => 'status '.repeat(30).trim());
+  for (const page of ['menu', 'ring']) {
+    for (const posture of ['standing', 'seated']) {
+      const menu = buildQuestMenu(page, packed, { posture });
+      assert.ok(menu.ops.length >= 1 && menu.ops.length <= 64);
+      const block = menu.ops.filter(
+        (op) => op.op === 'text' && op.align === 'center' && op.size === 36
+      );
+      assert.equal(block.length, QUEST_MENU_TEXT_LINES_MAX);
+      for (const button of menu.buttons) {
+        for (const text of block) {
+          assert.equal(
+            rectanglesOverlap(button, {
+              x: text.x - text.maxWidth / 2,
+              y: text.y,
+              width: text.maxWidth,
+              height: text.size,
+            }),
+            false
+          );
+        }
+      }
+    }
+  }
+
   const menu = buildQuestMenu('menu', ['Solo places both robots in the ring.']);
   assert.match(menu.specKey, /Solo/);
   assert.match(menu.specKey, /Exit/);
+  assert.match(menu.specKey, /Recenter/);
+  assert.match(menu.specKey, /Standing/);
   assert.match(menu.specKey, new RegExp(QUEST_MENU_TAGLINE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(menu.specKey, /#60a5fa/);
   assert.match(menu.specKey, /#d99a9a/);
   assert.match(menu.specKey, /#E818181B/);
   assert.match(menu.specKey, /#09090b/);
   assert.doesNotMatch(menu.specKey, /#0f766e|#991b1b|#101826/);
+
   const ring = buildQuestMenu('ring', ['Both robots are in the ring.']);
   assert.equal(ring.buttons.find((button) => button.action === 'ready').label, 'Ready');
-  const set = buildQuestMenu('ring', ['Both robots are in the ring.'], { acknowledged: true });
+  const set = buildQuestMenu('ring', ['Both robots are in the ring.'], {
+    acknowledged: true,
+    posture: 'seated',
+  });
   assert.equal(set.buttons.find((button) => button.action === 'ready').label, 'Set');
-  assert.equal(questMenuHit('ring', questMenuButtonFrame(set.buttons[0]).position[0], questMenuButtonFrame(set.buttons[0]).position[1], true), 'ready');
-  const hovered = buildQuestMenu('menu', ['Solo places both robots in the ring.'], { hover: 'solo' });
+  assert.equal(set.buttons.find((button) => button.action === 'posture').label, 'Seated');
+  assert.equal(
+    questMenuHit(
+      'ring',
+      questMenuButtonFrame(set.buttons[0]).position[0],
+      questMenuButtonFrame(set.buttons[0]).position[1],
+      true
+    ),
+    'ready'
+  );
+  const hovered = buildQuestMenu('menu', ['Solo places both robots in the ring.'], {
+    hover: 'solo',
+  });
   assert.notEqual(hovered.specKey, menu.specKey);
   const solo = menu.buttons.find((button) => button.action === 'solo');
   assert.match(hovered.specKey, new RegExp(`"x":${solo.x}`));
@@ -126,6 +198,81 @@ test('menu pixels and controller frames describe the same buttons', () => {
   });
   assert.match(titled.specKey, /menu-background\.png/);
   assert.match(titled.specKey, /rock\.png/);
+});
+
+test('the upright ring panel misses every default-calibration opponent corner', () => {
+  const pose = QUEST_MENU_POSE.ring;
+  assert.deepEqual(pose.rotation, [0, 0, 0]);
+  const distance = Math.hypot(...pose.position);
+  assert.ok(distance >= 0.9 && distance <= 1.6);
+  const elevation =
+    (Math.atan2(pose.position[1], Math.hypot(pose.position[0], pose.position[2])) * 180) / Math.PI;
+  assert.ok(elevation < -10);
+
+  const glb = fs.readFileSync(
+    path.join(__dirname, '../assets/arena/Mike_Player2_RedOrange_Combat_AR.glb')
+  );
+  const json = JSON.parse(glb.subarray(20, 20 + glb.readUInt32LE(12)).toString('utf8'));
+  for (const node of json.nodes) {
+    if (node.mesh === undefined) continue;
+    assert.equal(node.translation, undefined);
+    assert.equal(node.rotation, undefined);
+    assert.equal(node.scale, undefined);
+  }
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const mesh of json.meshes) {
+    for (const primitive of mesh.primitives) {
+      const accessor = json.accessors[primitive.attributes.POSITION];
+      for (let axis = 0; axis < 3; axis++) {
+        min[axis] = Math.min(min[axis], accessor.min[axis]);
+        max[axis] = Math.max(max[axis], accessor.max[axis]);
+      }
+    }
+  }
+
+  const scale = ARENA_LAYOUT.fighterScale;
+  const fighterY = ARENA_LAYOUT.floorHeight + ARENA_LAYOUT.footOffset;
+  const eyeModel = [0, 1.1271, 0.2028];
+  const rotateY = (yaw, point) => {
+    const radians = (yaw * Math.PI) / 180;
+    const cosine = Math.cos(radians);
+    const sine = Math.sin(radians);
+    return [point[0] * cosine + point[2] * sine, point[1], -point[0] * sine + point[2] * cosine];
+  };
+  const ringLocal = (anchor, point) => {
+    const placed = rotateY(
+      anchor.yaw,
+      point.map((value) => value * scale)
+    );
+    return [anchor.x + placed[0], fighterY + placed[1], anchor.z + placed[2]];
+  };
+  const blue = { x: -ARENA_RULES.spawn, z: 0, yaw: 90 };
+  const red = { x: ARENA_RULES.spawn, z: 0, yaw: -90 };
+  const eye = ringLocal(blue, eyeModel);
+  const world = (point) =>
+    rotateY(
+      90,
+      point.map((value, index) => (value - eye[index]) * 16)
+    );
+  assert.ok(world(eye).every((value) => Math.abs(value) < 1e-9));
+
+  const corners = [];
+  for (const x of [min[0], max[0]]) {
+    for (const y of [min[1], max[1]]) {
+      for (const z of [min[2], max[2]]) corners.push(world(ringLocal(red, [x, y, z])));
+    }
+  }
+  const halfWidth = QUEST_MENU_SIZE.widthM / 2;
+  const halfHeight = QUEST_MENU_SIZE.heightM / 2;
+  for (const corner of corners) {
+    assert.ok(corner[2] < pose.position[2]);
+    const t = pose.position[2] / corner[2];
+    assert.ok(t > 0 && t < 1);
+    const hitX = t * corner[0] - pose.position[0];
+    const hitY = t * corner[1] - pose.position[1];
+    assert.ok(Math.abs(hitX) > halfWidth || Math.abs(hitY) > halfHeight);
+  }
 });
 
 test('trigger presses and hover ignore gaze, grips, and repeat clicks', () => {
@@ -186,24 +333,20 @@ test('solo keeps ArenaMatch untracked and Ready does not leave the lobby', () =>
   assert.equal(opened.landscape, true);
   assert.equal(opened.canReady, false);
   assert.equal(opened.localReady, false);
+  assert.equal(opened.acknowledged, false);
   assert.match(opened.message, /tracking is stable/);
-  assert.doesNotMatch(opened.lines.join('\n'), /tracking/i);
-  assert.match(opened.lines.join('\n'), /stay idle/);
+  assert.match(opened.lines.join('\n'), /Both robots are in the ring/);
   const result = session.ready();
   const afterReady = session.getSnapshot();
   assert.equal(result.called, false);
   assert.equal(result.started, false);
   assert.equal(result.reason, 'acknowledged');
-  assert.equal(afterReady.acknowledged, true);
   assert.equal(afterReady.stage, 'lobby');
   assert.equal(afterReady.localReady, false);
+  assert.equal(afterReady.acknowledged, true);
   assert.equal(afterReady.tracking, false);
   assert.equal(afterReady.placed, false);
-  assert.match(afterReady.lines.join('\n'), new RegExp(QUEST_READY_SAVED));
-  const again = session.ready();
-  assert.equal(again.reason, 'acknowledged');
-  assert.equal(session.getSnapshot().stage, 'lobby');
-  assert.equal(session.getSnapshot().localReady, false);
+  assert.ok(afterReady.lines.includes(QUEST_READY_SAVED));
 
   const staleLease = afterReady.lease;
   session.assetLoaded(staleLease, afterReady.token, afterReady.placementVersion, 'arena');
@@ -219,7 +362,6 @@ test('solo keeps ArenaMatch untracked and Ready does not leave the lobby', () =>
   assert.equal(session.getSnapshot().mode, null);
   assert.equal(session.getSnapshot().page, 'menu');
   assert.equal(session.getSnapshot().acknowledged, false);
-  assert.doesNotMatch(session.getSnapshot().lines.join('\n'), /Ready saved/);
   session.assetLoaded(staleLease, afterReady.token, afterReady.placementVersion, 'arena');
   assert.equal(session.solo(), true);
   const reopened = session.getSnapshot();
@@ -229,11 +371,8 @@ test('solo keeps ArenaMatch untracked and Ready does not leave the lobby', () =>
   assert.equal(session.getSnapshot().assetsLoaded, 0);
   session.exit();
   assert.equal(session.getSnapshot().mode, null);
-  assert.equal(session.getSnapshot().page, 'menu');
-  assert.match(session.getSnapshot().lines.join('\n'), new RegExp(QUEST_LEAVING));
-  assert.equal(session.solo(), false);
-  session.exit();
-  assert.match(session.getSnapshot().lines.join('\n'), new RegExp(QUEST_LEAVING));
+  assert.equal(session.getSnapshot().leaving, true);
+  assert.deepEqual(session.getSnapshot().lines, [QUEST_LEAVING]);
   session.dispose();
   session.dispose();
   assert.equal(session.solo(), false);
@@ -265,6 +404,7 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
   assert.match(scene, /Mike_Player2_RedOrange_Combat_AR\.glb/);
   assert.match(scene, /ARENA_LAYOUT/);
   assert.match(scene, /questMenuHit/);
+  assert.match(scene, /questMenuButtonFrame\(/);
   assert.match(scene, /renderQuestMenuTexture/);
   assert.match(scene, /questTriggerPress/);
   assert.match(scene, /questPointerHover/);

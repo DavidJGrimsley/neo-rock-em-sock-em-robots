@@ -26,18 +26,20 @@ import {
   type QuestArenaSession,
   type QuestArenaView,
 } from './quest-arena-session.ts';
+import { menuFrame, questRigTransform, type RigAnchor } from './quest-head-rig.ts';
+import { questHeadTracker, type QuestHeadTrackerSnapshot } from './quest-head-tracker.ts';
+import { resolveQuestMenuAssetFile } from './quest-menu-asset-uri.ts';
+import { questPointerHover, questTriggerPress, type QuestPressState } from './quest-menu-input.ts';
 import {
   buildQuestMenu,
   QUEST_MENU_POSE,
   QUEST_MENU_SIZE,
-  QUEST_RING_POSE,
   questMenuButtonFrame,
   questMenuButtons,
   type QuestMenuAction,
   type QuestMenuAssets,
+  type QuestMenuPosture,
 } from './quest-menu-layout.ts';
-import { resolveQuestMenuAssetFile } from './quest-menu-asset-uri.ts';
-import { questPointerHover, questTriggerPress, type QuestPressState } from './quest-menu-input.ts';
 import {
   createQuestMenuTexturePipeline,
   questMenuDisplay,
@@ -77,7 +79,12 @@ const arenaScale: [number, number, number] = [
   ARENA_LAYOUT.arenaScale * ARENA_LAYOUT.arenaHorizontalScale,
 ];
 const fighterY = ARENA_LAYOUT.floorHeight + ARENA_LAYOUT.footOffset;
+const stanceRingSize = 0.06;
+const stanceRingThickness = 0.004;
+const stanceRingHalf = (stanceRingSize - stanceRingThickness) / 2;
+const stanceRingY = ARENA_LAYOUT.floorHeight + 0.0005;
 const idleAnimation = { name: 'IdleAggro', loop: true, run: true, interruptible: true };
+const systemRecenterHint = 'If the system recenter moved the view, select Recenter.';
 
 // Colour-only materials have no texture to decode, so they register at import
 // long before the scene mounts. Panel art materials are registered natively by
@@ -85,6 +92,8 @@ const idleAnimation = { name: 'IdleAggro', loop: true, run: true, interruptible:
 ViroMaterials.createMaterials({
   questMenuBacking: { diffuseColor: '#09090b', lightingModel: 'Constant' },
   questRingFloor: { diffuseColor: '#1f2937', lightingModel: 'Constant' },
+  questStanceRing: { diffuseColor: '#38bdf8', lightingModel: 'Constant' },
+  questStanceRingOutOfBounds: { diffuseColor: '#f59e0b', lightingModel: 'Constant' },
   // Stock Viro 3.0.3 reads colorWriteMask. The OpenXR per-eye clear can reset GL
   // colour writes, so the fragment also writes zero alpha, and Alpha blending
   // turns that into no change. With passthrough off, blendMode None would paint
@@ -101,6 +110,8 @@ ViroMaterials.createMaterials({
   questMenuFallbackPrimary: { diffuseColor: '#60a5fa', lightingModel: 'Constant' },
   questMenuFallbackDanger: { diffuseColor: '#d99a9a', lightingModel: 'Constant' },
   questMenuFallbackBack: { diffuseColor: '#27272a', lightingModel: 'Constant' },
+  questMenuFallbackRecenter: { diffuseColor: '#1e3a8a', lightingModel: 'Constant' },
+  questMenuFallbackPosture: { diffuseColor: '#854d0e', lightingModel: 'Constant' },
 });
 
 // The medical viewer's headset text: scale 0.05 with the box in scaled units.
@@ -115,10 +126,19 @@ const messageStyle = {
   textAlignVertical: 'center',
 } as const;
 const labelStyle = { ...messageStyle, fontSize: 28 } as const;
+const diagnosticsStyle = {
+  fontFamily: 'sans-serif',
+  fontSize: 16,
+  color: '#cbd5e1',
+  textAlign: 'center',
+  textAlignVertical: 'center',
+} as const;
 
 function fallbackMaterial(action: QuestMenuAction) {
   if (action === 'exit') return 'questMenuFallbackDanger';
   if (action === 'back') return 'questMenuFallbackBack';
+  if (action === 'recenter') return 'questMenuFallbackRecenter';
+  if (action === 'posture') return 'questMenuFallbackPosture';
   return 'questMenuFallbackPrimary';
 }
 
@@ -132,6 +152,15 @@ function leave(session: QuestArenaSession) {
   session.exit();
   questRuntime.exitRequested('scene-exit');
   exitVRScene();
+}
+
+function formatDiagnostics(tracker: QuestHeadTrackerSnapshot): string {
+  const { calibration, sampleHz, pose, status } = tracker;
+  const hz = sampleHz === null ? '--' : sampleHz.toFixed(0);
+  const header = `Rig ${status} (${calibration.source}, ${calibration.posture}, e${calibration.entry}, ${hz}Hz)`;
+  if (!pose) return `${header}\nPose: awaiting head samples`;
+  const flags = `${pose.clamped ? ' CLAMP' : ''}${pose.outOfBounds ? ' OOB' : ''}`;
+  return `${header}\nL ${pose.lateral.toFixed(2)}m V ${pose.vertical.toFixed(2)}m F ${pose.forward.toFixed(2)}m yaw ${pose.yawRelative.toFixed(0)}deg${flags}`;
 }
 
 async function copyPackagedMenuAsset(uri: string, hash: string | null, type: string) {
@@ -169,10 +198,12 @@ function QuestFighter({
   id,
   view,
   session,
+  visible = true,
 }: {
   id: FighterId;
   view: QuestArenaView;
   session: QuestArenaSession;
+  visible?: boolean;
 }) {
   const transform = view.transforms?.[id];
   if (!transform || view.token === null || view.placementVersion === null) return null;
@@ -187,39 +218,91 @@ function QuestFighter({
       rotation={[0, transform.yaw, 0]}
       scale={fighterScale}
       animation={idleAnimation}
+      visible={visible}
       onLoadEnd={() => session.assetLoaded(callbackLease, token, version, id)}
       onError={() => session.assetFailed(callbackLease, token, version, id)}
     />
   );
 }
 
-function QuestRing({ view, session }: { view: QuestArenaView; session: QuestArenaSession }) {
-  if (view.token === null || view.placementVersion === null) return null;
+function StanceFloorRing({ anchor, outOfBounds }: { anchor: RigAnchor; outOfBounds: boolean }) {
+  const materials = [outOfBounds ? 'questStanceRingOutOfBounds' : 'questStanceRing'];
+  return (
+    <ViroNode position={[anchor.x, stanceRingY, anchor.z]} rotation={[0, anchor.yaw, 0]}>
+      <ViroQuad
+        position={[0, 0, stanceRingHalf]}
+        rotation={[-90, 0, 0]}
+        width={stanceRingSize}
+        height={stanceRingThickness}
+        materials={materials}
+      />
+      <ViroQuad
+        position={[0, 0, -stanceRingHalf]}
+        rotation={[-90, 0, 0]}
+        width={stanceRingSize}
+        height={stanceRingThickness}
+        materials={materials}
+      />
+      <ViroQuad
+        position={[-stanceRingHalf, 0, 0]}
+        rotation={[-90, 0, 0]}
+        width={stanceRingThickness}
+        height={stanceRingSize}
+        materials={materials}
+      />
+      <ViroQuad
+        position={[stanceRingHalf, 0, 0]}
+        rotation={[-90, 0, 0]}
+        width={stanceRingThickness}
+        height={stanceRingSize}
+        materials={materials}
+      />
+    </ViroNode>
+  );
+}
+
+function QuestRing({
+  view,
+  session,
+  tracker,
+}: {
+  view: QuestArenaView;
+  session: QuestArenaSession;
+  tracker: QuestHeadTrackerSnapshot;
+}) {
+  if (view.token === null || view.placementVersion === null || !view.transforms) return null;
   const token = view.token;
   const version = view.placementVersion;
   const callbackLease = view.lease;
+  const anchor: RigAnchor = tracker.anchor ?? view.transforms.blue;
+  const rig = questRigTransform(tracker.calibration, anchor);
   return (
     <ViroNode
       key={`${callbackLease}:${token}:${version}`}
-      position={QUEST_RING_POSE.position}
-      rotation={QUEST_RING_POSE.rotation}>
-      <ViroQuad
-        rotation={[-90, 0, 0]}
-        width={1.4}
-        height={1.4}
-        position={[0, 0.001, 0]}
-        materials={['questRingFloor']}
-      />
-      <Viro3DObject
-        source={sources.arena}
-        type="GLB"
-        scale={arenaScale}
-        position={[0, ARENA_LAYOUT.arenaBaseOffset, 0]}
-        onLoadEnd={() => session.assetLoaded(callbackLease, token, version, 'arena')}
-        onError={() => session.assetFailed(callbackLease, token, version, 'arena')}
-      />
-      <QuestFighter id="blue" view={view} session={session} />
-      <QuestFighter id="red" view={view} session={session} />
+      position={[...rig.position]}
+      rotation={[0, rig.rotationY, 0]}>
+      <ViroNode scale={[rig.scale, rig.scale, rig.scale]}>
+        <ViroNode position={[...rig.contentOffset]}>
+          <ViroQuad
+            rotation={[-90, 0, 0]}
+            width={1.4}
+            height={1.4}
+            position={[0, 0.001, 0]}
+            materials={['questRingFloor']}
+          />
+          <StanceFloorRing anchor={anchor} outOfBounds={tracker.outOfBounds} />
+          <Viro3DObject
+            source={sources.arena}
+            type="GLB"
+            scale={arenaScale}
+            position={[0, ARENA_LAYOUT.arenaBaseOffset, 0]}
+            onLoadEnd={() => session.assetLoaded(callbackLease, token, version, 'arena')}
+            onError={() => session.assetFailed(callbackLease, token, version, 'arena')}
+          />
+          <QuestFighter id="blue" view={view} session={session} visible={false} />
+          <QuestFighter id="red" view={view} session={session} />
+        </ViroNode>
+      </ViroNode>
     </ViroNode>
   );
 }
@@ -239,90 +322,112 @@ function QuestMenuText({ text, width, height }: { text: string; width: number; h
 
 function QuestMenu({
   display,
+  tracker,
+  posture,
   lines,
   onPress,
   onHover,
 }: {
   display: QuestMenuDisplay;
+  tracker: QuestHeadTrackerSnapshot;
+  posture: QuestMenuPosture;
   lines: string[];
   onPress: (action: QuestMenuAction, clickState: number, source: unknown) => void;
   onHover: (action: QuestMenuAction, hovering: boolean, source: unknown) => void;
 }) {
-  // Pose, art, and hit targets all come from the displayed screen.
+  // Pose, art, and hit targets all come from the displayed screen inside menuFrame.
+  const frame = menuFrame(tracker.calibration);
   const pose = QUEST_MENU_POSE[display.page];
-  const buttons = questMenuButtons(display.page, display.acknowledged);
+  const buttons = questMenuButtons(display.page, {
+    acknowledged: display.acknowledged,
+    posture,
+  });
   const textWidth = QUEST_MENU_SIZE.widthM * 0.9;
-  const textHeight = QUEST_MENU_SIZE.heightM * 0.5;
+  const textHeight = QUEST_MENU_SIZE.heightM * 0.45;
   return (
-    <ViroNode position={pose.position} rotation={pose.rotation}>
-      <ViroQuad
-        width={QUEST_MENU_SIZE.widthM}
-        height={QUEST_MENU_SIZE.heightM}
-        materials={['questMenuBacking']}
-      />
-      {display.kind === 'art' ? (
+    <ViroNode position={[...frame.position]} rotation={[0, frame.rotationY, 0]}>
+      <ViroNode position={pose.position} rotation={pose.rotation}>
         <ViroQuad
-          key={display.material}
-          position={[0, 0, 0.001]}
           width={QUEST_MENU_SIZE.widthM}
           height={QUEST_MENU_SIZE.heightM}
-          materials={[display.material]}
+          materials={['questMenuBacking']}
         />
-      ) : null}
-      {display.kind === 'loading' ? (
-        <QuestMenuText text="Loading the menu…" width={textWidth} height={textHeight} />
-      ) : null}
-      {display.kind === 'error' ? (
-        <>
-          <QuestMenuText
-            text={`Menu art did not load: ${display.message}\n${lines.join('\n')}`}
-            width={textWidth}
-            height={textHeight}
+        {display.kind === 'art' ? (
+          <ViroQuad
+            key={display.material}
+            position={[0, 0, 0.001]}
+            width={QUEST_MENU_SIZE.widthM}
+            height={QUEST_MENU_SIZE.heightM}
+            materials={[display.material]}
           />
-          {buttons.map((button) => {
-            const frame = questMenuButtonFrame(button);
-            return (
-              <ViroNode
-                key={button.action}
-                position={[frame.position[0], frame.position[1], 0.004]}>
+        ) : null}
+        {display.kind === 'loading' ? (
+          <QuestMenuText text="Loading the menu…" width={textWidth} height={textHeight} />
+        ) : null}
+        {display.kind === 'error' ? (
+          <>
+            <QuestMenuText
+              text={`Menu art did not load: ${display.message}\n${lines.join('\n')}`}
+              width={textWidth}
+              height={textHeight}
+            />
+            {buttons.map((button) => {
+              const buttonFrame = questMenuButtonFrame(button);
+              const dark =
+                button.action === 'back' ||
+                button.action === 'recenter' ||
+                button.action === 'posture';
+              return (
+                <ViroNode
+                  key={button.action}
+                  position={[buttonFrame.position[0], buttonFrame.position[1], 0.004]}>
+                  <ViroQuad
+                    width={buttonFrame.width}
+                    height={buttonFrame.height}
+                    materials={[fallbackMaterial(button.action)]}
+                  />
+                  <ViroText
+                    text={button.label}
+                    position={[0, 0, 0.004]}
+                    scale={textScale}
+                    width={buttonFrame.width / TEXT_SCALE}
+                    height={buttonFrame.height / TEXT_SCALE}
+                    style={{ ...labelStyle, color: dark ? '#f8fafc' : '#09090b' }}
+                  />
+                </ViroNode>
+              );
+            })}
+          </>
+        ) : null}
+        <ViroText
+          text={formatDiagnostics(tracker)}
+          position={[0, -QUEST_MENU_SIZE.heightM / 2 - 0.08, 0.002]}
+          scale={textScale}
+          width={QUEST_MENU_SIZE.widthM / TEXT_SCALE}
+          height={0.14 / TEXT_SCALE}
+          style={diagnosticsStyle}
+        />
+        {display.input
+          ? buttons.map((button) => {
+              const buttonFrame = questMenuButtonFrame(button);
+              return (
                 <ViroQuad
-                  width={frame.width}
-                  height={frame.height}
-                  materials={[fallbackMaterial(button.action)]}
+                  key={`hit-${button.action}`}
+                  position={buttonFrame.position}
+                  width={buttonFrame.width}
+                  height={buttonFrame.height}
+                  materials={['questMenuHit']}
+                  onClickState={(clickState: number, _position: unknown, source: unknown) =>
+                    onPress(button.action, clickState, source)
+                  }
+                  onHover={(isHovering: boolean, _position: unknown, source: unknown) =>
+                    onHover(button.action, isHovering, source)
+                  }
                 />
-                <ViroText
-                  text={button.label}
-                  position={[0, 0, 0.004]}
-                  scale={textScale}
-                  width={frame.width / TEXT_SCALE}
-                  height={frame.height / TEXT_SCALE}
-                  style={{ ...labelStyle, color: button.action === 'back' ? '#f8fafc' : '#09090b' }}
-                />
-              </ViroNode>
-            );
-          })}
-        </>
-      ) : null}
-      {display.input
-        ? buttons.map((button) => {
-            const frame = questMenuButtonFrame(button);
-            return (
-              <ViroQuad
-                key={`hit-${button.action}`}
-                position={frame.position}
-                width={frame.width}
-                height={frame.height}
-                materials={['questMenuHit']}
-                onClickState={(clickState: number, _position: unknown, source: unknown) =>
-                  onPress(button.action, clickState, source)
-                }
-                onHover={(isHovering: boolean, _position: unknown, source: unknown) =>
-                  onHover(button.action, isHovering, source)
-                }
-              />
-            );
-          })
-        : null}
+              );
+            })
+          : null}
+      </ViroNode>
     </ViroNode>
   );
 }
@@ -330,6 +435,7 @@ function QuestMenu({
 export default function QuestArenaScene() {
   const [session] = useState(createQuestArenaSession);
   const view = useSyncExternalStore(session.subscribe, session.getSnapshot);
+  const tracker = useSyncExternalStore(questHeadTracker.subscribe, questHeadTracker.getSnapshot);
   const [pipeline] = useState(() =>
     createQuestMenuTexturePipeline({
       render: renderQuestMenuTexture,
@@ -343,6 +449,19 @@ export default function QuestArenaScene() {
   const [assets, setAssets] = useState<QuestMenuAssets | null>(null);
   const press = useRef<QuestPressState>({ down: new Set() });
   const hoverSources = useRef(new Map<QuestMenuAction, Set<number>>());
+  const lastLogAt = useRef(0);
+  const posture = tracker.calibration.posture;
+
+  const menuLines = useMemo(() => {
+    const statusLine = tracker.message
+      ? `Head rig (${posture}, ${tracker.status}): ${tracker.message}`
+      : `Head rig (${posture}): ${tracker.status}.`;
+    const lines = [...view.lines, statusLine];
+    if (tracker.outOfBounds) lines.push('Outside bounds: return toward the stance ring center.');
+    lines.push(systemRecenterHint);
+    return lines;
+  }, [view.lines, posture, tracker.status, tracker.message, tracker.outOfBounds]);
+
   const display = questMenuDisplay({ page: view.page, acknowledged: view.acknowledged }, texture);
   const inputKey = questMenuInputKey(display);
   const inputKeyRef = useRef(inputKey);
@@ -351,27 +470,44 @@ export default function QuestArenaScene() {
   const visibleHover =
     display.input &&
     display.page === view.page &&
-    questMenuButtons(view.page, view.acknowledged).some((button) => button.action === hover)
+    questMenuButtons(view.page, { acknowledged: view.acknowledged, posture }).some(
+      (button) => button.action === hover
+    )
       ? hover
       : null;
   const menu = useMemo(
     () =>
-      buildQuestMenu(view.page, view.lines, {
+      buildQuestMenu(view.page, menuLines, {
         hover: visibleHover,
         acknowledged: view.acknowledged,
+        posture,
         assets: assets ?? undefined,
       }),
-    [assets, view.acknowledged, view.lines, view.page, visibleHover]
+    [assets, menuLines, posture, view.acknowledged, view.page, visibleHover]
   );
 
   useEffect(() => {
     questRuntime.sceneMounted();
     return () => {
+      questHeadTracker.dispose();
       session.dispose();
       pipeline.dispose();
       questRuntime.sceneUnmounted();
     };
   }, [pipeline, session]);
+
+  useEffect(() => {
+    const now = Date.now();
+    if (now - lastLogAt.current < 1000) return;
+    lastLogAt.current = now;
+    const pose = tracker.pose;
+    const poseSummary = pose
+      ? `lat=${pose.lateral.toFixed(2)} vert=${pose.vertical.toFixed(2)} fwd=${pose.forward.toFixed(2)} yaw=${pose.yawRelative.toFixed(1)} clamp=${pose.clamped} oob=${pose.outOfBounds}`
+      : 'pose=none';
+    console.warn(
+      `[QuestHeadRig] status=${tracker.status} src=${tracker.calibration.source} posture=${tracker.calibration.posture} entry=${tracker.calibration.entry} hz=${tracker.sampleHz ?? 0} ${poseSummary}`
+    );
+  }, [tracker]);
 
   // A new screen, an input switch, or an error panel starts with no trigger
   // held and no hover, so a press on the old targets cannot act on the new ones.
@@ -433,21 +569,29 @@ export default function QuestArenaScene() {
 
   const onAction = (action: QuestMenuAction) => {
     logMenu('info', `action ${action} on ${display.page}`);
-    if (action === 'solo') session.solo();
-    else if (action === 'ready') session.ready();
+    if (action === 'solo') {
+      if (session.solo()) {
+        const next = session.getSnapshot();
+        if (next.transforms) questHeadTracker.calibrateForSolo(next.transforms.blue);
+      }
+    } else if (action === 'ready') session.ready();
     else if (action === 'back') session.back();
+    else if (action === 'recenter') questHeadTracker.recenter();
+    else if (action === 'posture') questHeadTracker.cyclePosture();
     else leave(session);
   };
 
   return (
-    <ViroScene>
+    <ViroScene onCameraTransformUpdate={questHeadTracker.onCameraTransform}>
       <ViroSkyBox color="#000000" />
       <ViroAmbientLight color="#ffffff" intensity={700} />
       <ViroDirectionalLight color="#ffffff" intensity={900} direction={[-0.4, -1, -0.3]} />
-      {view.page === 'ring' ? <QuestRing view={view} session={session} /> : null}
+      {view.page === 'ring' ? <QuestRing view={view} session={session} tracker={tracker} /> : null}
       <QuestMenu
         display={display}
-        lines={view.lines}
+        tracker={tracker}
+        posture={posture}
+        lines={menuLines}
         onPress={(action, clickState, source) => {
           if (!display.input || inputKeyRef.current !== inputKey) return;
           const result = questTriggerPress(press.current, clickState, source);
