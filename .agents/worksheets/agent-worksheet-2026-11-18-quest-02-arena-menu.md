@@ -158,6 +158,15 @@ It shows the branded ring page: lettering, the session lines, Ready, Back, and E
 
 Medical-viewer compositor: the evaluation is in `docs/quest-02-arena-menu.md`. An underlay or an overlay are both possible without passthrough. Neither has been built or worn.
 
+Later on `5fcd3e3`:
+- At 18:42:22, Exit activated once, followed by `xrEndSession` and `onActivityDestroyed`.
+- At 18:42:26, re-entry mounted a fresh scene and showed the menu.
+
+The log stream stopped at its 2-hour limit with zero material or image-load errors.
+
+At 20:29:33 device time, another session installed a different APK (`20beef8d…`, with a Quest 03 `posture` action) over `5fcd3e3`. This session did not reinstall over it. Before the user judges branch 02, reinstall `%TEMP%
+rq-apks-5fcd3e3app-release.apk` with `adb install -r`, or coordinate with the Quest 03 owner.
+
 ## Blockers
 
 - Quest 01 headset gate: pending. PR #1 is merged, and this branch no longer contains the reference cube. The cube gate was not run on a headset.

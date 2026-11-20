@@ -223,7 +223,16 @@ A Meta capture taken at 18:40:18 (`/sdcard/Oculus/Screenshots/com.djleg.neorobot
 - Ready (blue), Back (black with a white ring), and Exit (pink).
 - The ring with both robots below the panel.
 
-The panel's left edge is outside the capture's field of view. The capture does not show the controller ray or hit dot, so it says nothing about pointer alignment. Readability at full headset resolution, ray origin and depth, hover placement, Exit, controller Back, and the branch 01 lifecycle are still for the user to judge.
+The panel's left edge is outside the capture's field of view. The capture does not show the controller ray or hit dot, so it says nothing about pointer alignment. Later in the same process (pid 30533):
+- At 18:42:22, `QuestMenu click exit state 1 source 1 activate` was followed by `xrEndSession` and `onActivityDestroyed`.
+- At 18:42:26, a fresh `VRQuestScene` mounted and showed the menu.
+
+The stream had no material or image-load errors through its 2-hour limit.
+
+Readability at full headset resolution, ray origin and depth, hover placement, controller Back, and the branch 01 lifecycle are still for the user to judge.
+
+At 2026-11-19 20:29:33 device time, a different APK (SHA-256 `20beef8d8761bfcbd73fd601204bf6520fc55f8194fce9bd4d5665a3c2df367`) was installed over `5fcd3e3`, apparently from Quest 03 work: its menu logs a `posture` action. The headset no longer runs `5fcd3e3`. Reinstall `%TEMP%
+rq-apks-5fcd3e3app-release.apk` (`90065614…`) before judging this branch.
 
 ## Headset checklist
 
