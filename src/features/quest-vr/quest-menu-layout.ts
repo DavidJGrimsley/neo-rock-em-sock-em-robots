@@ -29,18 +29,27 @@ export type QuestMenuAction = (typeof QUEST_MENU_ACTIONS)[number];
 export type QuestMenuPage = 'menu' | 'ring';
 export type QuestMenuPosture = 'standing' | 'seated';
 
-// Body lines use size 38, step 54. Six lines finish at y <= 552, keeping the
-// top button row (y = 764) clear on both menu and ring pages.
+// Body lines use size 38, step 48. Six lines finish at y <= 728, keeping the
+// top button row (y = 764) clear below the 3-line iOS title on both pages.
 export const QUEST_MENU_TEXT_LINES_MAX = 6;
 
 const INK = '#09090b';
 const PAPER = '#f8fafc';
 const MUTED_PAPER = '#e2e8f0';
 const PRIMARY = '#60a5fa';
+const SECONDARY = '#a78bfa';
 const SELECTED = '#075985';
 const DANGER = '#d99a9a';
 const CARD = '#0f172a';
 const DIVIDER = '#334155';
+
+// Aspect ratios of the transparent PNGs in assets/arena/ui/quest-lettering/,
+// rasterized from the iOS ArenaDisplayText SVGs (lettering.json).
+const TITLE_ASPECT = {
+  neo: 360 / 132,
+  rock: 1594 / 212,
+  robots: 620 / 216,
+} as const;
 
 export interface QuestMenuButton {
   action: QuestMenuAction;
@@ -52,13 +61,14 @@ export interface QuestMenuButton {
 }
 
 export interface QuestMenuDrawOp {
-  op: 'roundRect' | 'text';
+  op: 'roundRect' | 'text' | 'image';
   x: number;
   y: number;
   width?: number;
   height?: number;
   radius?: number;
   color?: string;
+  uri?: string;
   text?: string;
   size?: number;
   align?: 'left' | 'center';
@@ -79,11 +89,18 @@ export interface QuestMenuFonts {
   button?: string | null;
 }
 
+export interface QuestMenuTitles {
+  neo?: string | null;
+  rock?: string | null;
+  robots?: string | null;
+}
+
 export interface QuestMenuBuildOptions {
   hover?: QuestMenuAction | null;
   acknowledged?: boolean;
   posture?: QuestMenuPosture;
   fonts?: QuestMenuFonts;
+  titles?: QuestMenuTitles;
 }
 
 const buttonWidth = 520;
@@ -270,6 +287,65 @@ function pushButton(
   });
 }
 
+function pushTitles(
+  ops: QuestMenuDrawOp[],
+  titles: QuestMenuTitles | undefined,
+  buttonFont?: string | null
+) {
+  // Match the iOS ArenaDisplayText stack (0.7 : 1.0 : 1.0 heights).
+  const rockWidth = 1000;
+  const rockHeight = Math.round(rockWidth / TITLE_ASPECT.rock);
+  const neoHeight = Math.round(rockHeight * 0.7);
+  const neoWidth = Math.round(neoHeight * TITLE_ASPECT.neo);
+  const robotsHeight = rockHeight;
+  const robotsWidth = Math.round(robotsHeight * TITLE_ASPECT.robots);
+  const center = QUEST_MENU_TEXTURE.widthPx / 2;
+  const useImages = Boolean(titles?.neo && titles?.rock && titles?.robots);
+  let y = 36;
+  const place = (
+    uri: string | null | undefined,
+    text: string,
+    width: number,
+    height: number,
+    color: string,
+    textSize: number
+  ) => {
+    if (useImages && uri) {
+      ops.push({
+        op: 'image',
+        uri,
+        x: Math.round(center - width / 2),
+        y,
+        width,
+        height,
+        text,
+        size: textSize,
+        color,
+        ...(buttonFont ? { font: buttonFont } : {}),
+        maxWidth: 1760,
+      });
+    } else {
+      ops.push({
+        op: 'text',
+        text,
+        x: center,
+        y: y + Math.max(0, Math.round((height - textSize) / 2)),
+        size: textSize,
+        color,
+        align: 'center',
+        bold: true,
+        ...(buttonFont ? { font: buttonFont } : {}),
+        maxWidth: 1760,
+      });
+    }
+    y += height + 6;
+  };
+  place(titles?.neo, 'Neo', neoWidth, neoHeight, SECONDARY, 56);
+  place(titles?.rock, "Rock 'Em Sock 'Em", rockWidth, rockHeight, PRIMARY, 76);
+  place(titles?.robots, 'Robots', robotsWidth, robotsHeight, PRIMARY, 76);
+  return y - 6;
+}
+
 export function buildQuestMenu(
   page: QuestMenuPage,
   lines: string[],
@@ -292,30 +368,20 @@ export function buildQuestMenu(
       radius: QUEST_MENU_CARD_RADIUS_PX,
       color: CARD,
     },
-    {
-      op: 'text',
-      text: page === 'menu' ? 'Quest VR Menu' : 'Solo Ring',
-      x: QUEST_MENU_TEXTURE.widthPx / 2,
-      y: 72,
-      size: 58,
-      color: PAPER,
-      align: 'center',
-      bold: true,
-      ...(buttonFont ? { font: buttonFont } : {}),
-      maxWidth: 1760,
-    },
-    {
-      op: 'roundRect',
-      x: 112,
-      y: 184,
-      width: QUEST_MENU_TEXTURE.widthPx - 224,
-      height: 4,
-      radius: 2,
-      color: DIVIDER,
-    },
   ];
+  const titleBottom = pushTitles(ops, options.titles, buttonFont);
+  const dividerY = titleBottom + 17;
+  ops.push({
+    op: 'roundRect',
+    x: 112,
+    y: dividerY,
+    width: QUEST_MENU_TEXTURE.widthPx - 224,
+    height: 4,
+    radius: 2,
+    color: DIVIDER,
+  });
 
-  let textY = 228;
+  let textY = dividerY + 26;
   for (const line of lines
     .flatMap((line) => wrapMenuLine(line))
     .slice(0, QUEST_MENU_TEXT_LINES_MAX)) {
@@ -332,7 +398,7 @@ export function buildQuestMenu(
       ...(bodyFont ? { font: bodyFont } : {}),
       maxWidth: 1760,
     });
-    textY += 54;
+    textY += 48;
   }
   for (const button of buttons) {
     pushButton(ops, button, options.hover === button.action, acknowledged, buttonFont);

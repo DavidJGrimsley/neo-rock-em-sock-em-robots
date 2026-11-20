@@ -126,7 +126,7 @@ test('a release drawable name is not a Canvas file and must be copied', async ()
   assert.equal(calls, 0);
 });
 
-test('the release APK packages the compositor panel module, patched renderer, and clean bundle without Quest branding', () => {
+test('the release APK packages the compositor panel module, patched renderer, title lettering, and Noto fonts without menu-background', () => {
   const apk = releaseApk();
   if (!apk) {
     assert.ok(true, 'QUEST_RELEASE_APK is not set on this run');
@@ -134,31 +134,23 @@ test('the release APK packages the compositor panel module, patched renderer, an
   }
   const crypto = require('node:crypto');
   const entries = readZipListing(apk);
-  for (const name of [
-    'quest-lettering/neo.png',
-    'quest-lettering/rock.png',
-    'quest-lettering/robots.png',
+  assert.equal(entries.includes('lib/arm64-v8a/libviro_renderer.so'), true);
+  // AGP optimizeReleaseResources shortens zip filenames (res/*.ttf, res/*.png), while resources.arsc
+  // keeps the raw/drawable resource identifiers used by QuestPanelModule / AssetSourceResolver.
+  const arsc = readZipEntry(apk, 'resources.arsc');
+  for (const resourceName of [
+    FONTS.ArenaNotoSans,
+    FONTS.ArenaNotoSansSemibold,
+    DRAWABLES.neo,
+    DRAWABLES.rock,
+    DRAWABLES.robots,
   ]) {
     assert.equal(
-      entries.some((entry) => entry.includes(name) || entry.includes('questlettering')),
-      false,
-      `${name} must not be packaged in the clean compositor APK`
+      arsc.includes(resourceName),
+      true,
+      `${resourceName} resource name must be registered in resources.arsc`
     );
   }
-  assert.equal(entries.includes('lib/arm64-v8a/libviro_renderer.so'), true);
-  // AGP optimizeReleaseResources shortens zip filenames (res/*.ttf), while resources.arsc keeps
-  // the raw resource identifiers used by QuestPanelModule / AssetSourceResolver.
-  const arsc = readZipEntry(apk, 'resources.arsc');
-  assert.equal(
-    arsc.includes('assets_arena_ui_arenanotosans'),
-    true,
-    'ArenaNotoSans.ttf raw resource name must be registered in resources.arsc'
-  );
-  assert.equal(
-    arsc.includes('assets_arena_ui_arenanotosanssemibold'),
-    true,
-    'ArenaNotoSansSemibold.ttf raw resource name must be registered in resources.arsc'
-  );
   const ttfHashes = new Set(
     entries
       .filter((entry) => entry.endsWith('.ttf'))
@@ -170,6 +162,21 @@ test('the release APK packages the compositor panel module, patched renderer, an
       .update(fs.readFileSync(path.join(__dirname, '../assets/arena/ui', fontFile)))
       .digest('hex');
     assert.equal(ttfHashes.has(fontSha), true, `${fontFile} bytes must be packaged in APK`);
+  }
+  // Verify the three quest-lettering PNGs via aapt2 when available (AGP may recompress PNGs).
+  const aapt2Bin = aapt2();
+  if (aapt2Bin) {
+    const resDump = execFileSync(aapt2Bin, ['dump', 'resources', apk], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    for (const [key, resourceName] of [
+      ['neo', DRAWABLES.neo],
+      ['rock', DRAWABLES.rock],
+      ['robots', DRAWABLES.robots],
+    ]) {
+      assert.match(resDump, new RegExp(`drawable/${resourceName}`));
+    }
   }
   const provenanceFile = path.join(__dirname, '../native/quest-viro-renderer/provenance.json');
   if (fs.existsSync(provenanceFile)) {
@@ -189,8 +196,9 @@ test('the release APK packages the compositor panel module, patched renderer, an
   assert.ok(bundle.includes('QuestHeadRig'));
   assert.ok(bundle.includes('questMenuLayerMask'));
   assert.ok(bundle.includes('QuestPanel'));
+  assert.ok(bundle.includes('quest-lettering'));
+  assert.ok(bundle.includes("Rock 'Em Sock 'Em"));
   assert.equal(bundle.includes('Menu texture failed'), false);
-  assert.equal(bundle.includes('quest-lettering'), false);
 });
 
 function readZipListing(apk) {

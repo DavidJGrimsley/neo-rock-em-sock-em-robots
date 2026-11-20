@@ -94,32 +94,40 @@ test('the layer pose is the panel node the scene builds, for any calibration', (
 
 test('every screen fits the native panel limits and hover is never part of the image', () => {
   const longLine = 'Head rig (seated, recentering): Hold still while the view settles. '.repeat(4);
+  const sampleTitles = {
+    neo: 'assets_arena_ui_questlettering_neo',
+    rock: 'assets_arena_ui_questlettering_rock',
+    robots: 'assets_arena_ui_questlettering_robots',
+  };
   for (const page of ['menu', 'ring']) {
     for (const acknowledged of [false, true]) {
       for (const posture of ['standing', 'seated']) {
-        const lines = Array.from({ length: 9 }, () => longLine);
-        const menu = buildQuestMenu(page, lines, {
-          acknowledged,
-          posture,
-        });
-        const spec = JSON.parse(
-          questMenuPanelSpec({
-            label: `${page}`,
-            pose: questMenuPanelPose(DEFAULT_CALIBRATION, page).pose,
-            ops: menu.ops,
-          })
-        );
-        // QuestPanelModule: 1..160 ops, 1..4096 px, 0..2 m; QuestPanelLayer.h: the same.
-        assert.ok(spec.ops.length >= 1 && spec.ops.length <= 160, `${spec.ops.length} ops`);
-        assert.equal(spec.widthPx, QUEST_MENU_TEXTURE.widthPx);
-        assert.equal(spec.heightPx, QUEST_MENU_TEXTURE.heightPx);
-        assert.ok(spec.widthPx <= 4096 && spec.heightPx <= 4096);
-        assert.equal(spec.widthM, QUEST_MENU_SIZE.widthM);
-        assert.equal(spec.heightM, QUEST_MENU_SIZE.heightM);
-        assert.ok(spec.widthM <= 2 && spec.heightM <= 2);
-        assert.equal(spec.pose.length, 7);
-        assert.ok(spec.pose.every(Number.isFinite));
-        for (const op of spec.ops) assert.ok(['roundRect', 'text'].includes(op.op));
+        for (const titles of [undefined, sampleTitles]) {
+          const lines = Array.from({ length: 9 }, () => longLine);
+          const menu = buildQuestMenu(page, lines, {
+            acknowledged,
+            posture,
+            titles,
+          });
+          const spec = JSON.parse(
+            questMenuPanelSpec({
+              label: `${page}`,
+              pose: questMenuPanelPose(DEFAULT_CALIBRATION, page).pose,
+              ops: menu.ops,
+            })
+          );
+          // QuestPanelModule: 1..160 ops, 1..4096 px, 0..2 m; QuestPanelLayer.h: the same.
+          assert.ok(spec.ops.length >= 1 && spec.ops.length <= 160, `${spec.ops.length} ops`);
+          assert.equal(spec.widthPx, QUEST_MENU_TEXTURE.widthPx);
+          assert.equal(spec.heightPx, QUEST_MENU_TEXTURE.heightPx);
+          assert.ok(spec.widthPx <= 4096 && spec.heightPx <= 4096);
+          assert.equal(spec.widthM, QUEST_MENU_SIZE.widthM);
+          assert.equal(spec.heightM, QUEST_MENU_SIZE.heightM);
+          assert.ok(spec.widthM <= 2 && spec.heightM <= 2);
+          assert.equal(spec.pose.length, 7);
+          assert.ok(spec.pose.every(Number.isFinite));
+          for (const op of spec.ops) assert.ok(['roundRect', 'text', 'image'].includes(op.op));
+        }
       }
     }
   }

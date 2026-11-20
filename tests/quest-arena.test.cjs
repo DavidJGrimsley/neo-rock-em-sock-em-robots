@@ -127,38 +127,62 @@ test('menu pixels and controller frames describe the same buttons', () => {
   assert.ok(gapM > 0.06, `button gap ${gapM} m`);
   assert.ok(questMenuButtonFrame(ringButtons[0]).height >= 0.11);
 
+  const sampleTitles = {
+    neo: 'assets_arena_ui_questlettering_neo',
+    rock: 'assets_arena_ui_questlettering_rock',
+    robots: 'assets_arena_ui_questlettering_robots',
+  };
   const packed = Array.from({ length: 40 }, () => 'status '.repeat(30).trim());
   for (const page of ['menu', 'ring']) {
     for (const posture of ['standing', 'seated']) {
-      const menu = buildQuestMenu(page, packed, { posture });
-      assert.ok(menu.ops.length >= 1 && menu.ops.length <= 64);
-      const block = menu.ops.filter(
-        (op) => op.op === 'text' && op.align === 'center' && op.size === 38
-      );
-      assert.equal(block.length, QUEST_MENU_TEXT_LINES_MAX);
-      for (const button of menu.buttons) {
+      for (const titles of [undefined, sampleTitles]) {
+        const menu = buildQuestMenu(page, packed, { posture, titles });
+        assert.ok(menu.ops.length >= 1 && menu.ops.length <= 64);
+        const block = menu.ops.filter(
+          (op) => op.op === 'text' && op.align === 'center' && op.size === 38
+        );
+        assert.equal(block.length, QUEST_MENU_TEXT_LINES_MAX);
+        const titleOps = titles
+          ? menu.ops.filter((op) => op.op === 'image')
+          : menu.ops.filter((op) => op.op === 'text' && (op.size === 56 || op.size === 76));
+        assert.equal(titleOps.length, 3);
+        const divider = menu.ops.find((op) => op.op === 'roundRect' && op.color === '#334155');
+        assert.ok(divider);
+        for (const title of titleOps) {
+          assert.ok(title.y + (title.height ?? title.size) < divider.y);
+        }
         for (const text of block) {
-          assert.equal(
-            rectanglesOverlap(button, {
-              x: text.x - text.maxWidth / 2,
-              y: text.y,
-              width: text.maxWidth,
-              height: text.size,
-            }),
-            false
-          );
+          assert.ok(text.y > divider.y + divider.height);
+        }
+        for (const button of menu.buttons) {
+          for (const text of block) {
+            assert.equal(
+              rectanglesOverlap(button, {
+                x: text.x - text.maxWidth / 2,
+                y: text.y,
+                width: text.maxWidth,
+                height: text.size,
+              }),
+              false
+            );
+          }
         }
       }
     }
   }
 
-  const menu = buildQuestMenu('menu', ['Solo places both robots in the ring.']);
+  const menu = buildQuestMenu('menu', ['Solo places both robots in the ring.'], {
+    titles: sampleTitles,
+  });
   assert.match(menu.specKey, /Solo/);
   assert.match(menu.specKey, /Exit/);
-  assert.doesNotMatch(menu.specKey, /Recenter/);
+  assert.doesNotMatch(menu.specKey, /Recenter|Quest VR Menu|Solo Ring/);
   assert.match(menu.specKey, /Standing/);
-  assert.match(menu.specKey, /Quest VR Menu/);
+  assert.match(menu.specKey, /Neo/);
+  assert.match(menu.specKey, /Rock 'Em Sock 'Em/);
+  assert.match(menu.specKey, /Robots/);
   assert.match(menu.specKey, /#60a5fa/);
+  assert.match(menu.specKey, /#a78bfa/);
   assert.match(menu.specKey, /#d99a9a/);
   assert.match(menu.specKey, /#0f172a/);
   assert.deepEqual(menu.ops[0], {
@@ -175,9 +199,21 @@ test('menu pixels and controller frames describe the same buttons', () => {
     false
   );
   assert.doesNotMatch(menu.specKey, /#0f766e|#991b1b|#101826/);
+  assert.deepEqual(
+    menu.ops.filter((op) => op.op === 'image').map((op) => op.uri),
+    [sampleTitles.neo, sampleTitles.rock, sampleTitles.robots]
+  );
+
+  const fallbackMenu = buildQuestMenu('menu', ['Solo places both robots in the ring.']);
   assert.equal(
-    menu.ops.some((op) => op.op === 'image'),
+    fallbackMenu.ops.some((op) => op.op === 'image'),
     false
+  );
+  assert.deepEqual(
+    fallbackMenu.ops
+      .filter((op) => op.op === 'text' && (op.size === 56 || op.size === 76))
+      .map((op) => op.text),
+    ['Neo', "Rock 'Em Sock 'Em", 'Robots']
   );
 
   const ring = buildQuestMenu('ring', ['Both robots are in the ring.']);
@@ -453,17 +489,14 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
   assert.match(scene, /onClickState/);
   assert.match(scene, /createQuestMenuCompositor/);
   assert.match(scene, /questMenuLayerMask/);
-  assert.doesNotMatch(
-    scene,
-    /menu-background\.png|quest-lettering/
-  );
+  assert.doesNotMatch(scene, /menu-background\.png/);
+  assert.match(scene, /quest-lettering\/neo\.png/);
+  assert.match(scene, /quest-lettering\/rock\.png/);
+  assert.match(scene, /quest-lettering\/robots\.png/);
   assert.match(scene, /ArenaNotoSans\.ttf/);
   assert.match(scene, /ArenaNotoSansSemibold\.ttf/);
   assert.match(scene, /resolveQuestMenuAssetFile/);
-  assert.doesNotMatch(
-    source('src/features/quest-vr/quest-menu-layout.ts'),
-    /menu-background|quest-lettering|"image"/
-  );
+  assert.doesNotMatch(source('src/features/quest-vr/quest-menu-layout.ts'), /menu-background/);
   assert.match(scene, /session\.exit\(\)/);
   assert.match(scene, /exitVRScene\(\)/);
   assert.doesNotMatch(scene, /onClick=\{/);
@@ -481,7 +514,9 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
     fs.existsSync(path.join(__dirname, '../src/features/quest-vr/quest-smoke-scene.native.tsx')),
     false
   );
-  assert.doesNotMatch(moduleSource, /"image"|BitmapFactory/);
+  assert.match(moduleSource, /"image"/);
+  assert.match(moduleSource, /BitmapFactory\.decodeFile/);
+  assert.match(moduleSource, /FILTER_BITMAP_FLAG/);
   assert.match(moduleSource, /Typeface\.createFromFile/);
   assert.match(moduleSource, /drawExecutor/);
   assert.match(moduleSource, /android_res/);

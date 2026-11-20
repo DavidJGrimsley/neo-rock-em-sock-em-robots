@@ -50,6 +50,7 @@ import {
   type QuestMenuFonts,
   type QuestMenuPage,
   type QuestMenuPosture,
+  type QuestMenuTitles,
 } from './quest-menu-layout.ts';
 import { questRuntime } from './quest-runtime-store.ts';
 
@@ -68,15 +69,21 @@ const menuFontModules = {
   button: require('../../../assets/arena/ui/ArenaNotoSansSemibold.ttf') as number,
 };
 
-function initialFontRef(moduleId: number): string | null {
+const menuTitleModules = {
+  neo: require('../../../assets/arena/ui/quest-lettering/neo.png') as number,
+  rock: require('../../../assets/arena/ui/quest-lettering/rock.png') as number,
+  robots: require('../../../assets/arena/ui/quest-lettering/robots.png') as number,
+};
+
+function initialAssetRef(moduleId: number): string | null {
   try {
     const asset = Asset.fromModule(moduleId);
     const direct = questMenuFileUri(asset.localUri) ?? questMenuFileUri(asset.uri);
     if (direct) return direct;
-    // Release Android builds embed TTFs as raw resources with a bare resource name.
+    // Release Android builds embed TTFs/PNGs as resources with a bare resource name.
     if (asset.uri && !asset.uri.includes(':') && !asset.uri.includes('/')) return asset.uri;
   } catch {
-    // Fallback to system typeface in QuestPanelModule if asset lookup fails.
+    // Fallback to text/system typeface in QuestPanelModule if asset lookup fails.
   }
   return null;
 }
@@ -489,8 +496,13 @@ export default function QuestArenaScene() {
   );
   const layer = useSyncExternalStore(compositor.subscribe, compositor.getSnapshot);
   const [fonts, setFonts] = useState<QuestMenuFonts>(() => ({
-    body: initialFontRef(menuFontModules.body),
-    button: initialFontRef(menuFontModules.button),
+    body: initialAssetRef(menuFontModules.body),
+    button: initialAssetRef(menuFontModules.button),
+  }));
+  const [titles, setTitles] = useState<QuestMenuTitles>(() => ({
+    neo: initialAssetRef(menuTitleModules.neo),
+    rock: initialAssetRef(menuTitleModules.rock),
+    robots: initialAssetRef(menuTitleModules.robots),
   }));
   const [hover, setHover] = useState<QuestMenuAction | null>(null);
   const press = useRef<QuestPressState>({ down: new Set() });
@@ -518,15 +530,16 @@ export default function QuestArenaScene() {
   }).some((button) => button.action === hover)
     ? hover
     : null;
-  // Hover is not part of the panel image; only page, text, posture and fonts are.
+  // Hover is not part of the panel image; only page, text, posture, fonts and title assets are.
   const menu = useMemo(
     () =>
       buildQuestMenu(view.page, menuLines, {
         acknowledged: view.acknowledged,
         posture,
         fonts,
+        titles,
       }),
-    [fonts, menuLines, posture, view.acknowledged, view.page]
+    [fonts, menuLines, posture, titles, view.acknowledged, view.page]
   );
   const panelLabel = `${view.page} ack=${view.acknowledged} ${posture}`;
 
@@ -541,35 +554,47 @@ export default function QuestArenaScene() {
     };
   }, [compositor, session]);
 
-  // Dev builds serve TTFs over Metro HTTP until downloaded to a local file;
-  // release builds resolve packaged raw resource names synchronously above.
+  // Dev builds serve TTFs/PNGs over Metro HTTP until downloaded to a local file;
+  // release builds resolve packaged resource names synchronously above.
   useEffect(() => {
-    if (fonts.body && fonts.button) return;
+    if (fonts.body && fonts.button && titles.neo && titles.rock && titles.robots) return;
     let cancelled = false;
-    const resolveFont = async (moduleId: number) => {
+    const resolveAsset = async (moduleId: number) => {
       const asset = Asset.fromModule(moduleId);
       return resolveQuestMenuAssetFile(asset, async () => {
         await asset.downloadAsync();
         return asset.localUri ?? asset.uri;
       });
     };
+    const resolveOrNull = (current: string | null | undefined, moduleId: number) =>
+      current ? Promise.resolve(current) : resolveAsset(moduleId).catch(() => null);
     Promise.all([
-      fonts.body
-        ? Promise.resolve(fonts.body)
-        : resolveFont(menuFontModules.body).catch(() => null),
-      fonts.button
-        ? Promise.resolve(fonts.button)
-        : resolveFont(menuFontModules.button).catch(() => null),
-    ]).then(([body, button]) => {
+      resolveOrNull(fonts.body, menuFontModules.body),
+      resolveOrNull(fonts.button, menuFontModules.button),
+      resolveOrNull(titles.neo, menuTitleModules.neo),
+      resolveOrNull(titles.rock, menuTitleModules.rock),
+      resolveOrNull(titles.robots, menuTitleModules.robots),
+    ]).then(([body, button, neo, rock, robots]) => {
       if (cancelled) return;
       if ((body && body !== fonts.body) || (button && button !== fonts.button)) {
         setFonts({ body: body ?? fonts.body, button: button ?? fonts.button });
+      }
+      if (
+        (neo && neo !== titles.neo) ||
+        (rock && rock !== titles.rock) ||
+        (robots && robots !== titles.robots)
+      ) {
+        setTitles({
+          neo: neo ?? titles.neo,
+          rock: rock ?? titles.rock,
+          robots: robots ?? titles.robots,
+        });
       }
     });
     return () => {
       cancelled = true;
     };
-  }, [fonts.body, fonts.button]);
+  }, [fonts.body, fonts.button, titles.neo, titles.rock, titles.robots]);
 
   useEffect(() => {
     const now = Date.now();

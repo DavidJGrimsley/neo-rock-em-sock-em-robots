@@ -3,6 +3,7 @@ package expo.modules.questpanel
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -50,6 +51,8 @@ class QuestPanelModule : Module() {
   private var drawnPixelsKey: String? = null
   private val typefaces = HashMap<String, Typeface>()
   private val warnedFonts = HashSet<String>()
+  private val bitmaps = HashMap<String, Bitmap>()
+  private val warnedImages = HashSet<String>()
 
   private external fun nativeVersion(): Int
   private external fun nativeRefSpaceEpoch(): Int
@@ -80,6 +83,13 @@ class QuestPanelModule : Module() {
     panelBitmap = null
     panelPixels = null
     drawnPixelsKey = null
+  }
+
+  private fun releaseAssets() {
+    for (bitmap in bitmaps.values) {
+      if (!bitmap.isRecycled) bitmap.recycle()
+    }
+    bitmaps.clear()
   }
 
   private fun existingFile(value: String): File? {
@@ -118,13 +128,13 @@ class QuestPanelModule : Module() {
     return "src-$hex.$suffix"
   }
 
-  // Release fonts are Android raw resources, not filesystem paths. Copy those
-  // bytes to cache once on the draw worker so Typeface.createFromFile works off
-  // the main thread without delaying the first frame.
+  // Release fonts and title PNGs are Android resources, not filesystem paths.
+  // Copy those bytes to cache once on the draw worker so native decoders work
+  // off the main thread without delaying the first frame.
   private fun materialize(value: String, extension: String): File {
     existingFile(value)?.let { return it }
     val context = appContext.reactContext ?: error("Quest panel has no Android context.")
-    val input = openPackaged(context, value) ?: error("Quest panel font is not a file: $value")
+    val input = openPackaged(context, value) ?: error("Quest panel asset is not a file: $value")
     val directory = File(context.cacheDir, "quest-panel-src")
     if (!directory.isDirectory && !directory.mkdirs()) {
       error("Quest panel cache directory was not created.")
@@ -139,17 +149,35 @@ class QuestPanelModule : Module() {
       input.use { stream ->
         FileOutputStream(temp).use { out ->
           val copied = stream.copyTo(out)
-          if (copied <= 0L) error("Quest panel font was empty: $value")
+          if (copied <= 0L) error("Quest panel asset was empty: $value")
         }
       }
       if (!temp.renameTo(file) && !file.isFile) {
-        error("Quest panel font cache rename failed: $value")
+        error("Quest panel asset cache rename failed: $value")
       }
     } catch (failure: Exception) {
       temp.delete()
       throw failure
     }
     return file
+  }
+
+  private fun resolveBitmap(uri: String): Bitmap? {
+    if (uri.isEmpty()) return null
+    bitmaps[uri]?.let { if (!it.isRecycled) return it }
+    return try {
+      val file = materialize(uri, "png")
+      val options = BitmapFactory.Options().apply { inScaled = false }
+      val decoded = BitmapFactory.decodeFile(file.absolutePath, options)
+        ?: error("Quest panel image could not be decoded: $uri")
+      bitmaps[uri] = decoded
+      decoded
+    } catch (error: Throwable) {
+      if (warnedImages.add(uri)) {
+        Log.w(TAG, "Falling back to text title for $uri", error)
+      }
+      null
+    }
   }
 
   private fun resolveTypeface(font: String, bold: Boolean): Typeface {
@@ -177,8 +205,38 @@ class QuestPanelModule : Module() {
     (op.getDouble("y") + op.getDouble("height")).toFloat()
   )
 
+  private fun drawTextOp(
+    canvas: Canvas,
+    width: Int,
+    text: String,
+    x: Float,
+    y: Float,
+    size: Float,
+    color: String,
+    align: String,
+    bold: Boolean,
+    font: String,
+    maxWidth: Float
+  ) {
+    if (text.isEmpty()) return
+    val glyph = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
+    glyph.color = Color.parseColor(color)
+    glyph.textSize = size
+    glyph.typeface = resolveTypeface(font, bold)
+    glyph.textAlign = if (align == "center") Paint.Align.CENTER else Paint.Align.LEFT
+    val shown = TextUtils.ellipsize(
+      text,
+      glyph,
+      maxWidth.coerceAtLeast(0f),
+      TextUtils.TruncateAt.END
+    ).toString()
+    // y is the top of the em box. Canvas draws from the baseline.
+    canvas.drawText(shown, x, y - glyph.ascent(), glyph)
+  }
+
   private fun drawOps(canvas: Canvas, ops: JSONArray, width: Int) {
     val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     for (index in 0 until ops.length()) {
       val op = ops.getJSONObject(index)
       when (op.getString("op")) {
@@ -188,28 +246,45 @@ class QuestPanelModule : Module() {
           val radius = op.optDouble("radius", 0.0).toFloat()
           canvas.drawRoundRect(rect(op), radius, radius, paint)
         }
+        "image" -> {
+          val bitmap = resolveBitmap(op.optString("uri"))
+          if (bitmap != null) {
+            canvas.drawBitmap(bitmap, null, rect(op), imagePaint)
+          } else {
+            val fallback = op.optString("text")
+            if (fallback.isNotEmpty()) {
+              val boxW = op.getDouble("width").toFloat()
+              val boxH = op.getDouble("height").toFloat()
+              val size = op.optDouble("size", (boxH * 0.6).coerceAtLeast(32.0)).toFloat()
+              drawTextOp(
+                canvas,
+                width,
+                text = fallback,
+                x = (op.getDouble("x") + boxW / 2.0).toFloat(),
+                y = (op.getDouble("y") + ((boxH - size) / 2.0).coerceAtLeast(0.0)).toFloat(),
+                size = size,
+                color = op.optString("color", "#f8fafc"),
+                align = "center",
+                bold = true,
+                font = op.optString("font"),
+                maxWidth = op.optDouble("maxWidth", width.toDouble()).toFloat()
+              )
+            }
+          }
+        }
         "text" -> {
-          val text = op.optString("text")
-          if (text.isEmpty()) continue
-          val glyph = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
-          glyph.color = Color.parseColor(op.optString("color", "#f8fafc"))
-          glyph.textSize = op.optDouble("size", 32.0).toFloat()
-          glyph.typeface = resolveTypeface(op.optString("font"), op.optBoolean("bold"))
-          glyph.textAlign =
-            if (op.optString("align") == "center") Paint.Align.CENTER else Paint.Align.LEFT
-          val maxWidth = op.optDouble("maxWidth", width.toDouble()).toFloat()
-          val shown = TextUtils.ellipsize(
-            text,
-            glyph,
-            maxWidth.coerceAtLeast(0f),
-            TextUtils.TruncateAt.END
-          ).toString()
-          // y is the top of the em box. Canvas draws from the baseline.
-          canvas.drawText(
-            shown,
-            op.getDouble("x").toFloat(),
-            op.getDouble("y").toFloat() - glyph.ascent(),
-            glyph
+          drawTextOp(
+            canvas,
+            width,
+            text = op.optString("text"),
+            x = op.getDouble("x").toFloat(),
+            y = op.getDouble("y").toFloat(),
+            size = op.optDouble("size", 32.0).toFloat(),
+            color = op.optString("color", "#f8fafc"),
+            align = op.optString("align"),
+            bold = op.optBoolean("bold"),
+            font = op.optString("font"),
+            maxWidth = op.optDouble("maxWidth", width.toDouble()).toFloat()
           )
         }
         else -> error("Unknown menu draw operation.")
@@ -344,6 +419,7 @@ class QuestPanelModule : Module() {
         ++owner
         if (available) nativeHide()
         releaseRaster()
+        releaseAssets()
       }
       drawExecutor.shutdown()
     }

@@ -451,6 +451,9 @@ function createSceneHarness({ panelAvailable = true } = {}) {
     '../../../assets/arena/Mike_Player2_RedOrange_Combat_AR.glb': 'red.glb',
     '../../../assets/arena/ui/ArenaNotoSans.ttf': 'sans.ttf',
     '../../../assets/arena/ui/ArenaNotoSansSemibold.ttf': 'sans-semibold.ttf',
+    '../../../assets/arena/ui/quest-lettering/neo.png': 'neo.png',
+    '../../../assets/arena/ui/quest-lettering/rock.png': 'rock.png',
+    '../../../assets/arena/ui/quest-lettering/robots.png': 'robots.png',
     '../../../modules/quest-panel/src/index.ts': {
       questPanelAvailable: () => panel.native.isAvailable(),
       questPanelNative: panel.native,
@@ -603,6 +606,11 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
   const textOps = panel.latest().ops.filter((op) => op.op === 'text');
   assert.ok(textOps.some((op) => op.font === 'file:///sans.ttf'));
   assert.ok(textOps.some((op) => op.font === 'file:///sans-semibold.ttf'));
+  const imageOps = panel.latest().ops.filter((op) => op.op === 'image');
+  assert.deepEqual(
+    imageOps.map((op) => op.uri),
+    ['file:///neo.png', 'file:///rock.png', 'file:///robots.png']
+  );
   assert.deepEqual(
     panel.latest().pose,
     questMenuPanelPose(DEFAULT_CALIBRATION, 'menu').pose.map((v) => Math.round(v * 1e5) / 1e5 || 0)
@@ -711,8 +719,11 @@ test('page changes move the layer, panel and targets together with no loading bl
   const harness = createSceneHarness();
   const { panel } = harness;
   let frame = await harness.settle();
-  // Clean compositor UI draws immediately with roundRect/text ops and zero image assets.
-  assert.ok(panel.latest().ops.every((op) => op.op === 'roundRect' || op.op === 'text'));
+  // Clean compositor UI draws immediately with roundRect/text/image ops and zero loading block.
+  assert.ok(
+    panel.latest().ops.every((op) => op.op === 'roundRect' || op.op === 'text' || op.op === 'image')
+  );
+  assert.equal(panel.latest().ops.filter((op) => op.op === 'image').length, 3);
   assert.match(panel.latest().label, /^menu ack=false standing$/);
   frame = harness.poll();
   assert.ok(harness.logs.some((line) => /QuestMenu layer shown after/.test(line)));
@@ -724,6 +735,13 @@ test('page changes move the layer, panel and targets together with no loading bl
   frame = harness.render();
   assert.equal(panelNode(frame.all).props.position, QUEST_MENU_POSE.ring.position);
   for (const label of RING_LABELS) assert.ok(panel.texts().includes(label), `ring layer ${label}`);
+  assert.deepEqual(
+    panel
+      .latest()
+      .ops.filter((op) => op.op === 'image')
+      .map((op) => op.uri),
+    ['file:///neo.png', 'file:///rock.png', 'file:///robots.png']
+  );
   assert.ok(!panel.texts().includes('Solo'));
   const ringPose = questMenuPanelPose(harness.trackerSnapshot.calibration, 'ring').pose;
   assert.deepEqual(
