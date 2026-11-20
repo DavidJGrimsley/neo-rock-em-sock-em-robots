@@ -164,8 +164,7 @@ Later on `5fcd3e3`:
 
 The log stream stopped at its 2-hour limit with zero material or image-load errors.
 
-At 20:29:33 device time, another session installed a different APK (`20beef8d…`, with a Quest 03 `posture` action) over `5fcd3e3`. This session did not reinstall over it. Before the user judges branch 02, reinstall `%TEMP%
-rq-apks-5fcd3e3app-release.apk` with `adb install -r`, or coordinate with the Quest 03 owner.
+At 20:29:33 device time, another session installed a different APK (`20beef8d…`, with a Quest 03 `posture` action) over `5fcd3e3`. This session did not reinstall over it. Before the user judges branch 02, reinstall `%TEMP%\nrq-apks-5fcd3e3\app-release.apk` with `adb install -r`, or coordinate with the Quest 03 owner.
 
 ## Blockers
 

@@ -231,8 +231,7 @@ The stream had no material or image-load errors through its 2-hour limit.
 
 Readability at full headset resolution, ray origin and depth, hover placement, controller Back, and the branch 01 lifecycle are still for the user to judge.
 
-At 2026-11-19 20:29:33 device time, a different APK (SHA-256 `20beef8d8761bfcbd73fd601204bf6520fc55f8194fce9bd4d5665a3c2df367`) was installed over `5fcd3e3`, apparently from Quest 03 work: its menu logs a `posture` action. The headset no longer runs `5fcd3e3`. Reinstall `%TEMP%
-rq-apks-5fcd3e3app-release.apk` (`90065614…`) before judging this branch.
+At 2026-11-19 20:29:33 device time, a different APK (SHA-256 `20beef8d8761bfcbd73fd601204bf6520fc55f8194fce9bd4d5665a3c2df367`) was installed over `5fcd3e3`, apparently from Quest 03 work: its menu logs a `posture` action. The headset no longer runs `5fcd3e3`. Reinstall `%TEMP%\nrq-apks-5fcd3e3\app-release.apk` (`90065614…`) before judging this branch.
 
 ## Headset checklist
 
