@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { Asset } from 'expo-asset';
 import {
   Viro3DObject,
   ViroAmbientLight,
@@ -35,6 +36,7 @@ import {
   questMenuPanelPose,
   type QuestMenuLayerSnapshot,
 } from './quest-menu-compositor.ts';
+import { questMenuFileUri, resolveQuestMenuAssetFile } from './quest-menu-asset-uri.ts';
 import { questPointerHover, questTriggerPress, type QuestPressState } from './quest-menu-input.ts';
 import { questMenuLayer } from './quest-menu-layer.ts';
 import {
@@ -45,6 +47,7 @@ import {
   questMenuButtons,
   type QuestMenuAction,
   type QuestMenuButton,
+  type QuestMenuFonts,
   type QuestMenuPage,
   type QuestMenuPosture,
 } from './quest-menu-layout.ts';
@@ -59,6 +62,24 @@ const sources = {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   red: require('../../../assets/arena/Mike_Player2_RedOrange_Combat_AR.glb'),
 };
+
+const menuFontModules = {
+  body: require('../../../assets/arena/ui/ArenaNotoSans.ttf') as number,
+  button: require('../../../assets/arena/ui/ArenaNotoSansSemibold.ttf') as number,
+};
+
+function initialFontRef(moduleId: number): string | null {
+  try {
+    const asset = Asset.fromModule(moduleId);
+    const direct = questMenuFileUri(asset.localUri) ?? questMenuFileUri(asset.uri);
+    if (direct) return direct;
+    // Release Android builds embed TTFs as raw resources with a bare resource name.
+    if (asset.uri && !asset.uri.includes(':') && !asset.uri.includes('/')) return asset.uri;
+  } catch {
+    // Fallback to system typeface in QuestPanelModule if asset lookup fails.
+  }
+  return null;
+}
 
 const fighterScale: [number, number, number] = Array(3).fill(ARENA_LAYOUT.fighterScale) as [
   number,
@@ -76,7 +97,7 @@ const stanceRingThickness = 0.004;
 const stanceRingHalf = (stanceRingSize - stanceRingThickness) / 2;
 const stanceRingLift = 0.0005;
 const idleAnimation = { name: 'IdleAggro', loop: true, run: true, interruptible: true };
-const systemRecenterHint = 'If the system recenter moved the view, select Recenter.';
+const systemRecenterHint = 'Hold Meta button to recenter view.';
 // Panel-local depths: the layer mask at 0, hover outline, then hit targets (0.012).
 const focusZ = 0.008;
 const focusThickness = 0.008;
@@ -106,7 +127,6 @@ ViroMaterials.createMaterials({
   questMenuFallbackPrimary: { diffuseColor: '#60a5fa', lightingModel: 'Constant' },
   questMenuFallbackDanger: { diffuseColor: '#d99a9a', lightingModel: 'Constant' },
   questMenuFallbackBack: { diffuseColor: '#1e293b', lightingModel: 'Constant' },
-  questMenuFallbackRecenter: { diffuseColor: '#1e3a8a', lightingModel: 'Constant' },
   questMenuFallbackPosture: { diffuseColor: '#334155', lightingModel: 'Constant' },
 });
 
@@ -115,15 +135,15 @@ ViroMaterials.createMaterials({
 const TEXT_SCALE = 0.05;
 const textScale: [number, number, number] = [TEXT_SCALE, TEXT_SCALE, TEXT_SCALE];
 const messageStyle = {
-  fontFamily: 'sans-serif',
+  fontFamily: 'ArenaNotoSans',
   fontSize: 18,
   color: '#f8fafc',
   textAlign: 'center',
   textAlignVertical: 'center',
 } as const;
-const labelStyle = { ...messageStyle, fontSize: 28 } as const;
+const labelStyle = { ...messageStyle, fontFamily: 'ArenaNotoSansSemibold', fontSize: 28 } as const;
 const diagnosticsStyle = {
-  fontFamily: 'sans-serif',
+  fontFamily: 'ArenaNotoSans',
   fontSize: 16,
   color: '#cbd5e1',
   textAlign: 'center',
@@ -133,7 +153,6 @@ const diagnosticsStyle = {
 function fallbackMaterial(action: QuestMenuAction) {
   if (action === 'exit') return 'questMenuFallbackDanger';
   if (action === 'back') return 'questMenuFallbackBack';
-  if (action === 'recenter') return 'questMenuFallbackRecenter';
   if (action === 'posture') return 'questMenuFallbackPosture';
   return 'questMenuFallbackPrimary';
 }
@@ -293,8 +312,7 @@ function QuestMenuFallbackButtons({ buttons }: { buttons: QuestMenuButton[] }) {
     <>
       {buttons.map((button) => {
         const buttonFrame = questMenuButtonFrame(button);
-        const dark =
-          button.action === 'back' || button.action === 'recenter' || button.action === 'posture';
+        const dark = button.action === 'back' || button.action === 'posture';
         return (
           <ViroNode
             key={button.action}
@@ -470,6 +488,10 @@ export default function QuestArenaScene() {
     )
   );
   const layer = useSyncExternalStore(compositor.subscribe, compositor.getSnapshot);
+  const [fonts, setFonts] = useState<QuestMenuFonts>(() => ({
+    body: initialFontRef(menuFontModules.body),
+    button: initialFontRef(menuFontModules.button),
+  }));
   const [hover, setHover] = useState<QuestMenuAction | null>(null);
   const press = useRef<QuestPressState>({ down: new Set() });
   const hoverSources = useRef(new Map<QuestMenuAction, Set<number>>());
@@ -496,18 +518,20 @@ export default function QuestArenaScene() {
   }).some((button) => button.action === hover)
     ? hover
     : null;
-  // Hover is not part of the panel image; only page, text and posture are.
+  // Hover is not part of the panel image; only page, text, posture and fonts are.
   const menu = useMemo(
     () =>
       buildQuestMenu(view.page, menuLines, {
         acknowledged: view.acknowledged,
         posture,
+        fonts,
       }),
-    [menuLines, posture, view.acknowledged, view.page]
+    [fonts, menuLines, posture, view.acknowledged, view.page]
   );
   const panelLabel = `${view.page} ack=${view.acknowledged} ${posture}`;
 
   useEffect(() => {
+    questHeadTracker.setRefSpaceEpochSource(() => questPanelNative?.refSpaceEpoch?.() ?? 0);
     questRuntime.sceneMounted();
     return () => {
       questHeadTracker.dispose();
@@ -516,6 +540,36 @@ export default function QuestArenaScene() {
       questRuntime.sceneUnmounted();
     };
   }, [compositor, session]);
+
+  // Dev builds serve TTFs over Metro HTTP until downloaded to a local file;
+  // release builds resolve packaged raw resource names synchronously above.
+  useEffect(() => {
+    if (fonts.body && fonts.button) return;
+    let cancelled = false;
+    const resolveFont = async (moduleId: number) => {
+      const asset = Asset.fromModule(moduleId);
+      return resolveQuestMenuAssetFile(asset, async () => {
+        await asset.downloadAsync();
+        return asset.localUri ?? asset.uri;
+      });
+    };
+    Promise.all([
+      fonts.body
+        ? Promise.resolve(fonts.body)
+        : resolveFont(menuFontModules.body).catch(() => null),
+      fonts.button
+        ? Promise.resolve(fonts.button)
+        : resolveFont(menuFontModules.button).catch(() => null),
+    ]).then(([body, button]) => {
+      if (cancelled) return;
+      if ((body && body !== fonts.body) || (button && button !== fonts.button)) {
+        setFonts({ body: body ?? fonts.body, button: button ?? fonts.button });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [fonts.body, fonts.button]);
 
   useEffect(() => {
     const now = Date.now();
@@ -560,7 +614,6 @@ export default function QuestArenaScene() {
       }
     } else if (action === 'ready') session.ready();
     else if (action === 'back') session.back();
-    else if (action === 'recenter') questHeadTracker.recenter();
     else if (action === 'posture') questHeadTracker.cyclePosture();
     else leave(session);
   };

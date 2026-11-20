@@ -5,6 +5,7 @@
 
 export const QUEST_MENU_TEXTURE = { widthPx: 2048, heightPx: 1152 } as const;
 export const QUEST_MENU_SIZE = { widthM: 1.6, heightM: 0.9 } as const;
+export const QUEST_MENU_CARD_RADIUS_PX = 56;
 
 // Child of menuFrame(cal). Default calibration is the identity, so these metres
 // match OpenXR LOCAL at eye height y = 0. Art and hit targets share this node.
@@ -23,7 +24,7 @@ export const QUEST_MENU_POSE = {
   },
 };
 
-export const QUEST_MENU_ACTIONS = ['solo', 'ready', 'back', 'exit', 'recenter', 'posture'] as const;
+export const QUEST_MENU_ACTIONS = ['solo', 'ready', 'back', 'exit', 'posture'] as const;
 export type QuestMenuAction = (typeof QUEST_MENU_ACTIONS)[number];
 export type QuestMenuPage = 'menu' | 'ring';
 export type QuestMenuPosture = 'standing' | 'seated';
@@ -40,7 +41,6 @@ const SELECTED = '#075985';
 const DANGER = '#d99a9a';
 const CARD = '#0f172a';
 const DIVIDER = '#334155';
-const PANEL = '#09090b';
 
 export interface QuestMenuButton {
   action: QuestMenuAction;
@@ -63,6 +63,7 @@ export interface QuestMenuDrawOp {
   size?: number;
   align?: 'left' | 'center';
   bold?: boolean;
+  font?: string;
   maxWidth?: number;
 }
 
@@ -73,10 +74,16 @@ export interface QuestMenuModel {
   specKey: string;
 }
 
+export interface QuestMenuFonts {
+  body?: string | null;
+  button?: string | null;
+}
+
 export interface QuestMenuBuildOptions {
   hover?: QuestMenuAction | null;
   acknowledged?: boolean;
   posture?: QuestMenuPosture;
+  fonts?: QuestMenuFonts;
 }
 
 const buttonWidth = 520;
@@ -130,18 +137,16 @@ export function questMenuButtons(
     page === 'menu'
       ? [
           { action: 'solo' as const, label: 'Solo' },
-          { action: 'recenter' as const, label: 'Recenter' },
           postureButton,
           { action: 'exit' as const, label: 'Exit' },
         ]
       : [
           { action: 'ready' as const, label: acknowledged ? 'Set' : 'Ready' },
           { action: 'back' as const, label: 'Back' },
-          { action: 'exit' as const, label: 'Exit' },
-          { action: 'recenter' as const, label: 'Recenter' },
           postureButton,
+          { action: 'exit' as const, label: 'Exit' },
         ];
-  const topCount = page === 'menu' ? 2 : 3;
+  const topCount = 2;
   return [
     ...placeRow(items.slice(0, topCount), topRowY),
     ...placeRow(items.slice(topCount), bottomRowY),
@@ -204,7 +209,6 @@ export function wrapMenuLine(text: string, maxChars = 62): string[] {
 function buttonColors(action: QuestMenuAction, hovered: boolean, acknowledged: boolean) {
   if (action === 'exit') return { fill: hovered ? '#e6b2b2' : DANGER, text: INK };
   if (action === 'back') return { fill: hovered ? '#334155' : '#1e293b', text: PAPER };
-  if (action === 'recenter') return { fill: hovered ? '#2563eb' : '#1e3a8a', text: PAPER };
   if (action === 'posture') return { fill: hovered ? '#475569' : '#334155', text: PAPER };
   if (action === 'ready' && acknowledged) {
     return { fill: hovered ? '#0369a1' : SELECTED, text: PAPER };
@@ -216,7 +220,8 @@ function pushButton(
   ops: QuestMenuDrawOp[],
   button: QuestMenuButton,
   hovered: boolean,
-  acknowledged: boolean
+  acknowledged: boolean,
+  font?: string | null
 ) {
   const colors = buttonColors(button.action, hovered, acknowledged);
   const inset = button.action === 'back' ? 6 : 0;
@@ -260,6 +265,7 @@ function pushButton(
     color: colors.text,
     align: 'center',
     bold: true,
+    ...(font ? { font } : {}),
     maxWidth: button.width - 64,
   });
 }
@@ -273,6 +279,8 @@ export function buildQuestMenu(
     typeof optionsOrPosture === 'string' ? { posture: optionsOrPosture } : optionsOrPosture;
   const acknowledged = options.acknowledged === true;
   const posture = options.posture ?? 'standing';
+  const bodyFont = options.fonts?.body ?? undefined;
+  const buttonFont = options.fonts?.button ?? bodyFont;
   const buttons = questMenuButtons(page, { acknowledged, posture });
   const ops: QuestMenuDrawOp[] = [
     {
@@ -281,16 +289,7 @@ export function buildQuestMenu(
       y: 0,
       width: QUEST_MENU_TEXTURE.widthPx,
       height: QUEST_MENU_TEXTURE.heightPx,
-      radius: 0,
-      color: PANEL,
-    },
-    {
-      op: 'roundRect',
-      x: 48,
-      y: 36,
-      width: QUEST_MENU_TEXTURE.widthPx - 96,
-      height: QUEST_MENU_TEXTURE.heightPx - 72,
-      radius: 44,
+      radius: QUEST_MENU_CARD_RADIUS_PX,
       color: CARD,
     },
     {
@@ -302,6 +301,7 @@ export function buildQuestMenu(
       color: PAPER,
       align: 'center',
       bold: true,
+      ...(buttonFont ? { font: buttonFont } : {}),
       maxWidth: 1760,
     },
     {
@@ -329,12 +329,13 @@ export function buildQuestMenu(
       color: MUTED_PAPER,
       align: 'center',
       bold: false,
+      ...(bodyFont ? { font: bodyFont } : {}),
       maxWidth: 1760,
     });
     textY += 54;
   }
   for (const button of buttons) {
-    pushButton(ops, button, options.hover === button.action, acknowledged);
+    pushButton(ops, button, options.hover === button.action, acknowledged, buttonFont);
   }
   return {
     page,

@@ -5,6 +5,7 @@ const path = require('node:path');
 
 const {
   QUEST_MENU_LAYER_FIRST_SHOW_MS,
+  QUEST_MENU_LAYER_MASK_FRAGMENT,
   createQuestMenuCompositor,
   questMenuLayerMaterials,
   questMenuLayerNotice,
@@ -54,7 +55,7 @@ test('the layer pose is the panel node the scene builds, for any calibration', (
   const calibrations = [
     DEFAULT_CALIBRATION,
     { ...DEFAULT_CALIBRATION, origin: [0.4, 1.62, -0.3], yaw: 90, source: 'solo', entry: 1 },
-    { ...DEFAULT_CALIBRATION, origin: [-1.2, 1.1, 2.5], yaw: -37.5, source: 'recenter', entry: 2 },
+    { ...DEFAULT_CALIBRATION, origin: [-1.2, 1.1, 2.5], yaw: -37.5, source: 'system', entry: 2 },
     { ...DEFAULT_CALIBRATION, origin: [0, 1.4, 0], yaw: 179.9, posture: 'seated' },
   ];
   for (const cal of calibrations) {
@@ -129,7 +130,8 @@ test('every screen fits the native panel limits and hover is never part of the i
   const scene = read('src/features/quest-vr/quest-arena-scene.native.tsx');
   assert.doesNotMatch(scene, /hover:\s*visibleHover/);
   const navigator = read('src/features/quest-vr/quest-xr-navigator.native.tsx');
-  assert.match(navigator, /hdrEnabled=\{false\}/);
+  assert.doesNotMatch(navigator, /hdrEnabled=\{false\}/);
+  assert.match(navigator, /\bhdrEnabled\b/);
   assert.match(navigator, /bloomEnabled=\{false\}/);
 });
 
@@ -325,14 +327,17 @@ test('without the patched renderer, or with the launcher choice off, no layer is
   questMenuLayer.set('compositor');
 });
 
-test('the mask writes depth and zero alpha with colour writes on; the outline never hides rays', () => {
+test('the mask writes depth and zero alpha inside rounded corners with colour writes on; the outline never hides rays', () => {
   const { questMenuLayerMask, questMenuFocus } = questMenuLayerMaterials();
   assert.equal(questMenuLayerMask.writesToDepthBuffer, true);
   assert.equal(questMenuLayerMask.readsFromDepthBuffer, true);
   assert.equal(questMenuLayerMask.blendMode, 'None');
-  // Fully virtual: the eye buffer clears opaque, so alpha 0 must actually be written.
+  // Fully virtual: the eye buffer clears opaque, so alpha 0 must actually be written inside the card,
+  // while corners outside the rounded-rect SDF discard so the scene shows untouched.
   assert.equal(Object.hasOwn(questMenuLayerMask, 'colorWriteMask'), false);
-  assert.equal(questMenuLayerMask.shaderModifiers.fragment, '_output_color = vec4(0.0);');
+  assert.equal(questMenuLayerMask.shaderModifiers.fragment, QUEST_MENU_LAYER_MASK_FRAGMENT);
+  assert.match(QUEST_MENU_LAYER_MASK_FRAGMENT, /if \(dist > -0\.0015\) discard;/);
+  assert.match(QUEST_MENU_LAYER_MASK_FRAGMENT, /_output_color = vec4\(0\.0\);/);
   assert.equal(questMenuFocus.writesToDepthBuffer, false);
   assert.equal(questMenuFocus.readsFromDepthBuffer, true);
 });
@@ -355,6 +360,7 @@ test('QuestPanelModule and the renderer patch agree on the JNI contract', () => 
   const jni = {
     nativeVersion: ['jint', '(JNIEnv *, jobject)'],
     nativeStatus: ['jint', '(JNIEnv *, jobject)'],
+    nativeRefSpaceEpoch: ['jint', '(JNIEnv *, jobject)'],
     nativeHide: ['void', '(JNIEnv *, jobject)'],
     nativePose: ['jboolean', 'jfloatArray pose'],
     nativeDraw: ['jboolean', 'jfloatArray pose'],
@@ -367,6 +373,9 @@ test('QuestPanelModule and the renderer patch agree on the JNI contract', () => 
     assert.ok(patch.slice(at, at + 220).includes(args), `${name} arguments`);
     assert.match(kotlin, new RegExp(`private external fun ${name}\\(`));
   }
+  assert.match(kotlin, /Function\("refSpaceEpoch"\)/);
+  assert.match(kotlin, /Typeface\.createFromFile/);
+  assert.match(kotlin, /drawExecutor/);
   assert.match(
     kotlin,
     /external fun nativeDraw\(\s*rgba: ByteArray,\s*width: Int,\s*height: Int,\s*widthM: Float,\s*heightM: Float,\s*pose: FloatArray\s*\): Boolean/
@@ -439,6 +448,14 @@ test('the renderer submits the layer under the scene and blends the eye buffer o
     added,
     /glColorMask\(colorMask\[0\], colorMask\[1\], colorMask\[2\], colorMask\[3\]\);/
   );
+  // Clear alpha to 0 before rendering eyes whenever questPanel is active so HDR tone-mapping
+  // preserves the zero-alpha mask hole; restore 1.0 when hidden.
+  assert.match(
+    cpp,
+    /display->setClearAlpha\(\(_passthroughEnabled \|\| questPanel\) \? 0\.0f : 1\.0f\);/
+  );
+  assert.match(added, /XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING/);
+  assert.match(added, /quest_panel::bumpRefSpaceEpoch\(\)/);
   assert.doesNotMatch(
     added,
     /xrCreateSession|xrBeginSession|xrCreateReferenceSpace|recenterTracking/

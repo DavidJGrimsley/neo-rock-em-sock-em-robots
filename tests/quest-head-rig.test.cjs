@@ -20,7 +20,6 @@ const {
   isReferenceDiscontinuity,
   menuFrame,
   questRigTransform,
-  rebaseCalibration,
   stanceMarkerRingLocal,
   wrap180,
   yawFromForward,
@@ -168,7 +167,7 @@ test('questRigTransform and applyRig align eye anchor, forward direction, defaul
       origin: [(rand() * 2 - 1) * 4, (rand() * 2 - 1) * 2, (rand() * 2 - 1) * 4],
       yaw: (rand() * 2 - 1) * 180,
       posture: i % 2 === 0 ? 'standing' : 'seated',
-      source: 'recenter',
+      source: 'system',
       entry: 1,
     };
     const rig = questRigTransform(cal, anchor);
@@ -508,47 +507,19 @@ test('headStep and isReferenceDiscontinuity separate real head motion from frame
   assert.equal(isReferenceDiscontinuity(down), false);
 });
 
-test('rebaseCalibration keeps the gameplay pose continuous across a yaw-plus-translation jump', () => {
+test('system calibration keeps the calibrated origin/yaw contract identical to solo calibration', () => {
   const cal = {
     ...DEFAULT_CALIBRATION,
     origin: [0.3, 1.25, -0.4],
     yaw: 140,
     posture: 'seated',
-    source: 'recenter',
+    source: 'system',
     entry: 2,
   };
-  // The wearer leans a little inside bounds, then the frame turns 109.4 degrees
-  // and shifts, like the logged incident.
-  const before = makeSample(1000, [0.38, 1.18, -0.33], 151, -10, 4);
-  const turn = 109.4;
-  const r = (turn * Math.PI) / 180;
-  const shift = [-0.42, 0.06, 0.51];
-  const move = (p) => [
-    shift[0] + p[0] * Math.cos(r) + p[2] * Math.sin(r),
-    shift[1] + p[1],
-    shift[2] - p[0] * Math.sin(r) + p[2] * Math.cos(r),
-  ];
-  const after = makeSample(1014, move(before.position), 151 + turn, -10, 4);
-
-  const stale = gameplayHeadPose(cal, after);
-  assert.equal(stale.clamped, true);
-
-  const rebased = rebaseCalibration(cal, before, after);
-  assert.ok(rebased);
-  assert.equal(rebased.posture, 'seated');
-  assert.equal(rebased.source, 'recenter');
-  assert.equal(rebased.entry, 2);
-  assert.ok(Math.abs(wrap180(rebased.yaw - (140 + turn))) < 1e-9);
-  const expectOrigin = move(cal.origin);
-  for (let i = 0; i < 3; i += 1) assert.ok(Math.abs(rebased.origin[i] - expectOrigin[i]) < 1e-9);
-
-  const prior = gameplayHeadPose(cal, before);
-  const now = gameplayHeadPose(rebased, after);
-  assert.equal(now.clamped, false);
+  const atOrigin = makeSample(1000, [0.3, 1.25, -0.4], 140, -10, 4);
+  const pose = gameplayHeadPose(cal, atOrigin);
+  assert.equal(pose.clamped, false);
   for (const key of ['lateral', 'vertical', 'forward', 'yawRelative']) {
-    assert.ok(Math.abs(now[key] - prior[key]) < 1e-9, key);
+    assert.ok(Math.abs(pose[key]) < 1e-9, key);
   }
-
-  // No yaw, no rebase.
-  assert.equal(rebaseCalibration(cal, makeSample(0, [0, 1, 0], 0, -90), after), null);
 });

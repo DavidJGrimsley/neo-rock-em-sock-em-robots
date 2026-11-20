@@ -1,5 +1,7 @@
 package expo.modules.questpanel
 
+import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -7,6 +9,7 @@ import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.net.Uri
 import android.text.TextPaint
 import android.text.TextUtils
 import android.util.Log
@@ -14,13 +17,17 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
 import java.nio.ByteBuffer
+import java.security.MessageDigest
 import java.util.concurrent.Executors
 
 private const val TAG = "QuestPanel"
 
 // QuestPanelLayer.h in tools/quest/viro-renderer/0002-openxr-quest-panel-layer.patch.
-private const val NATIVE_VERSION = 1
+private const val NATIVE_VERSION = 2
 
 // Draws the clean headset compositor UI with Android Canvas and hands the pixels
 // and pose to the patched Viro renderer, which submits them as an OpenXR quad
@@ -41,8 +48,11 @@ class QuestPanelModule : Module() {
   private var panelPixels: ByteBuffer? = null
   // The pixels the renderer holds; a spec with the same pixels only moves them.
   private var drawnPixelsKey: String? = null
+  private val typefaces = HashMap<String, Typeface>()
+  private val warnedFonts = HashSet<String>()
 
   private external fun nativeVersion(): Int
+  private external fun nativeRefSpaceEpoch(): Int
   private external fun nativeStatus(): Int
   private external fun nativeHide()
   private external fun nativePose(pose: FloatArray): Boolean
@@ -72,6 +82,94 @@ class QuestPanelModule : Module() {
     drawnPixelsKey = null
   }
 
+  private fun existingFile(value: String): File? {
+    if (value.startsWith("file:///android_res/")) return null
+    val path = when {
+      value.startsWith("file:") -> Uri.parse(value).path
+      value.startsWith("/") -> value
+      else -> null
+    } ?: return null
+    if (path.startsWith("/android_res/")) return null
+    val file = File(path)
+    return if (file.isFile && file.length() > 0L) file else null
+  }
+
+  @SuppressLint("DiscouragedApi")
+  private fun openPackaged(context: Context, value: String): InputStream? {
+    if (value.startsWith("file:///android_res/")) {
+      val segments = Uri.parse(value).pathSegments
+      if (segments.size < 3) return null
+      val directory = segments[1].substringBefore('-')
+      val name = segments[2].substringBeforeLast('.', segments[2])
+      val id = context.resources.getIdentifier(name, directory, context.packageName)
+      return if (id != 0) context.resources.openRawResource(id) else null
+    }
+    if (value.contains(":")) return null
+    val id = context.resources.getIdentifier(value, "raw", context.packageName).takeIf { it != 0 }
+      ?: context.resources.getIdentifier(value, "drawable", context.packageName).takeIf { it != 0 }
+      ?: return null
+    return context.resources.openRawResource(id)
+  }
+
+  private fun sourceCacheName(value: String, extension: String): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
+    val hex = digest.joinToString("") { byte -> "%02x".format(byte) }.take(20)
+    val suffix = extension.lowercase().filter { it.isLetterOrDigit() }.ifEmpty { "bin" }
+    return "src-$hex.$suffix"
+  }
+
+  // Release fonts are Android raw resources, not filesystem paths. Copy those
+  // bytes to cache once on the draw worker so Typeface.createFromFile works off
+  // the main thread without delaying the first frame.
+  private fun materialize(value: String, extension: String): File {
+    existingFile(value)?.let { return it }
+    val context = appContext.reactContext ?: error("Quest panel has no Android context.")
+    val input = openPackaged(context, value) ?: error("Quest panel font is not a file: $value")
+    val directory = File(context.cacheDir, "quest-panel-src")
+    if (!directory.isDirectory && !directory.mkdirs()) {
+      error("Quest panel cache directory was not created.")
+    }
+    val file = File(directory, sourceCacheName(value, extension))
+    if (file.isFile && file.length() > 0L) {
+      input.close()
+      return file
+    }
+    val temp = File(directory, "${file.name}.tmp")
+    try {
+      input.use { stream ->
+        FileOutputStream(temp).use { out ->
+          val copied = stream.copyTo(out)
+          if (copied <= 0L) error("Quest panel font was empty: $value")
+        }
+      }
+      if (!temp.renameTo(file) && !file.isFile) {
+        error("Quest panel font cache rename failed: $value")
+      }
+    } catch (failure: Exception) {
+      temp.delete()
+      throw failure
+    }
+    return file
+  }
+
+  private fun resolveTypeface(font: String, bold: Boolean): Typeface {
+    if (font.isEmpty()) return if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+    typefaces[font]?.let { return it }
+    return try {
+      val file = materialize(font, "ttf")
+      val face = typefaces[file.absolutePath] ?: Typeface.createFromFile(file).also {
+        typefaces[file.absolutePath] = it
+      }
+      typefaces[font] = face
+      face
+    } catch (error: Throwable) {
+      if (warnedFonts.add(font)) {
+        Log.w(TAG, "Falling back to system typeface for $font", error)
+      }
+      if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+    }
+  }
+
   private fun rect(op: JSONObject) = RectF(
     op.getDouble("x").toFloat(),
     op.getDouble("y").toFloat(),
@@ -96,7 +194,7 @@ class QuestPanelModule : Module() {
           val glyph = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
           glyph.color = Color.parseColor(op.optString("color", "#f8fafc"))
           glyph.textSize = op.optDouble("size", 32.0).toFloat()
-          glyph.typeface = if (op.optBoolean("bold")) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+          glyph.typeface = resolveTypeface(op.optString("font"), op.optBoolean("bold"))
           glyph.textAlign =
             if (op.optString("align") == "center") Paint.Align.CENTER else Paint.Align.LEFT
           val maxWidth = op.optDouble("maxWidth", width.toDouble()).toFloat()
@@ -212,6 +310,8 @@ class QuestPanelModule : Module() {
     Name("QuestPanel")
 
     Function("isAvailable") { available }
+
+    Function("refSpaceEpoch") { if (available) nativeRefSpaceEpoch() else 0 }
 
     // A new owner starts hidden, so a stale panel from an earlier scene never shows.
     Function("open") {

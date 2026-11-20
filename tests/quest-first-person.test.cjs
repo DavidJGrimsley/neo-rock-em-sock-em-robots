@@ -282,6 +282,7 @@ function fakePanel() {
     },
     draw: (owner, json) => panel.draws.push({ owner, spec: JSON.parse(json) }),
     status: (owner) => (owner === panel.owner ? panel.status : -1),
+    refSpaceEpoch: () => 0,
     hide: (owner) => panel.hidden.push(owner),
   };
   panel.latest = () => panel.draws.at(-1)?.spec ?? null;
@@ -299,7 +300,6 @@ function createSceneHarness({ panelAvailable = true } = {}) {
   let refIndex = 0;
   const calls = {
     calibratedWith: null,
-    recenter: 0,
     posture: 0,
     dispose: 0,
     mounted: 0,
@@ -351,9 +351,7 @@ function createSceneHarness({ panelAvailable = true } = {}) {
       };
       return harness.trackerSnapshot.calibration;
     },
-    recenter: () => {
-      calls.recenter += 1;
-    },
+    setRefSpaceEpochSource: () => {},
     cyclePosture: () => {
       calls.posture += 1;
       const nextPosture =
@@ -429,7 +427,7 @@ function createSceneHarness({ panelAvailable = true } = {}) {
           uri: `file:///${id}`,
           localUri: `file:///${id}`,
           hash: 'h',
-          type: 'png',
+          type: String(id).endsWith('.ttf') ? 'ttf' : 'png',
         }),
       },
     },
@@ -451,6 +449,8 @@ function createSceneHarness({ panelAvailable = true } = {}) {
     '../../../assets/arena/Fight_Arena.glb': 'arena.glb',
     '../../../assets/arena/Mike_Player1_Blue_Combat_AR.glb': 'blue.glb',
     '../../../assets/arena/Mike_Player2_RedOrange_Combat_AR.glb': 'red.glb',
+    '../../../assets/arena/ui/ArenaNotoSans.ttf': 'sans.ttf',
+    '../../../assets/arena/ui/ArenaNotoSansSemibold.ttf': 'sans-semibold.ttf',
     '../../../modules/quest-panel/src/index.ts': {
       questPanelAvailable: () => panel.native.isAvailable(),
       questPanelNative: panel.native,
@@ -458,6 +458,7 @@ function createSceneHarness({ panelAvailable = true } = {}) {
     './quest-arena-session.ts': require('../src/features/quest-vr/quest-arena-session.ts'),
     './quest-head-rig.ts': require('../src/features/quest-vr/quest-head-rig.ts'),
     './quest-head-tracker.ts': { questHeadTracker: mockTracker },
+    './quest-menu-asset-uri.ts': require('../src/features/quest-vr/quest-menu-asset-uri.ts'),
     './quest-menu-compositor.ts': {
       ...compositorModule,
       // Polls run on a manual clock, so no test leaves a real timer behind.
@@ -583,28 +584,35 @@ function panelNode(all) {
   );
 }
 
-const MENU_LABELS = ['Solo', 'Recenter', 'Standing', 'Exit'];
-const RING_LABELS = ['Ready', 'Back', 'Exit', 'Recenter'];
+const MENU_LABELS = ['Solo', 'Standing', 'Exit'];
+const RING_LABELS = ['Ready', 'Back', 'Standing', 'Exit'];
 
-test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, recenter, posture, and visible={false} blue model', () => {
+test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, packaged fonts, and visible={false} blue model', () => {
   questMenuLayer.set('compositor');
   const harness = createSceneHarness();
   const { calls, panel } = harness;
 
   const initial = harness.render();
-  // The first frame already hands the layer a complete, usable menu; nothing waits on art.
+  // The first frame already hands the layer a complete, usable menu with packaged fonts; nothing waits on art.
   assert.equal(panel.opened, 1);
   assert.equal(panel.draws.length, 1);
   for (const label of MENU_LABELS) assert.ok(panel.texts().includes(label), `layer label ${label}`);
+  assert.equal(panel.latest().ops[0].op, 'roundRect');
+  assert.equal(panel.latest().ops[0].color, '#0f172a');
+  assert.equal(panel.latest().ops[0].radius, 56);
+  const textOps = panel.latest().ops.filter((op) => op.op === 'text');
+  assert.ok(textOps.some((op) => op.font === 'file:///sans.ttf'));
+  assert.ok(textOps.some((op) => op.font === 'file:///sans-semibold.ttf'));
   assert.deepEqual(
     panel.latest().pose,
     questMenuPanelPose(DEFAULT_CALIBRATION, 'menu').pose.map((v) => Math.round(v * 1e5) / 1e5 || 0)
   );
   assert.equal(withMaterial(initial.all, 'questMenuLayerMask').length, 1);
   assert.equal(fallbackQuads(initial.all).length, 0, 'no Viro loading block over the layer');
-  for (const action of ['solo', 'recenter', 'posture', 'exit']) {
+  for (const action of ['solo', 'posture', 'exit']) {
     assert.ok(hitQuad(initial.all, action), `missing hit target ${action}`);
   }
+  assert.equal(hitQuad(initial.all, 'recenter'), undefined);
   assert.equal(
     initial.all.some(
       (node) => node.type === 'ViroText' && /Loading|loading/.test(String(node.props.text))
@@ -615,9 +623,6 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, recenter,
   assert.ok(viroScene);
   assert.equal(viroScene.props.onCameraTransformUpdate, harness.onCameraTransform);
   assert.equal(calls.mounted, 1);
-
-  clickAction(initial.all, 'recenter');
-  assert.equal(calls.recenter, 1);
 
   clickAction(initial.all, 'posture');
   assert.equal(calls.posture, 1);
@@ -727,10 +732,11 @@ test('page changes move the layer, panel and targets together with no loading bl
   );
   assert.equal(fallbackQuads(frame.all).length, 0, 'no fallback block during navigation');
   assert.equal(withMaterial(frame.all, 'questMenuLayerMask').length, 1);
-  for (const action of ['ready', 'back', 'exit', 'recenter', 'posture']) {
+  for (const action of ['ready', 'back', 'posture', 'exit']) {
     assert.ok(hitQuad(frame.all, action), `ring hit ${action}`);
   }
   assert.ok(!hitQuad(frame.all, 'solo'));
+  assert.ok(!hitQuad(frame.all, 'recenter'));
 
   // A press on a target from the previous screen is dropped and logged once.
   clickAction(staleMenu, 'exit', 1);
@@ -799,11 +805,11 @@ test('pointer hover draws a Viro outline and never redraws the panel; gaze does 
   // In front of the mask, behind the hit target, so it never takes the ray.
   assert.ok(focusNode.props.position[2] > 0 && focusNode.props.position[2] < soloFrame.position[2]);
 
-  hoverAction(frame.all, 'recenter', true, 4);
+  hoverAction(frame.all, 'posture', true, 4);
   hoverAction(frame.all, 'solo', false, 1);
   frame = harness.render();
   assert.equal(withMaterial(frame.all, 'questMenuFocus').length, 4);
-  hoverAction(frame.all, 'recenter', false, 4);
+  hoverAction(frame.all, 'posture', false, 4);
   frame = harness.render();
   assert.equal(withMaterial(frame.all, 'questMenuFocus').length, 0);
   assert.equal(panel.draws.length, drawn, 'hover never sends a new panel image');
@@ -819,7 +825,7 @@ test('a failed or missing layer falls back to Viro buttons that still work', asy
   frame = failed.poll();
   assert.equal(withMaterial(frame.all, 'questMenuLayerMask').length, 0);
   assert.equal(withMaterial(frame.all, 'questMenuBacking').length, 1);
-  assert.equal(fallbackQuads(frame.all).length, 4);
+  assert.equal(fallbackQuads(frame.all).length, 3);
   for (const label of MENU_LABELS) assert.ok(hasText(frame.all, label), `fallback ${label}`);
   assert.ok(frame.all.some((n) => n.type === 'ViroText' && /menu layer failed/.test(n.props.text)));
   assert.deepEqual(failed.panel.hidden, [1], 'a failed layer is hidden');
@@ -836,7 +842,7 @@ test('a failed or missing layer falls back to Viro buttons that still work', asy
   const missing = createSceneHarness({ panelAvailable: false });
   frame = missing.render();
   assert.equal(missing.panel.opened, 0);
-  assert.equal(fallbackQuads(frame.all).length, 4);
+  assert.equal(fallbackQuads(frame.all).length, 3);
   assert.ok(
     frame.all.some((n) => n.type === 'ViroText' && /no headset menu layer/.test(n.props.text))
   );
@@ -849,7 +855,7 @@ test('a failed or missing layer falls back to Viro buttons that still work', asy
   const off = createSceneHarness();
   frame = off.render();
   assert.equal(off.panel.opened, 0);
-  assert.equal(fallbackQuads(frame.all).length, 4);
+  assert.equal(fallbackQuads(frame.all).length, 3);
   off.unmount();
   questMenuLayer.set('compositor');
 
@@ -858,7 +864,7 @@ test('a failed or missing layer falls back to Viro buttons that still work', asy
   slow.panel.status = 0;
   frame = slow.render();
   for (let i = 0; i < 20; i += 1) frame = slow.poll();
-  assert.equal(fallbackQuads(frame.all).length, 4);
+  assert.equal(fallbackQuads(frame.all).length, 3);
   slow.panel.status = 1;
   frame = slow.poll();
   assert.equal(fallbackQuads(frame.all).length, 0);
@@ -883,7 +889,6 @@ test('only menu hit targets take rays: scenery, mask, labels and outline ignore 
     'hit-exit',
     'hit-posture',
     'hit-ready',
-    'hit-recenter',
   ]);
   for (const node of frame.all) {
     if (node.type === 'Viro3DObject')

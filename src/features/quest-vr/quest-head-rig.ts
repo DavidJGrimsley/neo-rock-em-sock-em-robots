@@ -33,7 +33,7 @@ export interface Calibration {
   origin: Vec3;
   yaw: number;
   posture: Posture;
-  source: 'default' | 'solo' | 'recenter';
+  source: 'default' | 'solo' | 'system';
   entry: number;
 }
 
@@ -307,37 +307,6 @@ export function isReferenceDiscontinuity(step: HeadStep): boolean {
     step.distance >= positionLimit ||
     (step.yawDelta !== null && Math.abs(step.yawDelta) >= yawLimit)
   );
-}
-
-/**
- * Moves the calibration through the same yaw-plus-translation that took the
- * head from `from` to `to`, so the world keeps its place around the wearer.
- * Pitch and roll are never touched. Returns null when either yaw is unknown.
- */
-export function rebaseCalibration(
-  cal: Calibration,
-  from: HeadSample,
-  to: HeadSample
-): Calibration | null {
-  const fromYaw = yawFromForward(from.forward);
-  const toYaw = yawFromForward(to.forward);
-  if (fromYaw === null || toYaw === null) return null;
-  const turn = wrap180(toYaw - fromYaw);
-  const r = (turn * Math.PI) / 180;
-  const cos = Math.cos(r);
-  const sin = Math.sin(r);
-  const ox = cal.origin[0] - from.position[0];
-  const oy = cal.origin[1] - from.position[1];
-  const oz = cal.origin[2] - from.position[2];
-  return {
-    ...cal,
-    origin: [
-      to.position[0] + ox * cos + oz * sin,
-      to.position[1] + oy,
-      to.position[2] - ox * sin + oz * cos,
-    ],
-    yaw: wrap180(cal.yaw + turn),
-  };
 }
 
 export interface GameplayHeadPose {

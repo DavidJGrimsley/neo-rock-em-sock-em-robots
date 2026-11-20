@@ -12,6 +12,7 @@
 
 import { menuFrame, type Calibration, type Vec3 } from './quest-head-rig.ts';
 import {
+  QUEST_MENU_CARD_RADIUS_PX,
   QUEST_MENU_POSE,
   QUEST_MENU_SIZE,
   QUEST_MENU_TEXTURE,
@@ -71,10 +72,27 @@ export function questMenuPanelSpec(frame: QuestMenuPanelFrame) {
   });
 }
 
+const ROUND_MASK_RADIUS_M =
+  Math.round(
+    (QUEST_MENU_CARD_RADIUS_PX / QUEST_MENU_TEXTURE.widthPx) * QUEST_MENU_SIZE.widthM * 1e5
+  ) / 1e5;
+const ROUND_MASK_HALF_W = QUEST_MENU_SIZE.widthM / 2;
+const ROUND_MASK_HALF_H = QUEST_MENU_SIZE.heightM / 2;
+// Rounded-rect SDF in panel metres so the four corners and anti-aliased edge
+// discard instead of punching black holes into the 3D scene behind the panel.
+export const QUEST_MENU_LAYER_MASK_FRAGMENT = [
+  `vec2 p = abs(v_texcoord - 0.5) * vec2(${QUEST_MENU_SIZE.widthM}, ${QUEST_MENU_SIZE.heightM});`,
+  `vec2 q = p - (vec2(${ROUND_MASK_HALF_W}, ${ROUND_MASK_HALF_H}) - vec2(${ROUND_MASK_RADIUS_M}));`,
+  `float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - ${ROUND_MASK_RADIUS_M};`,
+  'if (dist > -0.0015) discard;',
+  '_output_color = vec4(0.0);',
+].join(' ');
+
 /**
  * Viro materials for the layer. Unlike the Medical Viewer passthrough mask,
  * colour writes stay on: the fully virtual eye buffer clears to opaque black,
- * so the mask must write alpha 0 for the layer underneath to show.
+ * so the mask must write alpha 0 for the layer underneath to show, while
+ * discarding outside the rounded card corners so the arena/skybox stays intact.
  */
 export function questMenuLayerMaterials() {
   return {
@@ -85,7 +103,7 @@ export function questMenuLayerMaterials() {
       writesToDepthBuffer: true,
       readsFromDepthBuffer: true,
       cullMode: 'None' as const,
-      shaderModifiers: { fragment: '_output_color = vec4(0.0);' },
+      shaderModifiers: { fragment: QUEST_MENU_LAYER_MASK_FRAGMENT },
     },
     // Hover outline drawn by Viro, so pointing never redraws the panel.
     questMenuFocus: {

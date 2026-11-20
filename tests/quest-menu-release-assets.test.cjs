@@ -146,6 +146,31 @@ test('the release APK packages the compositor panel module, patched renderer, an
     );
   }
   assert.equal(entries.includes('lib/arm64-v8a/libviro_renderer.so'), true);
+  // AGP optimizeReleaseResources shortens zip filenames (res/*.ttf), while resources.arsc keeps
+  // the raw resource identifiers used by QuestPanelModule / AssetSourceResolver.
+  const arsc = readZipEntry(apk, 'resources.arsc');
+  assert.equal(
+    arsc.includes('assets_arena_ui_arenanotosans'),
+    true,
+    'ArenaNotoSans.ttf raw resource name must be registered in resources.arsc'
+  );
+  assert.equal(
+    arsc.includes('assets_arena_ui_arenanotosanssemibold'),
+    true,
+    'ArenaNotoSansSemibold.ttf raw resource name must be registered in resources.arsc'
+  );
+  const ttfHashes = new Set(
+    entries
+      .filter((entry) => entry.endsWith('.ttf'))
+      .map((entry) => crypto.createHash('sha256').update(readZipEntry(apk, entry)).digest('hex'))
+  );
+  for (const fontFile of ['ArenaNotoSans.ttf', 'ArenaNotoSansSemibold.ttf']) {
+    const fontSha = crypto
+      .createHash('sha256')
+      .update(fs.readFileSync(path.join(__dirname, '../assets/arena/ui', fontFile)))
+      .digest('hex');
+    assert.equal(ttfHashes.has(fontSha), true, `${fontFile} bytes must be packaged in APK`);
+  }
   const provenanceFile = path.join(__dirname, '../native/quest-viro-renderer/provenance.json');
   if (fs.existsSync(provenanceFile)) {
     const provenance = JSON.parse(fs.readFileSync(provenanceFile, 'utf8'));

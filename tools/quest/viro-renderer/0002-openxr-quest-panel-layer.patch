@@ -9,27 +9,31 @@ at the same pose, so the panel shows through that hole and rays, hit dots and
 models in front of it still occlude it. Hit targets stay Viro quads.
 
 - QuestPanelLayer.h (new, app-owned): JNI entry points for
-  expo.modules.questpanel.QuestPanelModule (nativeVersion 1, nativeStatus,
-  nativeHide, nativePose, nativeDraw with pixels and pose set together) and
-  the render-thread swapchain upload. GL state Viro owns is restored.
-- The layer is added before the projection layer each rendered frame and
-  destroyed with the session swapchains.
+  expo.modules.questpanel.QuestPanelModule (nativeVersion 2, nativeStatus,
+  nativeHide, nativePose, nativeDraw with pixels and pose set together, and
+  nativeRefSpaceEpoch) and the render-thread swapchain upload. GL state Viro
+  owns is restored.
+- The layer is prepared before eye rendering and added before the projection
+  layer each rendered frame, and destroyed with the session swapchains.
 - Without passthrough the projection layer is opaque and would hide the
-  underlay. While the panel is submitted it is blended by source alpha as
-  premultiplied colour: pixels with alpha 1 composite exactly as before and
-  only the zero-alpha hole shows the panel. Passthrough flags are unchanged.
+  underlay. While the panel is submitted, the OpenXR display clears alpha to 0
+  and the projection layer is blended by source alpha as premultiplied colour:
+  HDR tone-mapping preserves the zero-alpha hole while keeping PBR and Hable
+  tone mapping active on 3D models. Passthrough flags are unchanged.
 - The per-eye clear restores the colour, depth and stencil write masks, so
   Viro's cached masks match GL after the clear (from the Medical Viewer
   compositor build).
+- XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING for LOCAL space increments
+  the reference-space epoch once its changeTime is reached so the app can
+  align cleanly with Horizon system recenter without snapping back.
 
 The OpenXR pointer patch (0001) is unchanged and applies first.
-
 diff --git a/android/sharedCode/src/main/cpp/QuestPanelLayer.h b/android/sharedCode/src/main/cpp/QuestPanelLayer.h
 new file mode 100644
-index 0000000..23acca9
+index 0000000..d679c69
 --- /dev/null
 +++ b/android/sharedCode/src/main/cpp/QuestPanelLayer.h
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,247 @@
 +// App-owned addition to ReactVision/virocore v3.0.3 (MIT) for the Neo Rock 'Em
 +// Sock 'Em Robots Quest menu. Adapted from the Medical Viewer compositor panel
 +// (native/quest-compositor/MedicalQuestPanel.h in DavidJGrimsley's
@@ -45,6 +49,7 @@ index 0000000..23acca9
 +#pragma once
 +#include <jni.h>
 +#include <algorithm>
++#include <atomic>
 +#include <cmath>
 +#include <cstdint>
 +#include <cstring>
@@ -54,7 +59,10 @@ index 0000000..23acca9
 +
 +namespace quest_panel {
 +// Bumped when the JNI contract changes; QuestPanelModule checks it.
-+constexpr int kVersion = 1;
++constexpr int kVersion = 2;
++
++static std::atomic<int> refSpaceEpoch{0};
++inline void bumpRefSpaceEpoch() { refSpaceEpoch.fetch_add(1, std::memory_order_relaxed); }
 +
 +struct State {
 +    std::mutex mutex;
@@ -85,6 +93,11 @@ index 0000000..23acca9
 +extern "C" JNIEXPORT jint JNICALL
 +Java_expo_modules_questpanel_QuestPanelModule_nativeVersion(JNIEnv *, jobject) {
 +    return quest_panel::kVersion;
++}
++
++extern "C" JNIEXPORT jint JNICALL
++Java_expo_modules_questpanel_QuestPanelModule_nativeRefSpaceEpoch(JNIEnv *, jobject) {
++    return quest_panel::refSpaceEpoch.load(std::memory_order_relaxed);
 +}
 +
 +extern "C" JNIEXPORT jint JNICALL
@@ -300,7 +313,7 @@ index e8ff8cf..08bc444 100644
  
  private:
 diff --git a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
-index d1c6316..c179111 100644
+index d1c6316..51bf41d 100644
 --- a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
 +++ b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
 @@ -5,6 +5,7 @@
@@ -320,24 +333,68 @@ index d1c6316..c179111 100644
      for (auto &sc : _swapchains) {
          if (sc.handle != XR_NULL_HANDLE) {
              xrDestroySwapchain(sc.handle);
-@@ -1335,6 +1338,16 @@ void VROSceneRendererOpenXR::renderFrame() {
-         layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&ptLayerComp));
-     }
+@@ -1140,9 +1143,17 @@ void VROSceneRendererOpenXR::pollEvents() {
+                 handleSessionStateChange(stateEvent);
+                 break;
+             }
+-            case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
+-                ALOGV("Reference space change pending — content may shift");
++            case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING: {
++                auto *refEvent =
++                    reinterpret_cast<XrEventDataReferenceSpaceChangePending *>(&event);
++                ALOGV("Reference space change pending (type=%d) — content may shift",
++                      (int)refEvent->referenceSpaceType);
++                if (refEvent->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) {
++                    _pendingRefSpaceChange = true;
++                    _pendingRefSpaceChangeTime = refEvent->changeTime;
++                }
+                 break;
++            }
+             case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING:
+                 ALOGE("Instance loss pending — shutting down");
+                 _running = false;
+@@ -1223,6 +1234,10 @@ void VROSceneRendererOpenXR::renderFrame() {
+     XrFrameState    frameState= { XR_TYPE_FRAME_STATE };
+     XR_CHECK(xrWaitFrame(_session, &waitInfo, &frameState));
+     _lastPredictedDisplayTime = frameState.predictedDisplayTime;
++    if (_pendingRefSpaceChange && frameState.predictedDisplayTime >= _pendingRefSpaceChangeTime) {
++        _pendingRefSpaceChange = false;
++        quest_panel::bumpRefSpaceEpoch();
++    }
+
+     // ── Begin frame ───────────────────────────────────────────────────────────
+     XrFrameBeginInfo beginInfo = { XR_TYPE_FRAME_BEGIN_INFO };
+@@ -1254,6 +1269,19 @@ void VROSceneRendererOpenXR::renderFrame() {
+         (viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) &&
+         (viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
  
-+    // App panel underlay (QuestPanelLayer.h). The scene draws a depth-writing,
-+    // zero-alpha quad at the same pose, so the panel shows only through that
-+    // hole and anything in front of it (rays, hit dots, models) still covers it.
++    // App panel underlay (QuestPanelLayer.h). Prepare before rendering eyes so
++    // the OpenXR display clears alpha to 0 while the panel is submitted, allowing
++    // HDR tone-mapping (VROToneMappingRenderPass) to preserve the zero-alpha hole.
 +    const XrCompositionLayerBaseHeader *questPanel = nullptr;
 +    if (viewsValid && frameState.shouldRender) {
 +        if (!_questPanel) _questPanel.reset(new QuestPanelLayer());
 +        questPanel = _questPanel->prepare(_session, _stageSpace);
-+        if (questPanel) layers.push_back(questPanel);
 +    }
++    if (_openxrDriver) {
++        auto display = _openxrDriver->getOpenXRDisplay();
++        if (display) display->setClearAlpha((_passthroughEnabled || questPanel) ? 0.0f : 1.0f);
++    }
++
+     if (viewsValid && frameState.shouldRender) {
+         // ── Prepare the Viro renderer (once per frame, before any eye render) ─
+         // Use the left eye pose/fov to drive scene-level preparation (culling,
+@@ -1335,6 +1363,9 @@ void VROSceneRendererOpenXR::renderFrame() {
+         layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&ptLayerComp));
+     }
+
++    // App panel underlay (QuestPanelLayer.h), submitted under the projection layer.
++    if (questPanel) layers.push_back(questPanel);
 +
      // Projection layer (3D scene)
      XrCompositionLayerProjection projLayer = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
      if (viewsValid && frameState.shouldRender) {
-@@ -1348,6 +1361,12 @@ void VROSceneRendererOpenXR::renderFrame() {
+@@ -1348,6 +1379,12 @@ void VROSceneRendererOpenXR::renderFrame() {
          if (_passthroughEnabled) {
              projLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
                                     XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
@@ -351,7 +408,7 @@ index d1c6316..c179111 100644
          layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&projLayer));
      }
 diff --git a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.h b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.h
-index e0a125b..deb3fa4 100644
+index e0a125b..d7f5aa9 100644
 --- a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.h
 +++ b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.h
 @@ -49,6 +49,7 @@ class VRODisplayOpenGLOpenXR;
@@ -362,12 +419,14 @@ index e0a125b..deb3fa4 100644
  
  namespace gvr { class AudioApi; }
  
-@@ -167,6 +168,9 @@ private:
+@@ -167,6 +168,11 @@ private:
      XrBoundaryVisibilityMETA _boundaryVisibility = XR_BOUNDARY_VISIBILITY_NOT_SUPPRESSED_META;
      uint32_t        _boundaryRequestCooldown = 0;  // frames until the next request
  
 +    // App menu panel, an XrCompositionLayerQuad under the projection layer.
 +    std::unique_ptr<QuestPanelLayer> _questPanel;
++    bool            _pendingRefSpaceChange = false;
++    XrTime          _pendingRefSpaceChangeTime = 0;
 +
      // Per-eye swapchains (index 0 = left, 1 = right)
      VROOpenXRSwapchain _swapchains[2];

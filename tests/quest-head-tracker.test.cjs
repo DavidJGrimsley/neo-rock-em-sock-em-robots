@@ -8,7 +8,6 @@ const {
   wrap180,
 } = require('../src/features/quest-vr/quest-head-rig.ts');
 const {
-  QUEST_RECENTER_FAILURE_MESSAGE,
   createQuestHeadTracker,
 } = require('../src/features/quest-vr/quest-head-tracker.ts');
 
@@ -230,19 +229,17 @@ test('entry lifetime preserves Back->Solo and pre-Solo menu Recenter, and re-cal
     entries: () => entries,
   });
 
-  // Menu recenter in entry 1 BEFORE first Solo.
-  tracker.recenter();
+  // Pre-Solo pose samples update status/pose without locking Solo calibration yet.
   for (let i = 0; i < 10; i += 1) {
     tracker.onCameraTransform(viroPose([0.5, 1.6, 0.2], 60));
     clock.advance(50);
   }
-  assert.equal(tracker.getSnapshot().status, 'ready');
-  assert.equal(tracker.getSnapshot().calibration.source, 'recenter');
+  assert.equal(tracker.getSnapshot().calibration.source, 'default');
   assert.equal(tracker.getSnapshot().anchor, null);
 
-  // First Solo in entry 1 preserves menu recenter and binds anchor.
+  // First Solo in entry 1 calibrates to the latest stable sample and binds anchor.
   const firstSoloCal = tracker.calibrateForSolo(blueAnchor);
-  assert.equal(firstSoloCal.source, 'recenter');
+  assert.equal(firstSoloCal.source, 'solo');
   assert.deepEqual(firstSoloCal.origin, [0.5, 1.6, 0.2]);
   assert.ok(Math.abs(firstSoloCal.yaw - 60) < 1e-9);
   assert.deepEqual(tracker.getSnapshot().anchor, blueAnchor);
@@ -279,71 +276,54 @@ test('entry lifetime preserves Back->Solo and pre-Solo menu Recenter, and re-cal
   tracker.dispose();
 });
 
-test('recenter ignores pre-press samples, times out cleanly, succeeds on stable window, and is idempotent', () => {
+test('Horizon system recenter (refSpaceEpoch) re-anchors Solo to the new LOCAL pose without snapping back', () => {
+  let epoch = 1;
+  const logs = [];
   const clock = makeClock(1000);
   const tracker = createQuestHeadTracker({
     now: clock.now,
     schedule: clock.schedule,
     cancel: clock.cancel,
     entries: () => 1,
+    refSpaceEpoch: () => epoch,
+    log: (line) => logs.push(line),
   });
 
-  // Pre-press samples at [0, 1.5, 0], yaw 180.
-  for (let i = 0; i < 10; i += 1) {
-    tracker.onCameraTransform(viroPose([0, 1.5, 0], 180));
-    clock.advance(40);
-  }
-  const initialCal = tracker.calibrateForSolo(blueAnchor);
+  // Pre-Solo default frame follows OpenXR LOCAL directly: system recenter does not lock a custom origin.
+  feed(tracker, clock, [0.2, 1.5, -0.3], 120, 10);
+  epoch = 2;
+  feed(tracker, clock, [0, 1.48, 0], 180, 10);
+  assert.deepEqual(tracker.getSnapshot().calibration, DEFAULT_CALIBRATION);
+  assert.ok(logs.some((line) => /action=none default-frame-follows-local/.test(line)));
 
-  // Start recenter, feed moving samples past 2000 ms timeout -> fails without changing calibration.
-  tracker.recenter();
-  assert.equal(tracker.getSnapshot().status, 'sampling');
-  for (let i = 0; i < 20; i += 1) {
-    tracker.onCameraTransform(viroPose([i * 0.06, 1.5, 0], 180));
-    clock.advance(110);
-  }
-  assert.equal(tracker.getSnapshot().status, 'failed');
-  assert.equal(tracker.getSnapshot().message, QUEST_RECENTER_FAILURE_MESSAGE);
-  assert.deepEqual(tracker.getSnapshot().calibration, initialCal);
+  // Calibrate Solo in the current LOCAL space.
+  feed(tracker, clock, [0.4, 1.52, -0.2], 145, 20);
+  const soloCal = tracker.calibrateForSolo(blueAnchor);
+  assert.equal(soloCal.source, 'solo');
 
-  // Start recenter again: pre-press samples at [0, 1.5, 0] must be ignored; stabilize at [0.8, 1.45, 0.3], yaw 90.
-  tracker.recenter();
-  for (let i = 0; i < 8; i += 1) {
-    tracker.onCameraTransform(viroPose([0.8, 1.45, 0.3], 90));
-    clock.advance(50);
-  }
-  const recentered = tracker.getSnapshot().calibration;
-  assert.equal(tracker.getSnapshot().status, 'ready');
-  assert.equal(recentered.source, 'recenter');
-  assert.deepEqual(recentered.origin, [0.8, 1.45, 0.3]);
-  assert.ok(Math.abs(recentered.yaw - 90) < 1e-9);
+  // Even a small (10 deg, 0.05 m) Horizon system recenter bumps refSpaceEpoch and re-anchors cleanly.
+  epoch = 3;
+  feed(tracker, clock, [0.05, 1.51, 0.02], 155, 10);
+  const afterSmall = tracker.getSnapshot();
+  assert.equal(afterSmall.status, 'ready');
+  assert.equal(afterSmall.calibration.source, 'system');
+  assert.equal(afterSmall.calibration.entry, soloCal.entry);
+  assert.deepEqual(afterSmall.calibration.origin, [0.05, 1.51, 0.02]);
+  assert.ok(Math.abs(afterSmall.calibration.yaw - 155) < 1e-9);
+  assert.equal(afterSmall.referenceResets, 1);
+  assert.equal(afterSmall.pose.clamped, false);
+  assert.ok(Math.abs(afterSmall.pose.lateral) < 1e-9);
+  assert.ok(Math.abs(afterSmall.pose.forward) < 1e-9);
+  assert.ok(logs.some((line) => /system recenter applied reason=openxr-event/.test(line)));
 
-  // Second recenter in place is idempotent.
-  tracker.recenter();
-  for (let i = 0; i < 8; i += 1) {
-    tracker.onCameraTransform(viroPose([0.8, 1.45, 0.3], 90));
-    clock.advance(50);
-  }
-  const recentered2 = tracker.getSnapshot().calibration;
-  assert.deepEqual(recentered2.origin, recentered.origin);
-  assert.ok(Math.abs(wrap180(recentered2.yaw - recentered.yaw)) < 1e-9);
-
-  // Superseding recenter mid-window cancels prior timer and ignores prior samples.
-  tracker.recenter();
-  for (let i = 0; i < 4; i += 1) {
-    tracker.onCameraTransform(viroPose([2.0, 1.5, 2.0], 0));
-    clock.advance(50);
-  }
-  tracker.recenter();
-  for (let i = 0; i < 8; i += 1) {
-    tracker.onCameraTransform(viroPose([-0.2, 1.3, 0.4], -30));
-    clock.advance(50);
-  }
-  const recentered3 = tracker.getSnapshot().calibration;
-  assert.equal(tracker.getSnapshot().status, 'ready');
-  assert.deepEqual(recentered3.origin, [-0.2, 1.3, 0.4]);
-  assert.ok(Math.abs(recentered3.yaw - -30) < 1e-9);
-
+  // A subsequent large Horizon recenter also re-anchors with zero snap-back.
+  epoch = 4;
+  feed(tracker, clock, [-0.15, 1.49, 0.1], -40, 10);
+  const afterLarge = tracker.getSnapshot();
+  assert.equal(afterLarge.calibration.source, 'system');
+  assert.deepEqual(afterLarge.calibration.origin, [-0.15, 1.49, 0.1]);
+  assert.ok(Math.abs(afterLarge.calibration.yaw - -40) < 1e-9);
+  assert.equal(afterLarge.referenceResets, 2);
   tracker.dispose();
 });
 
@@ -418,9 +398,7 @@ test('dispose cancels all pending timers and resets session calibration while pr
   tracker.calibrateForSolo(blueAnchor);
   tracker.cyclePosture();
 
-  tracker.recenter();
   tracker.onCameraTransform(viroPose([0.3, 1.4, -0.2], 120));
-  assert.ok(clock.pending.size > 0);
 
   tracker.dispose();
   assert.equal(clock.pending.size, 0);
@@ -433,7 +411,8 @@ test('dispose cancels all pending timers and resets session calibration while pr
   assert.equal(afterDispose.pose, null);
 });
 
-test('dispose while recenter is sampling resets cleanly to uncalibrated without stale ready state', () => {
+test('setRefSpaceEpochSource allows wiring late native readers and resets on dispose', () => {
+  let epoch = 10;
   const clock = makeClock(1000);
   const tracker = createQuestHeadTracker({
     now: clock.now,
@@ -441,27 +420,21 @@ test('dispose while recenter is sampling resets cleanly to uncalibrated without 
     cancel: clock.cancel,
     entries: () => 1,
   });
-
-  // First Solo with no samples -> status 'no-samples' with message.
+  tracker.setRefSpaceEpochSource(() => epoch);
+  feed(tracker, clock, [0, 1.5, 0], 180, 10);
   tracker.calibrateForSolo(blueAnchor);
-  const beforeRecenter = tracker.getSnapshot();
-  assert.equal(beforeRecenter.status, 'no-samples');
-  assert.equal(beforeRecenter.message, 'Head pose unavailable.');
+  epoch = 11;
+  feed(tracker, clock, [0.1, 1.45, -0.1], 90, 5);
+  assert.equal(tracker.getSnapshot().referenceResets, 1);
+  assert.equal(tracker.getSnapshot().calibration.source, 'system');
 
-  // Start recenter (and supersede once) then dispose mid-window.
-  tracker.recenter();
-  tracker.recenter();
-  assert.equal(tracker.getSnapshot().status, 'sampling');
   tracker.dispose();
-
-  const afterDispose = tracker.getSnapshot();
-  assert.equal(afterDispose.status, 'uncalibrated');
-  assert.equal(afterDispose.message, null);
-  assert.deepEqual(afterDispose.calibration, DEFAULT_CALIBRATION);
-  assert.equal(clock.pending.size, 0);
+  assert.equal(tracker.getSnapshot().status, 'uncalibrated');
+  assert.equal(tracker.getSnapshot().referenceResets, 0);
+  assert.deepEqual(tracker.getSnapshot().calibration, DEFAULT_CALIBRATION);
 });
 
-test('a realistic abrupt origin/yaw jump is confirmed, then rebases to the same bounded pose', () => {
+test('a realistic abrupt origin/yaw jump without refSpaceEpoch is confirmed and re-anchors without snap-back', () => {
   const { clock, logs, tracker } = trackerWithLog();
   tracker.cyclePosture();
   feed(tracker, clock, [0.2, 1.2, -0.1], 160, 40);
@@ -474,9 +447,8 @@ test('a realistic abrupt origin/yaw jump is confirmed, then rebases to the same 
   assert.deepEqual(tracker.getSnapshot().calibration, cal);
   assert.ok(!logs.some((line) => /reference jump/.test(line)));
 
-  // Settle with a small lean, then the frame turns 109.4 degrees and shifts.
+  // Settle with a small lean, then Horizon resets LOCAL (109.4 deg turn and shift).
   const lean = [0.27, 1.12, -0.18];
-  // Hold the lean for ~280 ms of continuous frames so the snapshot publishes.
   feed(tracker, clock, lean, 172, 20);
   const before = tracker.getSnapshot().pose;
   assert.equal(before.clamped, false);
@@ -484,7 +456,7 @@ test('a realistic abrupt origin/yaw jump is confirmed, then rebases to the same 
   const jump = frameJump(109.4, [-0.6, 0.3, 0.45]);
   const jumped = jump.pos(lean);
   feed(tracker, clock, jumped, jump.yaw(172), 1);
-  // Not confirmed yet: calibration is untouched, and the stale pose clamps.
+  // Not confirmed yet on sample-jump fallback: calibration waits for continuous confirmation.
   assert.deepEqual(tracker.getSnapshot().calibration, cal);
   const staleSample = headSampleFromViro(0, viroPose(jumped, jump.yaw(172)));
   assert.equal(gameplayHeadPose(cal, staleSample).clamped, true);
@@ -493,12 +465,14 @@ test('a realistic abrupt origin/yaw jump is confirmed, then rebases to the same 
   const after = tracker.getSnapshot();
   assert.equal(after.referenceResets, 1);
   assert.equal(after.calibration.posture, 'seated');
-  assert.equal(after.calibration.source, cal.source);
+  assert.equal(after.calibration.source, 'system');
   assert.equal(after.calibration.entry, cal.entry);
-  assert.ok(Math.abs(wrap180(after.calibration.yaw - jump.yaw(cal.yaw))) < 1e-9);
+  // Re-anchored to the wearer's current pose in the new Horizon LOCAL frame so the system recenter sticks.
+  assert.deepEqual(after.calibration.origin, jumped);
+  assert.ok(Math.abs(wrap180(after.calibration.yaw - jump.yaw(172))) < 1e-9);
   assert.equal(after.pose.clamped, false);
   for (const key of ['lateral', 'vertical', 'forward', 'yawRelative']) {
-    assert.ok(Math.abs(after.pose[key] - before[key]) < 1e-6, key);
+    assert.ok(Math.abs(after.pose[key]) < 1e-6, key);
   }
   assert.equal(after.status, 'ready');
   const candidate = logs.find((line) => line.startsWith('reference jump candidate'));
@@ -509,24 +483,40 @@ test('a realistic abrupt origin/yaw jump is confirmed, then rebases to the same 
   assert.match(candidate, /origin=\[0\.200,1\.200,-0\.100\] calYaw=160\.0 src=solo/);
   assert.ok(
     logs.some((line) =>
-      /reference reset rebase origin=\[.*\]->\[.*\] yaw=160\.0->-90\.6 resets=1/.test(line)
+      /system recenter applied reason=sample-jump origin=\[.*\]->\[.*\] yaw=160\.0->.* resets=1/.test(
+        line
+      )
     )
   );
 
-  // Movement after the rebase stays 1:1: 0.1 m further along old -Z.
+  // Movement after the system recenter stays 1:1 relative to the new anchored yaw.
+  const stepForward = headSampleFromViro(0, viroPose([0, 1, 0], jump.yaw(172))).forward;
+  const movedTarget = [
+    jumped[0] + 0.1 * stepForward[0],
+    jumped[1],
+    jumped[2] + 0.1 * stepForward[2],
+  ];
   for (let i = 1; i <= 10; i += 1) {
-    feed(tracker, clock, jump.pos([0.27, 1.12, -0.18 - 0.01 * i]), jump.yaw(172));
+    feed(
+      tracker,
+      clock,
+      [
+        jumped[0] + 0.01 * i * stepForward[0],
+        jumped[1],
+        jumped[2] + 0.01 * i * stepForward[2],
+      ],
+      jump.yaw(172)
+    );
   }
-  feed(tracker, clock, jump.pos([0.27, 1.12, -0.28]), jump.yaw(172), 20);
+  feed(tracker, clock, movedTarget, jump.yaw(172), 20);
   const moved = tracker.getSnapshot().pose;
-  const expectedForward = before.forward - 0.1 * Math.cos((160 * Math.PI) / 180);
-  assert.ok(Math.abs(moved.forward - expectedForward) < 1e-6);
+  assert.ok(Math.abs(moved.forward - 0.1) < 1e-6);
   assert.equal(tracker.getSnapshot().referenceResets, 1);
   tracker.dispose();
   assert.equal(tracker.getSnapshot().referenceResets, 0);
 });
 
-test('a jump before any calibration, or calibrated after the jump, is not applied', () => {
+test('a jump before any calibration, or calibrated after the jump, is not double-applied', () => {
   // Default frame: pre-Solo menu content follows LOCAL, so a system recenter is left alone.
   {
     const { clock, logs, tracker } = trackerWithLog();
@@ -534,25 +524,6 @@ test('a jump before any calibration, or calibrated after the jump, is not applie
     feed(tracker, clock, [0, 1.3, 0], 180, 10);
     assert.deepEqual(tracker.getSnapshot().calibration, DEFAULT_CALIBRATION);
     assert.ok(logs.some((line) => /action=none reason=default-frame-follows-local/.test(line)));
-  }
-  // An in-app Recenter running across the jump ends in the new frame, exactly once.
-  {
-    const { clock, logs, tracker } = trackerWithLog();
-    feed(tracker, clock, [0.5, 1.3, 0.4], 100, 40);
-    tracker.calibrateForSolo(blueAnchor);
-    tracker.recenter();
-    feed(tracker, clock, [0.5, 1.3, 0.4], 100, 3);
-    feed(tracker, clock, [0, 1.25, 0], 180, 40);
-    const snap = tracker.getSnapshot();
-    assert.equal(snap.status, 'ready');
-    assert.equal(snap.calibration.source, 'recenter');
-    assert.deepEqual(snap.calibration.origin, [0, 1.25, 0]);
-    assert.ok(Math.abs(wrap180(snap.calibration.yaw - 180)) < 1e-9);
-    assert.ok(
-      logs.some((line) =>
-        /calibrated src=recenter reason=recenter origin=\[0\.000,1\.250,0\.000\]/.test(line)
-      )
-    );
   }
   // A Solo calibration inside the confirm window is already in the new frame.
   {

@@ -56,7 +56,7 @@ function rectanglesOverlap(a, b) {
 
 test('menu pixels and controller frames describe the same buttons', () => {
   assert.equal(Object.hasOwn(layout, 'QUEST_RING_POSE'), false);
-  assert.deepEqual(QUEST_MENU_ACTIONS, ['solo', 'ready', 'back', 'exit', 'recenter', 'posture']);
+  assert.deepEqual(QUEST_MENU_ACTIONS, ['solo', 'ready', 'back', 'exit', 'posture']);
   assert.deepEqual(QUEST_MENU_POSE.menu, {
     position: [0, -0.08, -1.5],
     rotation: [0, 0, 0],
@@ -68,8 +68,8 @@ test('menu pixels and controller frames describe the same buttons', () => {
   assert.deepEqual(QUEST_MENU_SIZE, { widthM: 1.6, heightM: 0.9 });
 
   const pages = {
-    menu: ['solo', 'recenter', 'posture', 'exit'],
-    ring: ['ready', 'back', 'exit', 'recenter', 'posture'],
+    menu: ['solo', 'posture', 'exit'],
+    ring: ['ready', 'back', 'posture', 'exit'],
   };
   const seen = new Set();
   for (const page of ['menu', 'ring']) {
@@ -155,13 +155,25 @@ test('menu pixels and controller frames describe the same buttons', () => {
   const menu = buildQuestMenu('menu', ['Solo places both robots in the ring.']);
   assert.match(menu.specKey, /Solo/);
   assert.match(menu.specKey, /Exit/);
-  assert.match(menu.specKey, /Recenter/);
+  assert.doesNotMatch(menu.specKey, /Recenter/);
   assert.match(menu.specKey, /Standing/);
   assert.match(menu.specKey, /Quest VR Menu/);
   assert.match(menu.specKey, /#60a5fa/);
   assert.match(menu.specKey, /#d99a9a/);
   assert.match(menu.specKey, /#0f172a/);
-  assert.match(menu.specKey, /#09090b/);
+  assert.deepEqual(menu.ops[0], {
+    op: 'roundRect',
+    x: 0,
+    y: 0,
+    width: QUEST_MENU_TEXTURE.widthPx,
+    height: QUEST_MENU_TEXTURE.heightPx,
+    radius: layout.QUEST_MENU_CARD_RADIUS_PX,
+    color: '#0f172a',
+  });
+  assert.equal(
+    menu.ops.some((op) => op.op === 'roundRect' && op.color === '#09090b'),
+    false
+  );
   assert.doesNotMatch(menu.specKey, /#0f766e|#991b1b|#101826/);
   assert.equal(
     menu.ops.some((op) => op.op === 'image'),
@@ -443,11 +455,14 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
   assert.match(scene, /questMenuLayerMask/);
   assert.doesNotMatch(
     scene,
-    /menu-background\.png|quest-lettering|ArenaNoto|resolveQuestMenuAssetFile|ExpoAsset/
+    /menu-background\.png|quest-lettering/
   );
+  assert.match(scene, /ArenaNotoSans\.ttf/);
+  assert.match(scene, /ArenaNotoSansSemibold\.ttf/);
+  assert.match(scene, /resolveQuestMenuAssetFile/);
   assert.doesNotMatch(
     source('src/features/quest-vr/quest-menu-layout.ts'),
-    /menu-background|quest-lettering|ArenaNoto|"image"/
+    /menu-background|quest-lettering|"image"/
   );
   assert.match(scene, /session\.exit\(\)/);
   assert.match(scene, /exitVRScene\(\)/);
@@ -458,21 +473,23 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
     /ViroARScene|ViroXRSceneNavigator|setTracking|setPlacement|ViroGameLoop/
   );
   assert.match(navigator, /passthroughEnabled=\{false\}/);
-  assert.match(navigator, /hdrEnabled=\{false\}/);
+  assert.doesNotMatch(navigator, /hdrEnabled=\{false\}/);
+  assert.match(navigator, /\bhdrEnabled\b/);
   assert.match(navigator, /bloomEnabled=\{false\}/);
   assert.match(navigator, /quest-arena-scene\.native/);
   assert.equal(
     fs.existsSync(path.join(__dirname, '../src/features/quest-vr/quest-smoke-scene.native.tsx')),
     false
   );
-  assert.doesNotMatch(
-    moduleSource,
-    /"image"|BitmapFactory|Typeface\.createFromFile|android_res|quest-panel-src|dropLast/
-  );
+  assert.doesNotMatch(moduleSource, /"image"|BitmapFactory/);
+  assert.match(moduleSource, /Typeface\.createFromFile/);
+  assert.match(moduleSource, /drawExecutor/);
+  assert.match(moduleSource, /android_res/);
   // The module draws pixels only. The patched renderer owns the XR layer, and
   // nothing registers Viro materials any more.
   assert.match(moduleSource, /System\.loadLibrary\("viro_renderer"\)/);
   assert.match(moduleSource, /external fun nativeDraw/);
+  assert.match(moduleSource, /external fun nativeRefSpaceEpoch/);
   assert.doesNotMatch(moduleSource, /XrSession|xrCreate|VRTMaterialManager|setJSMaterials/);
   assert.equal(fs.existsSync(path.join(__dirname, '../modules/quest-menu-texture')), false);
   // The renderer plugin already wires the patched AAR; no extra compositor plugin.

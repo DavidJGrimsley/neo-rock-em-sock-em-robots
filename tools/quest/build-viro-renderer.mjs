@@ -300,9 +300,14 @@ if (!report.sonameMatchesStock) problems.push('SONAME differs from stock');
 if (!pristine && !reference)
   problems.push('no pristine v3.0.3 rebuild to explain stock-only symbols; run --pristine first');
 // 0002 adds the menu layer bridge that modules/quest-panel binds by JNI name.
-const panelJni = ['nativeVersion', 'nativeStatus', 'nativeHide', 'nativePose', 'nativeDraw'].map(
-  (name) => `Java_expo_modules_questpanel_QuestPanelModule_${name}`
-);
+const panelJni = [
+  'nativeVersion',
+  'nativeStatus',
+  'nativeHide',
+  'nativePose',
+  'nativeDraw',
+  'nativeRefSpaceEpoch',
+].map((name) => `Java_expo_modules_questpanel_QuestPanelModule_${name}`);
 const missingPanelJni = pristine ? [] : panelJni.filter((symbol) => !candidate.exports.has(symbol));
 if (missingPanelJni.length)
   problems.push(`menu layer JNI methods are not exported: ${missingPanelJni.join(', ')}`);

@@ -10,6 +10,8 @@ export interface QuestPanelNative {
   status(owner: number): number;
   draw(owner: number, specJson: string): void;
   hide(owner: number): void;
+  /** Monotonic count of Horizon LOCAL reference-space resets observed by OpenXR. */
+  refSpaceEpoch?(): number;
 }
 
 const native = requireOptionalNativeModule<QuestPanelNative>('QuestPanel');
