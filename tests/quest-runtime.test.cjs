@@ -325,7 +325,7 @@ test('routes and phone entry points never load @reactvision/react-viro staticall
   assert.match(navigator, /passthroughEnabled=\{false\}/);
   assert.match(navigator, /VRQuestNavigatorBridge\.onQuestError/);
   const scene = source('src/features/quest-vr/quest-arena-scene.native.tsx');
-  assert.match(scene, /<ViroScene>/);
+  assert.match(scene, /<ViroScene[\s>]/);
   assert.doesNotMatch(scene, /ViroARScene|ViroXRSceneNavigator|setTracking|setPlacement/);
   assert.match(scene, /exitVRScene\(\)/);
   assert.match(navigator, /quest-arena-scene\.native/);

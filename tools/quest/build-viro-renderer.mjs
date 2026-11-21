@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Builds the Quest-only Viro renderer: ViroCore v3.0.3 plus the OpenXR pointer patch in
-// tools/quest/viro-renderer. Only arm64 libviro_renderer.so changes. The Java bridge, the
+// Builds the Quest-only Viro renderer: ViroCore v3.0.3 plus the patches in
+// tools/quest/viro-renderer, applied in lock.json order (0001 OpenXR pointer, 0002 menu
+// compositor layer). Only arm64 libviro_renderer.so changes. The Java bridge, the
 // other native libraries and node_modules stay stock. Output goes to
 // native/quest-viro-renderer, which tools/quest/with-quest-viro-renderer.cjs wires into
 // QUEST_BUILD=1 prebuilds.
@@ -30,7 +31,9 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const patchDir = path.join(root, 'tools/quest/viro-renderer');
 const lock = JSON.parse(readFileSync(path.join(patchDir, 'lock.json'), 'utf8'));
-const patchFile = path.join(patchDir, lock.patch);
+if (!Array.isArray(lock.patches) || lock.patches.length === 0)
+  throw new Error('tools/quest/viro-renderer/lock.json lists no patches.');
+const patchFiles = lock.patches.map((name) => path.join(patchDir, name));
 const pristine = process.argv.includes('--pristine');
 const work = process.env.QUEST_RENDERER_WORK || path.join(os.tmpdir(), 'nrq-viro');
 const source = path.join(work, 'virocore');
@@ -134,10 +137,12 @@ run('git', ['checkout', '--', '.']);
 if (run('git', ['status', '--porcelain', '--untracked-files=no'], { capture: true }).trim())
   throw new Error(`${source} still differs from ${lock.revision} after checkout.`);
 
-// 3. The patch must apply with full context; git apply refuses fuzz.
+// 3. Each patch must apply with full context, in order; git apply refuses fuzz.
 if (!pristine) {
-  run('git', ['apply', '--check', '--whitespace=error-all', patchFile]);
-  run('git', ['apply', '--whitespace=error-all', patchFile]);
+  for (const patchFile of patchFiles) {
+    run('git', ['apply', '--check', '--whitespace=error-all', patchFile]);
+    run('git', ['apply', '--whitespace=error-all', patchFile]);
+  }
 }
 const sourceDiff = run('git', ['diff', '--binary'], { capture: true });
 
@@ -262,7 +267,9 @@ const summary = (info) => ({
 const report = {
   variant,
   viroCore: { repository: lock.repository, tag: lock.tag, revision: head },
-  patch: pristine ? null : { file: lock.patch, sha256: sha256(patchFile) },
+  patches: pristine
+    ? null
+    : lock.patches.map((file, index) => ({ file, sha256: sha256(patchFiles[index]) })),
   sourceDiffSha256: createHash('sha256').update(sourceDiff).digest('hex'),
   ndk: lock.ndk,
   stock: summary(stock),
@@ -292,6 +299,18 @@ if (candidate.machine !== stock.machine) problems.push(`machine ${candidate.mach
 if (!report.sonameMatchesStock) problems.push('SONAME differs from stock');
 if (!pristine && !reference)
   problems.push('no pristine v3.0.3 rebuild to explain stock-only symbols; run --pristine first');
+// 0002 adds the menu layer bridge that modules/quest-panel binds by JNI name.
+const panelJni = [
+  'nativeVersion',
+  'nativeStatus',
+  'nativeHide',
+  'nativePose',
+  'nativeDraw',
+  'nativeRefSpaceEpoch',
+].map((name) => `Java_expo_modules_questpanel_QuestPanelModule_${name}`);
+const missingPanelJni = pristine ? [] : panelJni.filter((symbol) => !candidate.exports.has(symbol));
+if (missingPanelJni.length)
+  problems.push(`menu layer JNI methods are not exported: ${missingPanelJni.join(', ')}`);
 if (reference) {
   const pristineMissingJni = [...declared].filter((symbol) => !reference.exports.has(symbol));
   const jniRegression = missingJni.filter((symbol) => !pristineMissingJni.includes(symbol));
@@ -344,7 +363,7 @@ writeFileSync(
 const provenance = {
   generatedBy: 'tools/quest/build-viro-renderer.mjs',
   viroCore: report.viroCore,
-  patch: report.patch,
+  patches: report.patches,
   stockAarSha256: lock.stockAarSha256,
   stockRendererSha256: stock.sha256,
   rendererSha256: candidate.sha256,

@@ -21,6 +21,11 @@ export default function QuestXRNavigator({
       vrInitialScene={vrInitialScene}
       passthroughEnabled={false}
       handTrackingEnabled={false}
+      // Keep HDR on so GLB PBR materials and Hable tone mapping render with
+      // their intended colors; 0002 clears the OpenXR display alpha to 0 while
+      // the panel layer is submitted so tone mapping preserves the mask hole.
+      hdrEnabled
+      bloomEnabled={false}
       onExitViro={questOnExitViro}
       renderQuestPanel={renderQuestPanel}
     />

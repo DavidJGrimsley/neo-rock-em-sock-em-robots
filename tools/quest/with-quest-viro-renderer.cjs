@@ -29,9 +29,18 @@ function verifiedRendererDir(projectRoot) {
     path.dirname(require.resolve('@reactvision/react-viro/package.json', { paths: [projectRoot] })),
     'android/viro_renderer/viro_renderer-release.aar'
   );
+  // Every patch in lock order, so a renderer without the menu layer patch is rejected.
+  const patches = (lock.patches ?? []).map((file) => ({
+    file,
+    sha256: sha256(path.join(lockDir, file)),
+  }));
   const checks = [
     ['ViroCore revision', provenance.viroCore?.revision, lock.revision],
-    ['patch', provenance.patch?.sha256, sha256(path.join(lockDir, lock.patch))],
+    [
+      'patches',
+      Array.isArray(provenance.patches) ? JSON.stringify(provenance.patches) : null,
+      patches.length ? JSON.stringify(patches) : 'no patches in lock.json',
+    ],
     ['stock AAR in the lock', provenance.stockAarSha256, lock.stockAarSha256],
     ['stock AAR in node_modules', sha256(stockAar), lock.stockAarSha256],
     ['renderer AAR', sha256(aar), provenance.aarSha256],
@@ -50,7 +59,7 @@ function pointViroRendererAt(settings, relativeDir) {
     throw new Error(`Expected one :viro_renderer projectDir in settings.gradle, found ${matches.length}.`);
   return settings.replace(
     PROJECT_LINE,
-    `project(':viro_renderer').projectDir = new File('${relativeDir}') // Quest pointer patch`
+    `project(':viro_renderer').projectDir = new File('${relativeDir}') // Quest pointer and menu layer patches`
   );
 }
 

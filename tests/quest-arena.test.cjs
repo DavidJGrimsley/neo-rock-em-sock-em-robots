@@ -3,21 +3,24 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const layout = require('../src/features/quest-vr/quest-menu-layout.ts');
 const {
   QUEST_MENU_ACTIONS,
   QUEST_MENU_POSE,
   QUEST_MENU_SIZE,
-  QUEST_MENU_TAGLINE,
   QUEST_MENU_TEXTURE,
-  QUEST_RING_POSE,
+  QUEST_MENU_TEXT_LINES_MAX,
   buildQuestMenu,
   questMenuButtonFrame,
   questMenuButtons,
   questMenuHit,
-  questMenuMaterialName,
   wrapMenuLine,
-} = require('../src/features/quest-vr/quest-menu-layout.ts');
-const { questPointerHover, questTriggerPress } = require('../src/features/quest-vr/quest-menu-input.ts');
+} = layout;
+const {
+  questPointerHover,
+  questTriggerPress,
+} = require('../src/features/quest-vr/quest-menu-input.ts');
+const { ARENA_LAYOUT, ARENA_RULES } = require('../src/features/arena-fighter/arena-controller.ts');
 const {
   QUEST_ASSET_TIMEOUT_MS,
   QUEST_LEAVING,
@@ -47,35 +50,67 @@ function fakeClock() {
   };
 }
 
+function rectanglesOverlap(a, b) {
+  return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+}
+
 test('menu pixels and controller frames describe the same buttons', () => {
-  assert.deepEqual(QUEST_MENU_ACTIONS, ['solo', 'ready', 'back', 'exit']);
+  assert.equal(Object.hasOwn(layout, 'QUEST_RING_POSE'), false);
+  assert.deepEqual(QUEST_MENU_ACTIONS, ['solo', 'ready', 'back', 'exit', 'posture']);
+  assert.deepEqual(QUEST_MENU_POSE.menu, {
+    position: [0, -0.08, -1.5],
+    rotation: [0, 0, 0],
+  });
+  assert.deepEqual(QUEST_MENU_POSE.ring, {
+    position: [0, -0.85, -1.35],
+    rotation: [0, 0, 0],
+  });
+  assert.deepEqual(QUEST_MENU_SIZE, { widthM: 1.6, heightM: 0.9 });
+
+  const pages = {
+    menu: ['solo', 'posture', 'exit'],
+    ring: ['ready', 'back', 'posture', 'exit'],
+  };
   const seen = new Set();
   for (const page of ['menu', 'ring']) {
-    const buttons = questMenuButtons(page);
-    for (const button of buttons) {
-      seen.add(button.action);
-      assert.ok(button.x >= 0 && button.y >= 0);
-      assert.ok(button.x + button.width <= QUEST_MENU_TEXTURE.widthPx);
-      assert.ok(button.y + button.height <= QUEST_MENU_TEXTURE.heightPx);
-      const frame = questMenuButtonFrame(button);
-      assert.ok(Math.abs(frame.position[0]) + frame.width / 2 <= QUEST_MENU_SIZE.widthM / 2);
-      assert.ok(Math.abs(frame.position[1]) + frame.height / 2 <= QUEST_MENU_SIZE.heightM / 2);
-      assert.equal(questMenuHit(page, frame.position[0], frame.position[1]), button.action);
-      assert.equal(
-        questMenuHit(page, frame.position[0], frame.position[1] + frame.height / 2 + 0.001),
-        null
+    for (const posture of ['standing', 'seated']) {
+      const buttons = questMenuButtons(page, { acknowledged: false, posture });
+      assert.deepEqual(
+        buttons.map((button) => button.action),
+        pages[page]
       );
-    }
-    for (let index = 0; index < buttons.length; index++) {
-      for (let other = index + 1; other < buttons.length; other++) {
-        const a = buttons[index];
-        const b = buttons[other];
-        const separated =
-          a.x + a.width <= b.x ||
-          b.x + b.width <= a.x ||
-          a.y + a.height <= b.y ||
-          b.y + b.height <= a.y;
-        assert.equal(separated, true);
+      assert.equal(new Set(buttons.map((button) => button.y)).size, 2);
+      const postureButton = buttons.find((button) => button.action === 'posture');
+      assert.equal(postureButton.label, posture === 'seated' ? 'Seated' : 'Standing');
+      const standing = questMenuButtons(page, 'standing').find(
+        (button) => button.action === 'posture'
+      );
+      assert.deepEqual(
+        [postureButton.x, postureButton.y, postureButton.width, postureButton.height],
+        [standing.x, standing.y, standing.width, standing.height]
+      );
+      for (const button of buttons) {
+        seen.add(button.action);
+        assert.ok(button.x >= 0 && button.y >= 0);
+        assert.ok(button.x + button.width <= QUEST_MENU_TEXTURE.widthPx);
+        assert.ok(button.y + button.height <= QUEST_MENU_TEXTURE.heightPx);
+        const frame = questMenuButtonFrame(button);
+        assert.ok(
+          Math.abs(frame.position[0]) + frame.width / 2 <= QUEST_MENU_SIZE.widthM / 2 + 1e-9
+        );
+        assert.ok(
+          Math.abs(frame.position[1]) + frame.height / 2 <= QUEST_MENU_SIZE.heightM / 2 + 1e-9
+        );
+        assert.equal(questMenuHit(page, frame.position[0], frame.position[1]), button.action);
+        assert.equal(
+          questMenuHit(page, frame.position[0], frame.position[1] + frame.height / 2 + 0.001),
+          null
+        );
+      }
+      for (let index = 0; index < buttons.length; index++) {
+        for (let other = index + 1; other < buttons.length; other++) {
+          assert.equal(rectanglesOverlap(buttons[index], buttons[other]), false);
+        }
       }
     }
   }
@@ -85,47 +120,245 @@ test('menu pixels and controller frames describe the same buttons', () => {
     questMenuButtons('ring').some((button) => button.action === 'solo'),
     false
   );
-  assert.ok(QUEST_RING_POSE.position[2] < QUEST_MENU_POSE.ring.position[2]);
-  assert.equal(QUEST_MENU_POSE.menu.position[2], -1.15);
-  assert.equal(QUEST_MENU_POSE.ring.position[2], -1.15);
-  assert.deepEqual(QUEST_MENU_SIZE, { widthM: 1.6, heightM: 0.9 });
   const ringButtons = questMenuButtons('ring');
   const gapM =
     ((ringButtons[1].x - (ringButtons[0].x + ringButtons[0].width)) / QUEST_MENU_TEXTURE.widthPx) *
     QUEST_MENU_SIZE.widthM;
   assert.ok(gapM > 0.06, `button gap ${gapM} m`);
-  assert.ok(questMenuButtonFrame(ringButtons[0]).height >= 0.18);
-  const menu = buildQuestMenu('menu', ['Solo places both robots in the ring.']);
+  assert.ok(questMenuButtonFrame(ringButtons[0]).height >= 0.11);
+
+  const sampleTitles = {
+    neo: 'assets_arena_ui_questlettering_neo',
+    rock: 'assets_arena_ui_questlettering_rock',
+    robots: 'assets_arena_ui_questlettering_robots',
+  };
+  const packed = Array.from({ length: 40 }, () => 'status '.repeat(30).trim());
+  for (const page of ['menu', 'ring']) {
+    for (const posture of ['standing', 'seated']) {
+      for (const titles of [undefined, sampleTitles]) {
+        const menu = buildQuestMenu(page, packed, { posture, titles });
+        assert.ok(menu.ops.length >= 1 && menu.ops.length <= 64);
+        const block = menu.ops.filter(
+          (op) => op.op === 'text' && op.align === 'center' && op.size === 38
+        );
+        assert.equal(block.length, QUEST_MENU_TEXT_LINES_MAX);
+        const titleOps = titles
+          ? menu.ops.filter((op) => op.op === 'image')
+          : menu.ops.filter((op) => op.op === 'text' && (op.size === 56 || op.size === 76));
+        assert.equal(titleOps.length, 3);
+        const divider = menu.ops.find((op) => op.op === 'roundRect' && op.color === '#334155');
+        assert.ok(divider);
+        for (const title of titleOps) {
+          assert.ok(title.y + (title.height ?? title.size) < divider.y);
+        }
+        for (const text of block) {
+          assert.ok(text.y > divider.y + divider.height);
+        }
+        for (const button of menu.buttons) {
+          for (const text of block) {
+            assert.equal(
+              rectanglesOverlap(button, {
+                x: text.x - text.maxWidth / 2,
+                y: text.y,
+                width: text.maxWidth,
+                height: text.size,
+              }),
+              false
+            );
+          }
+        }
+      }
+    }
+  }
+
+  const menu = buildQuestMenu('menu', ['Solo places both robots in the ring.'], {
+    titles: sampleTitles,
+  });
   assert.match(menu.specKey, /Solo/);
   assert.match(menu.specKey, /Exit/);
-  assert.match(menu.specKey, new RegExp(QUEST_MENU_TAGLINE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.doesNotMatch(menu.specKey, /Recenter|Quest VR Menu|Solo Ring/);
+  assert.match(menu.specKey, /Standing/);
+  assert.match(menu.specKey, /Neo/);
+  assert.match(menu.specKey, /Rock 'Em Sock 'Em/);
+  assert.match(menu.specKey, /Robots/);
   assert.match(menu.specKey, /#60a5fa/);
+  assert.match(menu.specKey, /#a78bfa/);
   assert.match(menu.specKey, /#d99a9a/);
-  assert.match(menu.specKey, /#E818181B/);
-  assert.match(menu.specKey, /#09090b/);
+  assert.match(menu.specKey, /#0f172a/);
+  assert.deepEqual(menu.ops[0], {
+    op: 'roundRect',
+    x: 0,
+    y: 0,
+    width: QUEST_MENU_TEXTURE.widthPx,
+    height: QUEST_MENU_TEXTURE.heightPx,
+    radius: layout.QUEST_MENU_CARD_RADIUS_PX,
+    color: '#0f172a',
+  });
+  assert.equal(
+    menu.ops.some((op) => op.op === 'roundRect' && op.color === '#09090b'),
+    false
+  );
   assert.doesNotMatch(menu.specKey, /#0f766e|#991b1b|#101826/);
+  assert.deepEqual(
+    menu.ops.filter((op) => op.op === 'image').map((op) => op.uri),
+    [sampleTitles.neo, sampleTitles.rock, sampleTitles.robots]
+  );
+
+  const fallbackMenu = buildQuestMenu('menu', ['Solo places both robots in the ring.']);
+  assert.equal(
+    fallbackMenu.ops.some((op) => op.op === 'image'),
+    false
+  );
+  assert.deepEqual(
+    fallbackMenu.ops
+      .filter((op) => op.op === 'text' && (op.size === 56 || op.size === 76))
+      .map((op) => op.text),
+    ['Neo', "Rock 'Em Sock 'Em", 'Robots']
+  );
+
   const ring = buildQuestMenu('ring', ['Both robots are in the ring.']);
   assert.equal(ring.buttons.find((button) => button.action === 'ready').label, 'Ready');
-  const set = buildQuestMenu('ring', ['Both robots are in the ring.'], { acknowledged: true });
+  const set = buildQuestMenu('ring', ['Both robots are in the ring.'], {
+    acknowledged: true,
+    posture: 'seated',
+  });
   assert.equal(set.buttons.find((button) => button.action === 'ready').label, 'Set');
-  assert.equal(questMenuHit('ring', questMenuButtonFrame(set.buttons[0]).position[0], questMenuButtonFrame(set.buttons[0]).position[1], true), 'ready');
-  const hovered = buildQuestMenu('menu', ['Solo places both robots in the ring.'], { hover: 'solo' });
+  assert.equal(set.buttons.find((button) => button.action === 'posture').label, 'Seated');
+  assert.equal(
+    questMenuHit(
+      'ring',
+      questMenuButtonFrame(set.buttons[0]).position[0],
+      questMenuButtonFrame(set.buttons[0]).position[1],
+      true
+    ),
+    'ready'
+  );
+  const hovered = buildQuestMenu('menu', ['Solo places both robots in the ring.'], {
+    hover: 'solo',
+  });
   assert.notEqual(hovered.specKey, menu.specKey);
   const solo = menu.buttons.find((button) => button.action === 'solo');
   assert.match(hovered.specKey, new RegExp(`"x":${solo.x}`));
   assert.deepEqual(wrapMenuLine('one two three', 7), ['one two', 'three']);
-  const titled = buildQuestMenu('menu', ['Solo places both robots in the ring.'], {
-    assets: {
-      backgroundUri: 'file:///menu-background.png',
-      titles: {
-        neo: 'file:///neo.png',
-        rock: 'file:///rock.png',
-        robots: 'file:///robots.png',
-      },
-    },
-  });
-  assert.match(titled.specKey, /menu-background\.png/);
-  assert.match(titled.specKey, /rock\.png/);
+});
+
+const degrees = (radians) => (radians * 180) / Math.PI;
+
+function panelView(pose) {
+  const [x, y, z] = pose.position;
+  const ahead = -z;
+  return {
+    distance: Math.hypot(x, y, z),
+    elevation: degrees(Math.atan2(y, Math.hypot(x, z))),
+    width: degrees(2 * Math.atan(QUEST_MENU_SIZE.widthM / 2 / ahead)),
+    top: degrees(Math.atan2(y + QUEST_MENU_SIZE.heightM / 2, ahead)),
+    bottom: degrees(Math.atan2(y - QUEST_MENU_SIZE.heightM / 2, ahead)),
+  };
+}
+
+test('both menu pages sit at a readable distance and angle', () => {
+  for (const page of ['menu', 'ring']) {
+    const pose = QUEST_MENU_POSE[page];
+    assert.deepEqual(pose.rotation, [0, 0, 0]);
+    assert.ok(pose.position[2] < 0, `${page} must be in front`);
+    const view = panelView(pose);
+    assert.ok(view.distance >= 1.45 && view.distance <= 1.7, `${page} distance ${view.distance}`);
+    assert.ok(view.width >= 50 && view.width <= 62, `${page} width ${view.width}`);
+    // A 38 px body line on the 2048 px texture stays at least ~1 degree tall.
+    const bodyM = (38 / QUEST_MENU_TEXTURE.widthPx) * QUEST_MENU_SIZE.widthM;
+    assert.ok(degrees(bodyM / view.distance) >= 0.95, `${page} body text too small`);
+  }
+  const menu = panelView(QUEST_MENU_POSE.menu);
+  assert.ok(Math.abs(menu.elevation) <= 5, `menu elevation ${menu.elevation}`);
+  assert.ok(Math.abs(menu.distance - 1.5) < 0.01);
+  const ring = panelView(QUEST_MENU_POSE.ring);
+  assert.ok(ring.elevation <= -30 && ring.elevation >= -34, `ring elevation ${ring.elevation}`);
+  assert.ok(ring.distance > 1.55, 'ring page must be farther than the old 0.93 m');
+  assert.ok(ring.top < -15, `ring top edge ${ring.top}`);
+});
+
+test('the upright ring panel keeps the opponent head and torso in view', () => {
+  const pose = QUEST_MENU_POSE.ring;
+  assert.deepEqual(pose.rotation, [0, 0, 0]);
+
+  const glb = fs.readFileSync(
+    path.join(__dirname, '../assets/arena/Mike_Player2_RedOrange_Combat_AR.glb')
+  );
+  const json = JSON.parse(glb.subarray(20, 20 + glb.readUInt32LE(12)).toString('utf8'));
+  for (const node of json.nodes) {
+    if (node.mesh === undefined) continue;
+    assert.equal(node.translation, undefined);
+    assert.equal(node.rotation, undefined);
+    assert.equal(node.scale, undefined);
+  }
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const mesh of json.meshes) {
+    for (const primitive of mesh.primitives) {
+      const accessor = json.accessors[primitive.attributes.POSITION];
+      for (let axis = 0; axis < 3; axis++) {
+        min[axis] = Math.min(min[axis], accessor.min[axis]);
+        max[axis] = Math.max(max[axis], accessor.max[axis]);
+      }
+    }
+  }
+
+  const scale = ARENA_LAYOUT.fighterScale;
+  const fighterY = ARENA_LAYOUT.floorHeight + ARENA_LAYOUT.footOffset;
+  const eyeModel = [0, 1.1271, 0.2028];
+  const rotateY = (yaw, point) => {
+    const radians = (yaw * Math.PI) / 180;
+    const cosine = Math.cos(radians);
+    const sine = Math.sin(radians);
+    return [point[0] * cosine + point[2] * sine, point[1], -point[0] * sine + point[2] * cosine];
+  };
+  const ringLocal = (anchor, point) => {
+    const placed = rotateY(
+      anchor.yaw,
+      point.map((value) => value * scale)
+    );
+    return [anchor.x + placed[0], fighterY + placed[1], anchor.z + placed[2]];
+  };
+  const blue = { x: -ARENA_RULES.spawn, z: 0, yaw: 90 };
+  const red = { x: ARENA_RULES.spawn, z: 0, yaw: -90 };
+  const eye = ringLocal(blue, eyeModel);
+  const world = (point) =>
+    rotateY(
+      90,
+      point.map((value, index) => (value - eye[index]) * 16)
+    );
+  assert.ok(world(eye).every((value) => Math.abs(value) < 1e-9));
+
+  const halfWidth = QUEST_MENU_SIZE.widthM / 2;
+  const halfHeight = QUEST_MENU_SIZE.heightM / 2;
+  const hidden = (point) => {
+    assert.ok(point[2] < pose.position[2]);
+    const t = pose.position[2] / point[2];
+    assert.ok(t > 0 && t < 1);
+    const hitX = t * point[0] - pose.position[0];
+    const hitY = t * point[1] - pose.position[1];
+    return Math.abs(hitX) <= halfWidth && Math.abs(hitY) <= halfHeight;
+  };
+  // Top corners (head and raised arms) and the bounding-box center stay clear.
+  for (const x of [min[0], max[0]]) {
+    for (const z of [min[2], max[2]]) {
+      assert.equal(hidden(world(ringLocal(red, [x, max[1], z]))), false);
+    }
+  }
+  const midY = (min[1] + max[1]) / 2;
+  assert.equal(hidden(world(ringLocal(red, [0, midY, 0]))), false);
+  // Walk up the opponent's centerline at its near, middle and far depth. Only
+  // the lower legs (under ~0.65 m of the 1.92 m robot in VR) may be hidden.
+  for (const z of [min[2], 0, max[2]]) {
+    const floorVR = world(ringLocal(red, [0, 0, z]))[1];
+    let lowestVisible = null;
+    for (let y = max[1]; y >= min[1]; y -= 0.002) {
+      const point = world(ringLocal(red, [0, y, z]));
+      if (hidden(point)) break;
+      lowestVisible = point[1] - floorVR;
+    }
+    assert.ok(lowestVisible !== null && lowestVisible < 0.7, `z ${z}: lowest ${lowestVisible}`);
+  }
 });
 
 test('trigger presses and hover ignore gaze, grips, and repeat clicks', () => {
@@ -144,14 +377,6 @@ test('trigger presses and hover ignore gaze, grips, and repeat clicks', () => {
   assert.equal(questPointerHover(hover, false, 12), true);
   assert.equal(questPointerHover(hover, true, 8), true);
   assert.equal(questPointerHover(hover, false, 1), false);
-});
-
-test('menu material names are stable per PNG and distinct across PNGs', () => {
-  const left = questMenuMaterialName('file:///panel-a.png');
-  const right = questMenuMaterialName('file:///panel-b.png');
-  assert.notEqual(left, right);
-  assert.equal(left, questMenuMaterialName('file:///panel-a.png'));
-  assert.match(left, /^questMenu-[0-9a-f]+$/);
 });
 
 test('Ready acknowledges the lobby and does not call ArenaMatch.ready', () => {
@@ -186,24 +411,20 @@ test('solo keeps ArenaMatch untracked and Ready does not leave the lobby', () =>
   assert.equal(opened.landscape, true);
   assert.equal(opened.canReady, false);
   assert.equal(opened.localReady, false);
+  assert.equal(opened.acknowledged, false);
   assert.match(opened.message, /tracking is stable/);
-  assert.doesNotMatch(opened.lines.join('\n'), /tracking/i);
-  assert.match(opened.lines.join('\n'), /stay idle/);
+  assert.match(opened.lines.join('\n'), /Both robots are in the ring/);
   const result = session.ready();
   const afterReady = session.getSnapshot();
   assert.equal(result.called, false);
   assert.equal(result.started, false);
   assert.equal(result.reason, 'acknowledged');
-  assert.equal(afterReady.acknowledged, true);
   assert.equal(afterReady.stage, 'lobby');
   assert.equal(afterReady.localReady, false);
+  assert.equal(afterReady.acknowledged, true);
   assert.equal(afterReady.tracking, false);
   assert.equal(afterReady.placed, false);
-  assert.match(afterReady.lines.join('\n'), new RegExp(QUEST_READY_SAVED));
-  const again = session.ready();
-  assert.equal(again.reason, 'acknowledged');
-  assert.equal(session.getSnapshot().stage, 'lobby');
-  assert.equal(session.getSnapshot().localReady, false);
+  assert.ok(afterReady.lines.includes(QUEST_READY_SAVED));
 
   const staleLease = afterReady.lease;
   session.assetLoaded(staleLease, afterReady.token, afterReady.placementVersion, 'arena');
@@ -219,7 +440,6 @@ test('solo keeps ArenaMatch untracked and Ready does not leave the lobby', () =>
   assert.equal(session.getSnapshot().mode, null);
   assert.equal(session.getSnapshot().page, 'menu');
   assert.equal(session.getSnapshot().acknowledged, false);
-  assert.doesNotMatch(session.getSnapshot().lines.join('\n'), /Ready saved/);
   session.assetLoaded(staleLease, afterReady.token, afterReady.placementVersion, 'arena');
   assert.equal(session.solo(), true);
   const reopened = session.getSnapshot();
@@ -229,11 +449,8 @@ test('solo keeps ArenaMatch untracked and Ready does not leave the lobby', () =>
   assert.equal(session.getSnapshot().assetsLoaded, 0);
   session.exit();
   assert.equal(session.getSnapshot().mode, null);
-  assert.equal(session.getSnapshot().page, 'menu');
-  assert.match(session.getSnapshot().lines.join('\n'), new RegExp(QUEST_LEAVING));
-  assert.equal(session.solo(), false);
-  session.exit();
-  assert.match(session.getSnapshot().lines.join('\n'), new RegExp(QUEST_LEAVING));
+  assert.equal(session.getSnapshot().leaving, true);
+  assert.deepEqual(session.getSnapshot().lines, [QUEST_LEAVING]);
   session.dispose();
   session.dispose();
   assert.equal(session.solo(), false);
@@ -258,20 +475,28 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
   const scene = source('src/features/quest-vr/quest-arena-scene.native.tsx');
   const navigator = source('src/features/quest-vr/quest-xr-navigator.native.tsx');
   const moduleSource = source(
-    'modules/quest-menu-texture/native/src/main/java/expo/modules/questmenutexture/QuestMenuTextureModule.kt'
+    'modules/quest-panel/native/src/main/java/expo/modules/questpanel/QuestPanelModule.kt'
   );
   assert.match(scene, /Fight_Arena\.glb/);
   assert.match(scene, /Mike_Player1_Blue_Combat_AR\.glb/);
   assert.match(scene, /Mike_Player2_RedOrange_Combat_AR\.glb/);
   assert.match(scene, /ARENA_LAYOUT/);
   assert.match(scene, /questMenuHit/);
-  assert.match(scene, /renderQuestMenuTexture/);
+  assert.match(scene, /questMenuButtonFrame\(/);
+  assert.match(scene, /questPanelNative/);
   assert.match(scene, /questTriggerPress/);
   assert.match(scene, /questPointerHover/);
   assert.match(scene, /onClickState/);
-  assert.match(scene, /createQuestMenuTexturePipeline/);
-  assert.match(scene, /menu-background\.png/);
+  assert.match(scene, /createQuestMenuCompositor/);
+  assert.match(scene, /questMenuLayerMask/);
+  assert.doesNotMatch(scene, /menu-background\.png/);
+  assert.match(scene, /quest-lettering\/neo\.png/);
   assert.match(scene, /quest-lettering\/rock\.png/);
+  assert.match(scene, /quest-lettering\/robots\.png/);
+  assert.match(scene, /ArenaNotoSans\.ttf/);
+  assert.match(scene, /ArenaNotoSansSemibold\.ttf/);
+  assert.match(scene, /resolveQuestMenuAssetFile/);
+  assert.doesNotMatch(source('src/features/quest-vr/quest-menu-layout.ts'), /menu-background/);
   assert.match(scene, /session\.exit\(\)/);
   assert.match(scene, /exitVRScene\(\)/);
   assert.doesNotMatch(scene, /onClick=\{/);
@@ -281,20 +506,27 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
     /ViroARScene|ViroXRSceneNavigator|setTracking|setPlacement|ViroGameLoop/
   );
   assert.match(navigator, /passthroughEnabled=\{false\}/);
+  assert.doesNotMatch(navigator, /hdrEnabled=\{false\}/);
+  assert.match(navigator, /\bhdrEnabled\b/);
+  assert.match(navigator, /bloomEnabled=\{false\}/);
   assert.match(navigator, /quest-arena-scene\.native/);
   assert.equal(
     fs.existsSync(path.join(__dirname, '../src/features/quest-vr/quest-smoke-scene.native.tsx')),
     false
   );
-  assert.match(scene, /resolveQuestMenuAssetFile/);
-  assert.doesNotMatch(scene, /localUri \?\? asset\.uri/);
   assert.match(moduleSource, /"image"/);
+  assert.match(moduleSource, /BitmapFactory\.decodeFile/);
+  assert.match(moduleSource, /FILTER_BITMAP_FLAG/);
   assert.match(moduleSource, /Typeface\.createFromFile/);
-  assert.match(moduleSource, /getIdentifier/);
+  assert.match(moduleSource, /drawExecutor/);
   assert.match(moduleSource, /android_res/);
-  assert.match(moduleSource, /quest-menu-src/);
-  assert.match(moduleSource, /keep/);
-  assert.doesNotMatch(moduleSource, /dropLast/);
-  assert.doesNotMatch(moduleSource, /viro_renderer|OpenXR|XrSession|nativeDraw/);
+  // The module draws pixels only. The patched renderer owns the XR layer, and
+  // nothing registers Viro materials any more.
+  assert.match(moduleSource, /System\.loadLibrary\("viro_renderer"\)/);
+  assert.match(moduleSource, /external fun nativeDraw/);
+  assert.match(moduleSource, /external fun nativeRefSpaceEpoch/);
+  assert.doesNotMatch(moduleSource, /XrSession|xrCreate|VRTMaterialManager|setJSMaterials/);
+  assert.equal(fs.existsSync(path.join(__dirname, '../modules/quest-menu-texture')), false);
+  // The renderer plugin already wires the patched AAR; no extra compositor plugin.
   assert.doesNotMatch(source('app.config.ts'), /QUEST_COMPOSITOR|quest-compositor/);
 });
