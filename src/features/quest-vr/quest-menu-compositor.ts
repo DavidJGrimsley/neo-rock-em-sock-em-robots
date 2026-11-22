@@ -1,21 +1,22 @@
 // The headset menu as an OpenXR quad layer, adapted from the Medical Viewer
-// compositor controls. modules/quest-panel draws the menu ops with Canvas and
-// the patched renderer (tools/quest/viro-renderer/0002) submits the pixels
-// under the projection layer. The scene keeps a depth-writing, zero-alpha quad
-// and invisible Viro hit targets at the same pose, so the panel shows through
-// that hole, rays and models in front still cover it, and input stays Viro's.
+// compositor controls. modules/quest-panel draws the compact menu card ops and
+// the floating transparent title overlay ops with Android Canvas, and the patched
+// renderer (tools/quest/viro-renderer/0002) submits the card under the projection
+// layer (revealed through a depth-writing zero-alpha mask) and the transparent
+// title over the scene.
 //
-// One owner token per scene. Only a changed spec is sent; the native worker
-// keeps only the newest and moves the shown pixels when only the pose changed.
-// Native status decides whether the layer is up. A layer that fails, or has not
-// appeared after firstShowTimeoutMs, is replaced by Viro-drawn buttons.
+// One owner token per slot per scene. Only a changed spec is sent; the native
+// worker keeps only the newest and moves shown pixels when only the pose changed.
 
 import { menuFrame, type Calibration, type Vec3 } from './quest-head-rig.ts';
 import {
+  QUEST_MENU_ALERT_SHIFT_M,
+  QUEST_MENU_ALERT_SIZE,
   QUEST_MENU_CARD_RADIUS_PX,
   QUEST_MENU_POSE,
   QUEST_MENU_SIZE,
   QUEST_MENU_TEXTURE,
+  QUEST_TITLE_POSE,
   type QuestMenuDrawOp,
   type QuestMenuPage,
 } from './quest-menu-layout.ts';
@@ -27,21 +28,22 @@ const IDLE_POLL_MS = 1000;
 /** [x, y, z, qx, qy, qz, qw] in the Viro world, which is the OpenXR space both layers use. */
 export type QuestPanelPose = [number, number, number, number, number, number, number];
 
-/**
- * The panel centre and orientation that the scene builds from menuFrame(cal)
- * and QUEST_MENU_POSE[page]. QUEST_MENU_POSE rotations are yaw-only (pinned by
- * tests), so the orientation is a rotation about +Y.
- */
-export function questMenuPanelPose(cal: Calibration, page: QuestMenuPage) {
+function worldPoseFromLocal(
+  cal: Calibration,
+  local: {
+    position: readonly [number, number, number];
+    rotation: readonly [number, number, number];
+  },
+  extraY = 0
+) {
   const frame = menuFrame(cal);
-  const local = QUEST_MENU_POSE[page];
   const r = (frame.rotationY * Math.PI) / 180;
   const cos = Math.cos(r);
   const sin = Math.sin(r);
   const [lx, ly, lz] = local.position;
   const position: Vec3 = [
     frame.position[0] + lx * cos + lz * sin,
-    frame.position[1] + ly,
+    frame.position[1] + ly + extraY,
     frame.position[2] - lx * sin + lz * cos,
   ];
   const yaw = frame.rotationY + local.rotation[1];
@@ -50,11 +52,32 @@ export function questMenuPanelPose(cal: Calibration, page: QuestMenuPage) {
   return { position, yaw, pose };
 }
 
+/**
+ * The compact button card centre and orientation built from menuFrame(cal) and
+ * QUEST_MENU_POSE[page]. When alert/error lines expand the card upward, its
+ * centre shifts up by QUEST_MENU_ALERT_SHIFT_M so button positions stay fixed.
+ */
+export function questMenuPanelPose(cal: Calibration, page: QuestMenuPage, hasMessages = false) {
+  return worldPoseFromLocal(cal, QUEST_MENU_POSE[page], hasMessages ? QUEST_MENU_ALERT_SHIFT_M : 0);
+}
+
+/**
+ * The floating transparent branded title centre and orientation built from
+ * menuFrame(cal) and QUEST_TITLE_POSE[page].
+ */
+export function questMenuTitlePose(cal: Calibration, page: QuestMenuPage) {
+  return worldPoseFromLocal(cal, QUEST_TITLE_POSE[page]);
+}
+
 export interface QuestMenuPanelFrame {
   /** Short description for logs, for example "ring ack=false standing". */
   label: string;
   pose: readonly number[];
   ops: QuestMenuDrawOp[];
+  widthPx?: number;
+  heightPx?: number;
+  widthM?: number;
+  heightM?: number;
 }
 
 const round = (value: number) => Math.round(value * 1e5) / 1e5 || 0;
@@ -63,30 +86,53 @@ const round = (value: number) => Math.round(value * 1e5) / 1e5 || 0;
 export function questMenuPanelSpec(frame: QuestMenuPanelFrame) {
   return JSON.stringify({
     label: frame.label,
-    widthPx: QUEST_MENU_TEXTURE.widthPx,
-    heightPx: QUEST_MENU_TEXTURE.heightPx,
-    widthM: QUEST_MENU_SIZE.widthM,
-    heightM: QUEST_MENU_SIZE.heightM,
+    widthPx: frame.widthPx ?? QUEST_MENU_TEXTURE.widthPx,
+    heightPx: frame.heightPx ?? QUEST_MENU_TEXTURE.heightPx,
+    widthM: frame.widthM ?? QUEST_MENU_SIZE.widthM,
+    heightM: frame.heightM ?? QUEST_MENU_SIZE.heightM,
     pose: frame.pose.map(round),
     ops: frame.ops,
   });
 }
 
-const ROUND_MASK_RADIUS_M =
-  Math.round(
-    (QUEST_MENU_CARD_RADIUS_PX / QUEST_MENU_TEXTURE.widthPx) * QUEST_MENU_SIZE.widthM * 1e5
-  ) / 1e5;
-const ROUND_MASK_HALF_W = QUEST_MENU_SIZE.widthM / 2;
-const ROUND_MASK_HALF_H = QUEST_MENU_SIZE.heightM / 2;
+function roundedMaskFragment(widthM: number, heightM: number, widthPx: number) {
+  const radiusM = Math.round((QUEST_MENU_CARD_RADIUS_PX / widthPx) * widthM * 1e5) / 1e5;
+  const halfW = widthM / 2;
+  const halfH = heightM / 2;
+  return [
+    `vec2 p = abs(v_texcoord - 0.5) * vec2(${widthM}, ${heightM});`,
+    `vec2 q = p - (vec2(${halfW}, ${halfH}) - vec2(${radiusM}));`,
+    `float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - ${radiusM};`,
+    'if (dist > -0.0015) discard;',
+    '_output_color = vec4(0.0);',
+  ].join(' ');
+}
+
 // Rounded-rect SDF in panel metres so the four corners and anti-aliased edge
-// discard instead of punching black holes into the 3D scene behind the panel.
-export const QUEST_MENU_LAYER_MASK_FRAGMENT = [
-  `vec2 p = abs(v_texcoord - 0.5) * vec2(${QUEST_MENU_SIZE.widthM}, ${QUEST_MENU_SIZE.heightM});`,
-  `vec2 q = p - (vec2(${ROUND_MASK_HALF_W}, ${ROUND_MASK_HALF_H}) - vec2(${ROUND_MASK_RADIUS_M}));`,
-  `float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - ${ROUND_MASK_RADIUS_M};`,
-  'if (dist > -0.0015) discard;',
-  '_output_color = vec4(0.0);',
-].join(' ');
+// discard instead of punching black holes into the 3D scene behind the card.
+export const QUEST_MENU_LAYER_MASK_FRAGMENT = roundedMaskFragment(
+  QUEST_MENU_SIZE.widthM,
+  QUEST_MENU_SIZE.heightM,
+  QUEST_MENU_TEXTURE.widthPx
+);
+
+export const QUEST_MENU_ALERT_LAYER_MASK_FRAGMENT = roundedMaskFragment(
+  QUEST_MENU_ALERT_SIZE.widthM,
+  QUEST_MENU_ALERT_SIZE.heightM,
+  QUEST_MENU_TEXTURE.widthPx
+);
+
+function maskMaterial(fragment: string) {
+  return {
+    lightingModel: 'Constant' as const,
+    blendMode: 'None' as const,
+    diffuseColor: '#00000000',
+    writesToDepthBuffer: true,
+    readsFromDepthBuffer: true,
+    cullMode: 'None' as const,
+    shaderModifiers: { fragment },
+  };
+}
 
 /**
  * Viro materials for the layer. Unlike the Medical Viewer passthrough mask,
@@ -96,15 +142,8 @@ export const QUEST_MENU_LAYER_MASK_FRAGMENT = [
  */
 export function questMenuLayerMaterials() {
   return {
-    questMenuLayerMask: {
-      lightingModel: 'Constant' as const,
-      blendMode: 'None' as const,
-      diffuseColor: '#00000000',
-      writesToDepthBuffer: true,
-      readsFromDepthBuffer: true,
-      cullMode: 'None' as const,
-      shaderModifiers: { fragment: QUEST_MENU_LAYER_MASK_FRAGMENT },
-    },
+    questMenuLayerMask: maskMaterial(QUEST_MENU_LAYER_MASK_FRAGMENT),
+    questMenuLayerMaskAlert: maskMaterial(QUEST_MENU_ALERT_LAYER_MASK_FRAGMENT),
     // Hover outline drawn by Viro, so pointing never redraws the panel.
     questMenuFocus: {
       lightingModel: 'Constant' as const,
@@ -269,6 +308,7 @@ export function createQuestMenuCompositor(
       };
     },
     getSnapshot: () => snapshot,
+    getOwner: () => owner,
     /** Sends the panel when it differs from the last one sent. */
     present(frame: QuestMenuPanelFrame) {
       if (disposed) return;

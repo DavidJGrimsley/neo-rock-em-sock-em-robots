@@ -30,22 +30,21 @@ models in front of it still occlude it. Hit targets stay Viro quads.
 The OpenXR pointer patch (0001) is unchanged and applies first.
 diff --git a/android/sharedCode/src/main/cpp/QuestPanelLayer.h b/android/sharedCode/src/main/cpp/QuestPanelLayer.h
 new file mode 100644
-index 0000000..d679c69
+index 0000000..7538bf1
 --- /dev/null
 +++ b/android/sharedCode/src/main/cpp/QuestPanelLayer.h
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,307 @@
 +// App-owned addition to ReactVision/virocore v3.0.3 (MIT) for the Neo Rock 'Em
 +// Sock 'Em Robots Quest menu. Adapted from the Medical Viewer compositor panel
 +// (native/quest-compositor/MedicalQuestPanel.h in DavidJGrimsley's
 +// medical-viewer, same author). Included once, by VROSceneRendererOpenXR.cpp.
 +//
-+// expo.modules.questpanel.QuestPanelModule rasterizes the menu with Android
-+// Canvas and hands the RGBA pixels, the physical size and the pose here. The
-+// render thread uploads a new revision into an OpenXR swapchain and submits an
-+// XrCompositionLayerQuad under the projection layer. A Viro depth-only quad
-+// with zero alpha at the same pose shows it, so content in front (rays, hit
-+// dots, models) still occludes the panel. All XR and GL work stays on Viro's
-+// render thread; JNI calls only touch the locked state.
++// expo.modules.questpanel.QuestPanelModule rasterizes the compact button card
++// (underlay) and the floating transparent branded title (overlay) with Android
++// Canvas and hands the RGBA pixels, physical size and pose here. The render
++// thread uploads revisions into OpenXR swapchains and submits the card under
++// the projection layer (revealed through a depth-only zero-alpha quad hole)
++// and the transparent title over the scene.
 +#pragma once
 +#include <jni.h>
 +#include <algorithm>
@@ -59,12 +58,12 @@ index 0000000..d679c69
 +
 +namespace quest_panel {
 +// Bumped when the JNI contract changes; QuestPanelModule checks it.
-+constexpr int kVersion = 2;
++constexpr int kVersion = 3;
 +
 +static std::atomic<int> refSpaceEpoch{0};
 +inline void bumpRefSpaceEpoch() { refSpaceEpoch.fetch_add(1, std::memory_order_relaxed); }
 +
-+struct State {
++struct QuadState {
 +    std::mutex mutex;
 +    bool visible = false;
 +    int status = 0;  // 0 hidden or not yet submitted, 1 submitted, -1 failed
@@ -73,8 +72,10 @@ index 0000000..d679c69
 +    float widthM = 1.6f, heightM = 0.9f;
 +    XrPosef pose = {{0, 0, 0, 1}, {0, 0, -1.5f}};
 +    std::vector<uint8_t> pixels;
++    std::vector<uint8_t> scratch;
 +};
-+static State state;
++static QuadState state;
++static QuadState titleState;
 +
 +static bool readPose(JNIEnv *env, jfloatArray values, XrPosef *pose) {
 +    if (values == nullptr || env->GetArrayLength(values) != 7) return false;
@@ -88,68 +89,46 @@ index 0000000..d679c69
 +    *pose = {{p[3] / norm, p[4] / norm, p[5] / norm, p[6] / norm}, {p[0], p[1], p[2]}};
 +    return true;
 +}
-+}  // namespace quest_panel
 +
-+extern "C" JNIEXPORT jint JNICALL
-+Java_expo_modules_questpanel_QuestPanelModule_nativeVersion(JNIEnv *, jobject) {
-+    return quest_panel::kVersion;
-+}
-+
-+extern "C" JNIEXPORT jint JNICALL
-+Java_expo_modules_questpanel_QuestPanelModule_nativeRefSpaceEpoch(JNIEnv *, jobject) {
-+    return quest_panel::refSpaceEpoch.load(std::memory_order_relaxed);
-+}
-+
-+extern "C" JNIEXPORT jint JNICALL
-+Java_expo_modules_questpanel_QuestPanelModule_nativeStatus(JNIEnv *, jobject) {
-+    std::lock_guard<std::mutex> lock(quest_panel::state.mutex);
-+    return quest_panel::state.status;
-+}
-+
-+extern "C" JNIEXPORT void JNICALL
-+Java_expo_modules_questpanel_QuestPanelModule_nativeHide(JNIEnv *, jobject) {
-+    std::lock_guard<std::mutex> lock(quest_panel::state.mutex);
-+    quest_panel::state.visible = false;
-+    quest_panel::state.status = 0;
-+}
-+
-+// Moves the shown pixels without a new upload.
-+extern "C" JNIEXPORT jboolean JNICALL
-+Java_expo_modules_questpanel_QuestPanelModule_nativePose(JNIEnv *env, jobject, jfloatArray pose) {
++static jboolean updateQuadPose(JNIEnv *env, QuadState &s, jfloatArray pose) {
 +    XrPosef next;
-+    if (!quest_panel::readPose(env, pose, &next)) return JNI_FALSE;
-+    std::lock_guard<std::mutex> lock(quest_panel::state.mutex);
-+    quest_panel::state.pose = next;
++    if (!readPose(env, pose, &next)) return JNI_FALSE;
++    std::lock_guard<std::mutex> lock(s.mutex);
++    s.pose = next;
 +    return JNI_TRUE;
 +}
 +
-+// Pixels and pose change together, so new art never appears at an old pose.
-+extern "C" JNIEXPORT jboolean JNICALL
-+Java_expo_modules_questpanel_QuestPanelModule_nativeDraw(
-+        JNIEnv *env, jobject, jbyteArray rgba, jint width, jint height, jfloat widthM,
-+        jfloat heightM, jfloatArray pose) {
++static jboolean writeQuadDraw(JNIEnv *env, QuadState &s, jbyteArray rgba, jint width, jint height,
++                              jfloat widthM, jfloat heightM, jfloatArray pose) {
 +    XrPosef next;
++    const size_t totalBytes = (width > 0 && height > 0)
++        ? static_cast<size_t>(width) * static_cast<size_t>(height) * 4u
++        : 0u;
 +    if (rgba == nullptr || width < 1 || height < 1 || width > 4096 || height > 4096 ||
-+        env->GetArrayLength(rgba) != width * height * 4 ||
++        static_cast<size_t>(env->GetArrayLength(rgba)) != totalBytes ||
 +        !std::isfinite(widthM) || widthM <= 0 || widthM > 2 ||
 +        !std::isfinite(heightM) || heightM <= 0 || heightM > 2 ||
-+        !quest_panel::readPose(env, pose, &next)) return JNI_FALSE;
-+    std::lock_guard<std::mutex> lock(quest_panel::state.mutex);
-+    auto &s = quest_panel::state;
++        !readPose(env, pose, &next)) return JNI_FALSE;
++    std::lock_guard<std::mutex> lock(s.mutex);
 +    s.width = width; s.height = height;
 +    s.widthM = widthM; s.heightM = heightM;
 +    s.pose = next;
 +    s.pixels.resize(static_cast<size_t>(width) * height * 4);
++    s.scratch.resize(totalBytes);
++    env->GetByteArrayRegion(rgba, 0, static_cast<jsize>(totalBytes),
++                            reinterpret_cast<jbyte *>(s.scratch.data()));
 +    // Canvas has a top-left origin; OpenGL textures have a bottom-left origin.
++    const size_t rowBytes = static_cast<size_t>(width) * 4u;
 +    for (int y = 0; y < height; ++y) {
-+        env->GetByteArrayRegion(rgba, y * width * 4, width * 4,
-+            reinterpret_cast<jbyte *>(s.pixels.data() + static_cast<size_t>(height - y - 1) * width * 4));
++        std::memcpy(s.pixels.data() + static_cast<size_t>(height - y - 1) * rowBytes,
++                    s.scratch.data() + static_cast<size_t>(y) * rowBytes,
++                    rowBytes);
 +    }
 +    s.visible = true; ++s.revision;
 +    return JNI_TRUE;
 +}
 +
-+class QuestPanelLayer {
++class QuadLayer {
 +    XrSwapchain _swapchain = XR_NULL_HANDLE;
 +    std::vector<XrSwapchainImageOpenGLESKHR> _images;
 +    uint64_t _revision = 0;
@@ -164,12 +143,12 @@ index 0000000..d679c69
 +    }
 +
 +public:
-+    ~QuestPanelLayer() { destroySwapchain(); }
++    ~QuadLayer() { destroySwapchain(); }
 +
-+    // Returns the quad layer to submit this frame, or null when the app shows no panel.
-+    const XrCompositionLayerBaseHeader *prepare(XrSession session, XrSpace space) {
-+        std::lock_guard<std::mutex> lock(quest_panel::state.mutex);
-+        auto &s = quest_panel::state;
++    // Returns the quad layer to submit this frame, or null when hidden.
++    const XrCompositionLayerBaseHeader *prepare(XrSession session, XrSpace space, QuadState &s,
++                                                const char *logTag) {
++        std::lock_guard<std::mutex> lock(s.mutex);
 +        if (!s.visible || s.pixels.empty() || s.status < 0) return nullptr;
 +        if (_swapchain && (_width != s.width || _height != s.height)) destroySwapchain();
 +        if (!_swapchain) {
@@ -208,7 +187,11 @@ index 0000000..d679c69
 +            if (XR_FAILED(xrAcquireSwapchainImage(_swapchain, &acquire, &index))) return nullptr;
 +            XrSwapchainImageWaitInfo wait = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
 +            wait.timeout = XR_INFINITE_DURATION;
-+            if (XR_FAILED(xrWaitSwapchainImage(_swapchain, &wait))) return nullptr;
++            if (XR_FAILED(xrWaitSwapchainImage(_swapchain, &wait))) {
++                XrSwapchainImageReleaseInfo release = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
++                xrReleaseSwapchainImage(_swapchain, &release);
++                return nullptr;
++            }
 +            // Preserve Viro's GL state; it owns this context.
 +            GLint texture = 0, arrayTexture = 0, alignment = 0, unpackBuffer = 0;
 +            GLint rowLength = 0, skipRows = 0, skipPixels = 0;
@@ -256,13 +239,13 @@ index 0000000..d679c69
 +            XrSwapchainImageReleaseInfo release = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
 +            if (XR_FAILED(xrReleaseSwapchainImage(_swapchain, &release))) return nullptr;
 +            if (uploadError != GL_NO_ERROR) {
-+                __android_log_print(ANDROID_LOG_ERROR, "QuestPanelLayer",
++                __android_log_print(ANDROID_LOG_ERROR, logTag,
 +                    "Panel upload failed: GL=0x%x target=0x%x", uploadError, target);
 +                s.status = -1;
 +                return nullptr;
 +            }
-+            // Once per new menu image, never per frame.
-+            __android_log_print(ANDROID_LOG_INFO, "QuestPanelLayer",
++            // Once per new image, never per frame.
++            __android_log_print(ANDROID_LOG_INFO, logTag,
 +                "Panel uploaded: revision=%llu %dx%d %.2fx%.2fm target=0x%x",
 +                static_cast<unsigned long long>(s.revision), _width, _height,
 +                s.widthM, s.heightM, target);
@@ -279,6 +262,83 @@ index 0000000..d679c69
 +        _layer.size = {s.widthM, s.heightM};
 +        s.status = 1;
 +        return reinterpret_cast<const XrCompositionLayerBaseHeader *>(&_layer);
++    }
++};
++}  // namespace quest_panel
++
++extern "C" JNIEXPORT jint JNICALL
++Java_expo_modules_questpanel_QuestPanelModule_nativeVersion(JNIEnv *, jobject) {
++    return quest_panel::kVersion;
++}
++
++extern "C" JNIEXPORT jint JNICALL
++Java_expo_modules_questpanel_QuestPanelModule_nativeRefSpaceEpoch(JNIEnv *, jobject) {
++    return quest_panel::refSpaceEpoch.load(std::memory_order_relaxed);
++}
++
++extern "C" JNIEXPORT jint JNICALL
++Java_expo_modules_questpanel_QuestPanelModule_nativeStatus(JNIEnv *, jobject) {
++    std::lock_guard<std::mutex> lock(quest_panel::state.mutex);
++    return quest_panel::state.status;
++}
++
++extern "C" JNIEXPORT void JNICALL
++Java_expo_modules_questpanel_QuestPanelModule_nativeHide(JNIEnv *, jobject) {
++    std::lock_guard<std::mutex> lock(quest_panel::state.mutex);
++    quest_panel::state.visible = false;
++    quest_panel::state.status = 0;
++}
++
++// Moves the shown pixels without a new upload.
++extern "C" JNIEXPORT jboolean JNICALL
++Java_expo_modules_questpanel_QuestPanelModule_nativePose(JNIEnv *env, jobject, jfloatArray pose) {
++    return quest_panel::updateQuadPose(env, quest_panel::state, pose);
++}
++
++// Pixels and pose change together, so new art never appears at an old pose.
++extern "C" JNIEXPORT jboolean JNICALL
++Java_expo_modules_questpanel_QuestPanelModule_nativeDraw(
++        JNIEnv *env, jobject, jbyteArray rgba, jint width, jint height, jfloat widthM,
++        jfloat heightM, jfloatArray pose) {
++    return quest_panel::writeQuadDraw(env, quest_panel::state, rgba, width, height, widthM, heightM, pose);
++}
++
++extern "C" JNIEXPORT jint JNICALL
++Java_expo_modules_questpanel_QuestPanelModule_nativeTitleStatus(JNIEnv *, jobject) {
++    std::lock_guard<std::mutex> lock(quest_panel::titleState.mutex);
++    return quest_panel::titleState.status;
++}
++
++extern "C" JNIEXPORT void JNICALL
++Java_expo_modules_questpanel_QuestPanelModule_nativeTitleHide(JNIEnv *, jobject) {
++    std::lock_guard<std::mutex> lock(quest_panel::titleState.mutex);
++    quest_panel::titleState.visible = false;
++    quest_panel::titleState.status = 0;
++}
++
++extern "C" JNIEXPORT jboolean JNICALL
++Java_expo_modules_questpanel_QuestPanelModule_nativeTitlePose(JNIEnv *env, jobject, jfloatArray pose) {
++    return quest_panel::updateQuadPose(env, quest_panel::titleState, pose);
++}
++
++extern "C" JNIEXPORT jboolean JNICALL
++Java_expo_modules_questpanel_QuestPanelModule_nativeTitleDraw(
++        JNIEnv *env, jobject, jbyteArray rgba, jint width, jint height, jfloat widthM,
++        jfloat heightM, jfloatArray pose) {
++    return quest_panel::writeQuadDraw(env, quest_panel::titleState, rgba, width, height, widthM, heightM, pose);
++}
++
++class QuestPanelLayer {
++    quest_panel::QuadLayer _card;
++    quest_panel::QuadLayer _title;
++
++public:
++    const XrCompositionLayerBaseHeader *prepare(XrSession session, XrSpace space) {
++        return _card.prepare(session, space, quest_panel::state, "QuestPanelLayer");
++    }
++
++    const XrCompositionLayerBaseHeader *prepareTitle(XrSession session, XrSpace space) {
++        return _title.prepare(session, space, quest_panel::titleState, "QuestTitleLayer");
 +    }
 +};
 diff --git a/android/sharedCode/src/main/cpp/VRODisplayOpenGLOpenXR.h b/android/sharedCode/src/main/cpp/VRODisplayOpenGLOpenXR.h
@@ -313,7 +373,7 @@ index e8ff8cf..08bc444 100644
  
  private:
 diff --git a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
-index d1c6316..51bf41d 100644
+index d1c6316..f68af1d 100644
 --- a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
 +++ b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
 @@ -5,6 +5,7 @@
@@ -361,7 +421,7 @@ index d1c6316..51bf41d 100644
 +        _pendingRefSpaceChange = false;
 +        quest_panel::bumpRefSpaceEpoch();
 +    }
-
+ 
      // ── Begin frame ───────────────────────────────────────────────────────────
      XrFrameBeginInfo beginInfo = { XR_TYPE_FRAME_BEGIN_INFO };
 @@ -1254,6 +1269,19 @@ void VROSceneRendererOpenXR::renderFrame() {
@@ -387,14 +447,14 @@ index d1c6316..51bf41d 100644
 @@ -1335,6 +1363,9 @@ void VROSceneRendererOpenXR::renderFrame() {
          layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&ptLayerComp));
      }
-
+ 
 +    // App panel underlay (QuestPanelLayer.h), submitted under the projection layer.
 +    if (questPanel) layers.push_back(questPanel);
 +
      // Projection layer (3D scene)
      XrCompositionLayerProjection projLayer = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
      if (viewsValid && frameState.shouldRender) {
-@@ -1348,6 +1379,12 @@ void VROSceneRendererOpenXR::renderFrame() {
+@@ -1348,10 +1379,23 @@ void VROSceneRendererOpenXR::renderFrame() {
          if (_passthroughEnabled) {
              projLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
                                     XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
@@ -407,6 +467,17 @@ index d1c6316..51bf41d 100644
          }
          layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&projLayer));
      }
+ 
++    // Floating transparent branded title overlay (QuestPanelLayer.h), over the scene.
++    const XrCompositionLayerBaseHeader *questTitlePanel = nullptr;
++    if (viewsValid && frameState.shouldRender && _questPanel) {
++        questTitlePanel = _questPanel->prepareTitle(_session, _stageSpace);
++    }
++    if (questTitlePanel) layers.push_back(questTitlePanel);
++
+     XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
+     endInfo.displayTime          = frameState.predictedDisplayTime;
+     // Passthrough is supplied as a composition layer (underlay) beneath the
 diff --git a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.h b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.h
 index e0a125b..d7f5aa9 100644
 --- a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.h

@@ -16,19 +16,27 @@ const {
   stanceMarkerRingLocal,
 } = require('../src/features/quest-vr/quest-head-rig.ts');
 const {
+  QUEST_MENU_ALERT_SHIFT_M,
+  QUEST_MENU_CARD_RADIUS_PX,
   QUEST_MENU_POSE,
   QUEST_MENU_SIZE,
+  QUEST_TITLE_POSE,
+  QUEST_TITLE_SIZE,
+  QUEST_TITLE_TEXTURE,
   buildQuestMenu,
+  buildQuestMenuTitle,
   questMenuButtonFrame,
   questMenuButtons,
+  questMenuCardMetrics,
 } = require('../src/features/quest-vr/quest-menu-layout.ts');
 const {
   questPointerHover,
   questTriggerPress,
 } = require('../src/features/quest-vr/quest-menu-input.ts');
 const compositorModule = require('../src/features/quest-vr/quest-menu-compositor.ts');
+const { QUEST_DIAG_POSE, QUEST_DIAG_SIZE } = require('../src/features/quest-vr/quest-diagnostics-layout.ts');
 const { questMenuLayer } = require('../src/features/quest-vr/quest-menu-layer.ts');
-const { questMenuPanelPose } = compositorModule;
+const { questMenuPanelPose, questMenuTitlePose } = compositorModule;
 
 const repoRoot = path.resolve(__dirname, '..');
 const source = (file) => fs.readFileSync(path.join(repoRoot, file), 'utf8');
@@ -165,21 +173,22 @@ test('ring-page menu rectangle placed through menuFrame(DEFAULT) clears the oppo
       false,
       `Menu rectangle occluded opponent ray to ${JSON.stringify(corner)}`
     );
-    const diagOffset = rotatePanel([0, -QUEST_MENU_SIZE.heightM / 2 - 0.08, 0.002]);
-    const diagCenter = addVec(rectCenter, diagOffset);
+    const diagCenter = addVec(frame.position, rotateYDeg(QUEST_DIAG_POSE.position, frame.rotationY));
+    const rotateDiag = (vec) =>
+      rotateYDeg(rotateEulerDeg(vec, QUEST_DIAG_POSE.rotation), frame.rotationY);
     assert.equal(
       rayHitsRectangle(
         DEFAULT_CALIBRATION.origin,
         corner,
         diagCenter,
-        rectU,
-        rectV,
-        rectN,
-        QUEST_MENU_SIZE.widthM / 2,
-        0.07
+        rotateDiag([1, 0, 0]),
+        rotateDiag([0, 1, 0]),
+        rotateDiag([0, 0, 1]),
+        QUEST_DIAG_SIZE.widthM / 2,
+        QUEST_DIAG_SIZE.heightM / 2
       ),
       false,
-      `Diagnostics strip occluded opponent ray to ${JSON.stringify(corner)}`
+      `Sky diagnostics panel occluded opponent ray to ${JSON.stringify(corner)}`
     );
   }
 });
@@ -263,15 +272,20 @@ function manualClock() {
   };
 }
 
-// Stands in for modules/quest-panel: records owners, specs and hides.
+// Stands in for modules/quest-panel: records owners, specs and hides for both card and title slots.
 function fakePanel() {
   const panel = {
     available: true,
     status: 1,
+    titleStatus: 1,
     owner: 0,
+    titleOwner: 0,
     opened: 0,
+    titleOpened: 0,
     draws: [],
+    titleDraws: [],
     hidden: [],
+    titleHidden: [],
   };
   panel.native = {
     isAvailable: () => panel.available,
@@ -284,8 +298,17 @@ function fakePanel() {
     status: (owner) => (owner === panel.owner ? panel.status : -1),
     refSpaceEpoch: () => 0,
     hide: (owner) => panel.hidden.push(owner),
+    openTitle: () => {
+      panel.titleOpened += 1;
+      panel.titleOwner += 1;
+      return panel.titleOwner;
+    },
+    drawTitle: (owner, json) => panel.titleDraws.push({ owner, spec: JSON.parse(json) }),
+    statusTitle: (owner) => (owner === panel.titleOwner ? panel.titleStatus : -1),
+    hideTitle: (owner) => panel.titleHidden.push(owner),
   };
   panel.latest = () => panel.draws.at(-1)?.spec ?? null;
+  panel.latestTitle = () => panel.titleDraws.at(-1)?.spec ?? null;
   panel.texts = (spec = panel.latest()) =>
     (spec?.ops ?? []).filter((op) => op.op === 'text').map((op) => op.text);
   return panel;
@@ -306,6 +329,8 @@ function createSceneHarness({ panelAvailable = true } = {}) {
     unmounted: 0,
     exitVRScene: 0,
     exitRequested: [],
+    inputStarted: 0,
+    inputStopped: 0,
   };
   const logs = [];
   const panel = fakePanel();
@@ -471,9 +496,15 @@ function createSceneHarness({ panelAvailable = true } = {}) {
     './quest-menu-input.ts': { questPointerHover, questTriggerPress },
     './quest-menu-layer.ts': { questMenuLayer },
     './quest-menu-layout.ts': {
+      QUEST_MENU_ALERT_SHIFT_M,
+      QUEST_MENU_CARD_RADIUS_PX,
       QUEST_MENU_POSE,
       QUEST_MENU_SIZE,
+      QUEST_TITLE_POSE,
+      QUEST_TITLE_SIZE,
+      QUEST_TITLE_TEXTURE,
       questMenuButtonFrame,
+      questMenuCardMetrics,
       questMenuButtons: (page, arg, posture) => {
         harness.buttonLookups.push({ page, arg, posture });
         return questMenuButtons(page, arg, posture);
@@ -482,8 +513,38 @@ function createSceneHarness({ panelAvailable = true } = {}) {
         harness.builtMenus.push({ page, lines, options });
         return buildQuestMenu(page, lines, options);
       },
+      buildQuestMenuTitle,
     },
     './quest-runtime-store.ts': { questRuntime: mockRuntime },
+    './quest-diagnostics-layout.ts': {
+      questDiagLayerMaterials: () => ({
+        questDiagLayerMask: {
+          lightingModel: 'Constant',
+          blendMode: 'None',
+          diffuseColor: '#00000000',
+          writesToDepthBuffer: true,
+          readsFromDepthBuffer: true,
+          cullMode: 'None',
+        },
+        questDiagBacking: { lightingModel: 'Constant', diffuseColor: '#0f172a' },
+      }),
+    },
+    // Stage 04 controller diagnostics; covered by tests/quest-input.test.cjs.
+    './quest-input-visualizer.native.tsx': {
+      createSceneQuestInputSource: () => ({
+        start: () => {
+          calls.inputStarted += 1;
+        },
+        stop: () => {
+          calls.inputStopped += 1;
+        },
+        subscribe: () => () => {},
+        getSnapshot: () => null,
+        onSample: () => () => {},
+      }),
+      QuestDiagnosticsPanel: 'QuestDiagnosticsPanel',
+      QuestInputMarkers: 'QuestInputMarkers',
+    },
   };
 
   const output = ts.transpileModule(source('src/features/quest-vr/quest-arena-scene.native.tsx'), {
@@ -578,12 +639,22 @@ const fallbackQuads = (all) =>
       String(n.props.materials[0]).startsWith('questMenuFallback')
   );
 
-// The panel node: the child of menuFrame posed by QUEST_MENU_POSE[page].
+// The panel node: the child of menuFrame carrying the card mask/backing and hit quads.
 function panelNode(all) {
   return all.find(
     (n) =>
       n.type === 'ViroNode' &&
-      Object.values(QUEST_MENU_POSE).some((pose) => pose.position === n.props.position)
+      Array.isArray(n.props.position) &&
+      collectNodes(n.props.children).some(
+        (c) => c.type === 'ViroQuad' && typeof c.props.onClickState === 'function'
+      ) &&
+      Object.values(QUEST_MENU_POSE).some(
+        (pose) =>
+          pose.position[0] === n.props.position[0] &&
+          pose.position[2] === n.props.position[2] &&
+          (pose.position[1] === n.props.position[1] ||
+            Math.abs(pose.position[1] + QUEST_MENU_ALERT_SHIFT_M - n.props.position[1]) < 1e-9)
+      )
   );
 }
 
@@ -596,17 +667,24 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
   const { calls, panel } = harness;
 
   const initial = harness.render();
-  // The first frame already hands the layer a complete, usable menu with packaged fonts; nothing waits on art.
+  // The first frame already hands the layer a complete compact menu card and separate transparent title overlay.
   assert.equal(panel.opened, 1);
   assert.equal(panel.draws.length, 1);
+  assert.equal(panel.titleOpened, 1);
+  assert.equal(panel.titleDraws.length, 1);
   for (const label of MENU_LABELS) assert.ok(panel.texts().includes(label), `layer label ${label}`);
   assert.equal(panel.latest().ops[0].op, 'roundRect');
   assert.equal(panel.latest().ops[0].color, '#0f172a');
-  assert.equal(panel.latest().ops[0].radius, 56);
+  assert.equal(panel.latest().ops[0].radius, QUEST_MENU_CARD_RADIUS_PX);
+  assert.equal(panel.latestTitle().ops.some((op) => op.op === 'roundRect'), false);
   const textOps = panel.latest().ops.filter((op) => op.op === 'text');
-  assert.ok(textOps.some((op) => op.font === 'file:///sans.ttf'));
   assert.ok(textOps.some((op) => op.font === 'file:///sans-semibold.ttf'));
-  const imageOps = panel.latest().ops.filter((op) => op.op === 'image');
+  // Normal menu stays free of developer prose (moved to QuestDiagnosticsPanel).
+  assert.equal(harness.builtMenus.at(-1).lines.length, 0);
+  const diagNode = initial.all.find((n) => n.type === 'QuestDiagnosticsPanel');
+  assert.ok(diagNode);
+  assert.ok(diagNode.props.developerLines.some((line) => /Hold Meta button/.test(line)));
+  const imageOps = panel.latestTitle().ops.filter((op) => op.op === 'image');
   assert.deepEqual(
     imageOps.map((op) => op.uri),
     ['file:///neo.png', 'file:///rock.png', 'file:///robots.png']
@@ -614,6 +692,10 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
   assert.deepEqual(
     panel.latest().pose,
     questMenuPanelPose(DEFAULT_CALIBRATION, 'menu').pose.map((v) => Math.round(v * 1e5) / 1e5 || 0)
+  );
+  assert.deepEqual(
+    panel.latestTitle().pose,
+    questMenuTitlePose(DEFAULT_CALIBRATION, 'menu').pose.map((v) => Math.round(v * 1e5) / 1e5 || 0)
   );
   assert.equal(withMaterial(initial.all, 'questMenuLayerMask').length, 1);
   assert.equal(fallbackQuads(initial.all).length, 0, 'no Viro loading block over the layer');
@@ -640,6 +722,24 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
 
   harness.trackerSnapshot = { ...harness.trackerSnapshot, outOfBounds: true };
   const inRing = harness.render();
+  assert.equal(withMaterial(inRing.all, 'questMenuLayerMaskAlert').length, 1);
+  assert.equal(withMaterial(inRing.all, 'questMenuLayerMask').length, 0);
+  const oobBack = hitQuad(inRing.all, 'back');
+  assert.ok(oobBack);
+  assert.ok(
+    Math.abs(
+      panelNode(inRing.all).props.position[1] +
+        oobBack.props.position[1] -
+        (QUEST_MENU_POSE.ring.position[1] +
+          questMenuButtonFrame(
+            questMenuButtons('ring', { posture: 'seated' }).find((b) => b.action === 'back')
+          ).position[1])
+    ) < 1e-9,
+    'alert expansion keeps button world Y fixed under controller ray'
+  );
+  const inRingTexts = panel.latest().ops.filter((op) => op.op === 'text');
+  assert.ok(inRingTexts.some((op) => op.font === 'file:///sans.ttf'));
+  assert.ok(inRingTexts.some((op) => /Outside bounds/.test(op.text)));
   const models = inRing.all.filter((n) => n.type === 'Viro3DObject');
   const blueModel = models.find((n) => n.props.source === 'blue.glb');
   const redModel = models.find((n) => n.props.source === 'red.glb');
@@ -674,10 +774,14 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
   assert.ok(harness.builtMenus.some((entry) => entry.options?.posture === 'seated'));
   assert.ok(harness.buttonLookups.some((entry) => entry.arg?.posture === 'seated'));
 
+  assert.equal(calls.inputStarted, 1);
+  assert.ok(initial.all.some((n) => n.type === 'QuestInputMarkers'));
   harness.unmount();
   assert.equal(calls.dispose, 1);
   assert.equal(calls.unmounted, 1);
+  assert.equal(calls.inputStopped, 1);
   assert.deepEqual(panel.hidden, [1], 'unmount hides the layer once');
+  assert.deepEqual(panel.titleHidden, [1], 'unmount hides the title layer once');
   assert.equal(harness.clock.pending.size, 0, 'no status poll outlives the scene');
 });
 
@@ -719,28 +823,32 @@ test('page changes move the layer, panel and targets together with no loading bl
   const harness = createSceneHarness();
   const { panel } = harness;
   let frame = await harness.settle();
-  // Clean compositor UI draws immediately with roundRect/text/image ops and zero loading block.
-  assert.ok(
-    panel.latest().ops.every((op) => op.op === 'roundRect' || op.op === 'text' || op.op === 'image')
-  );
-  assert.equal(panel.latest().ops.filter((op) => op.op === 'image').length, 3);
+  // Clean compositor UI draws immediately with roundRect/text ops on card and image ops on title.
+  assert.ok(panel.latest().ops.every((op) => op.op === 'roundRect' || op.op === 'text'));
+  assert.equal(panel.latestTitle().ops.filter((op) => op.op === 'image').length, 3);
   assert.match(panel.latest().label, /^menu ack=false standing$/);
   frame = harness.poll();
   assert.ok(harness.logs.some((line) => /QuestMenu layer shown after/.test(line)));
   assert.equal(panelNode(frame.all).props.position, QUEST_MENU_POSE.menu.position);
   const staleMenu = frame.all;
 
-  // Solo: the ring panel, its pose, and its targets arrive in the same render.
+  // Solo: the ring panel, floating title above robot head, and hit targets arrive in the same render.
   clickAction(frame.all, 'solo', 1);
   frame = harness.render();
   assert.equal(panelNode(frame.all).props.position, QUEST_MENU_POSE.ring.position);
   for (const label of RING_LABELS) assert.ok(panel.texts().includes(label), `ring layer ${label}`);
   assert.deepEqual(
     panel
-      .latest()
+      .latestTitle()
       .ops.filter((op) => op.op === 'image')
       .map((op) => op.uri),
     ['file:///neo.png', 'file:///rock.png', 'file:///robots.png']
+  );
+  assert.deepEqual(
+    panel.latestTitle().pose,
+    questMenuTitlePose(harness.trackerSnapshot.calibration, 'ring').pose.map(
+      (v) => Math.round(v * 1e5) / 1e5 || 0
+    )
   );
   assert.ok(!panel.texts().includes('Solo'));
   const ringPose = questMenuPanelPose(harness.trackerSnapshot.calibration, 'ring').pose;

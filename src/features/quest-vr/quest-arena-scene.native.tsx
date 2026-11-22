@@ -25,26 +25,39 @@ import {
   menuFrame,
   questRigTransform,
   stanceMarkerRingLocal,
+  type Calibration,
   type RigAnchor,
 } from './quest-head-rig.ts';
 import { questHeadTracker, type QuestHeadTrackerSnapshot } from './quest-head-tracker.ts';
+import {
+  createSceneQuestInputSource,
+  QuestDiagnosticsPanel,
+  QuestInputMarkers,
+} from './quest-input-visualizer.native.tsx';
+import { questDiagLayerMaterials } from './quest-diagnostics-layout.ts';
 import {
   createQuestMenuCompositor,
   questMenuLayerMaterials,
   questMenuLayerNotice,
   questMenuLayerVisible,
   questMenuPanelPose,
+  questMenuTitlePose,
   type QuestMenuLayerSnapshot,
 } from './quest-menu-compositor.ts';
 import { questMenuFileUri, resolveQuestMenuAssetFile } from './quest-menu-asset-uri.ts';
 import { questPointerHover, questTriggerPress, type QuestPressState } from './quest-menu-input.ts';
 import { questMenuLayer } from './quest-menu-layer.ts';
 import {
-  buildQuestMenu,
+  QUEST_MENU_ALERT_SHIFT_M,
   QUEST_MENU_POSE,
-  QUEST_MENU_SIZE,
+  QUEST_TITLE_POSE,
+  QUEST_TITLE_SIZE,
+  QUEST_TITLE_TEXTURE,
+  buildQuestMenu,
+  buildQuestMenuTitle,
   questMenuButtonFrame,
   questMenuButtons,
+  questMenuCardMetrics,
   type QuestMenuAction,
   type QuestMenuButton,
   type QuestMenuFonts,
@@ -131,6 +144,7 @@ ViroMaterials.createMaterials({
     shaderModifiers: { fragment: '_output_color = vec4(0.0);' },
   } as never,
   ...questMenuLayerMaterials(),
+  ...questDiagLayerMaterials(),
   questMenuFallbackPrimary: { diffuseColor: '#60a5fa', lightingModel: 'Constant' },
   questMenuFallbackDanger: { diffuseColor: '#d99a9a', lightingModel: 'Constant' },
   questMenuFallbackBack: { diffuseColor: '#1e293b', lightingModel: 'Constant' },
@@ -149,12 +163,15 @@ const messageStyle = {
   textAlignVertical: 'center',
 } as const;
 const labelStyle = { ...messageStyle, fontFamily: 'ArenaNotoSansSemibold', fontSize: 28 } as const;
-const diagnosticsStyle = {
-  fontFamily: 'ArenaNotoSans',
-  fontSize: 16,
-  color: '#cbd5e1',
-  textAlign: 'center',
-  textAlignVertical: 'center',
+const fallbackTitleNeoStyle = {
+  ...labelStyle,
+  fontSize: 34,
+  color: '#a78bfa',
+} as const;
+const fallbackTitleMainStyle = {
+  ...labelStyle,
+  fontSize: 44,
+  color: '#60a5fa',
 } as const;
 
 function fallbackMaterial(action: QuestMenuAction) {
@@ -177,16 +194,6 @@ function leave(session: QuestArenaSession) {
 }
 
 const fmtVec = (v: readonly number[]) => `[${v.map((n) => n.toFixed(3)).join(',')}]`;
-
-function formatDiagnostics(tracker: QuestHeadTrackerSnapshot): string {
-  const { calibration, sampleHz, pose, status } = tracker;
-  const hz = sampleHz === null ? '--' : sampleHz.toFixed(0);
-  const resets = tracker.referenceResets ? `, reset x${tracker.referenceResets}` : '';
-  const header = `Rig ${status} (${calibration.source}, ${calibration.posture}, e${calibration.entry}, ${hz}Hz${resets})`;
-  if (!pose) return `${header}\nPose: awaiting head samples`;
-  const flags = `${pose.clamped ? ' CLAMP' : ''}${pose.outOfBounds ? ' OOB' : ''}`;
-  return `${header}\nL ${pose.lateral.toFixed(2)}m V ${pose.vertical.toFixed(2)}m F ${pose.forward.toFixed(2)}m yaw ${pose.yawRelative.toFixed(0)}deg${flags}`;
-}
 
 function QuestFighter({
   id,
@@ -314,11 +321,17 @@ function QuestRing({
   );
 }
 
-function QuestMenuFallbackButtons({ buttons }: { buttons: QuestMenuButton[] }) {
+function QuestMenuFallbackButtons({
+  buttons,
+  hasMessages,
+}: {
+  buttons: QuestMenuButton[];
+  hasMessages: boolean;
+}) {
   return (
     <>
       {buttons.map((button) => {
-        const buttonFrame = questMenuButtonFrame(button);
+        const buttonFrame = questMenuButtonFrame(button, hasMessages);
         const dark = button.action === 'back' || button.action === 'posture';
         return (
           <ViroNode
@@ -345,11 +358,21 @@ function QuestMenuFallbackButtons({ buttons }: { buttons: QuestMenuButton[] }) {
   );
 }
 
-function QuestMenuText({ text, width, height }: { text: string; width: number; height: number }) {
+function QuestMenuText({
+  text,
+  width,
+  height,
+  y,
+}: {
+  text: string;
+  width: number;
+  height: number;
+  y: number;
+}) {
   return (
     <ViroText
       text={text}
-      position={[0, 0.06, 0.004]}
+      position={[0, y, 0.004]}
       scale={textScale}
       width={width / TEXT_SCALE}
       height={height / TEXT_SCALE}
@@ -359,8 +382,14 @@ function QuestMenuText({ text, width, height }: { text: string; width: number; h
 }
 
 // Hover feedback drawn by Viro in front of the layer, so pointing never redraws it.
-function QuestMenuFocus({ button }: { button: QuestMenuButton }) {
-  const frame = questMenuButtonFrame(button);
+function QuestMenuFocus({
+  button,
+  hasMessages,
+}: {
+  button: QuestMenuButton;
+  hasMessages: boolean;
+}) {
+  const frame = questMenuButtonFrame(button, hasMessages);
   const width = frame.width + focusPad * 2;
   const height = frame.height + focusPad * 2;
   const edges: [number, number, number, number][] = [
@@ -389,9 +418,10 @@ function QuestMenu({
   page,
   acknowledged,
   posture,
-  tracker,
+  calibration,
   lines,
   layer,
+  titleLayer,
   hover,
   onPress,
   onHover,
@@ -399,60 +429,93 @@ function QuestMenu({
   page: QuestMenuPage;
   acknowledged: boolean;
   posture: QuestMenuPosture;
-  tracker: QuestHeadTrackerSnapshot;
+  calibration: Calibration;
   lines: string[];
   layer: QuestMenuLayerSnapshot;
+  titleLayer: QuestMenuLayerSnapshot;
   hover: QuestMenuAction | null;
   onPress: (action: QuestMenuAction, clickState: number, source: unknown) => void;
   onHover: (action: QuestMenuAction, hovering: boolean, source: unknown) => void;
 }) {
-  // The layer pose (questMenuPanelPose) is built from these same two transforms.
-  const frame = menuFrame(tracker.calibration);
-  const pose = QUEST_MENU_POSE[page];
-  const buttons = questMenuButtons(page, { acknowledged, posture });
+  // The layer poses (questMenuPanelPose / questMenuTitlePose) are built from these same transforms.
+  const frame = menuFrame(calibration);
+  const basePose = QUEST_MENU_POSE[page];
+  const layerOn = questMenuLayerVisible(layer.mode);
+  const titleOn = questMenuLayerVisible(titleLayer.mode);
+  const fallbackNotice = layerOn ? '' : questMenuLayerNotice(layer);
+  const fallbackText = [fallbackNotice, ...lines].filter(Boolean).join('\n');
+  const hasMessages = layerOn ? lines.length > 0 : fallbackText.length > 0;
+  const cardPose = hasMessages
+    ? {
+        position: [
+          basePose.position[0],
+          basePose.position[1] + QUEST_MENU_ALERT_SHIFT_M,
+          basePose.position[2],
+        ] as [number, number, number],
+        rotation: basePose.rotation,
+      }
+    : basePose;
+  const card = questMenuCardMetrics(hasMessages);
+  const buttons = questMenuButtons(page, { acknowledged, posture, hasMessages });
   const hovered = buttons.find((button) => button.action === hover) ?? null;
-  const textWidth = QUEST_MENU_SIZE.widthM * 0.9;
-  const textHeight = QUEST_MENU_SIZE.heightM * 0.45;
+  const textWidth = card.widthM * 0.9;
+  const textHeight = 0.2;
+  const titlePose = QUEST_TITLE_POSE[page];
+  const titleSize = QUEST_TITLE_SIZE[page];
   return (
     <ViroNode position={[...frame.position]} rotation={[0, frame.rotationY, 0]}>
-      <ViroNode position={pose.position} rotation={pose.rotation}>
-        {questMenuLayerVisible(layer.mode) ? (
-          // Depth-writing, zero-alpha hole for the quad layer underneath. Drawn
-          // first; whatever is in front of the panel still draws over it.
+      {!titleOn ? (
+        <ViroNode position={titlePose.position} rotation={titlePose.rotation}>
+          <ViroText
+            text="Neo"
+            position={[0, titleSize.heightM * 0.34, 0]}
+            scale={textScale}
+            width={titleSize.widthM / TEXT_SCALE}
+            height={(titleSize.heightM * 0.28) / TEXT_SCALE}
+            style={fallbackTitleNeoStyle}
+          />
+          <ViroText
+            text={"Rock 'Em Sock 'Em\nRobots"}
+            position={[0, -titleSize.heightM * 0.14, 0]}
+            scale={textScale}
+            width={titleSize.widthM / TEXT_SCALE}
+            height={(titleSize.heightM * 0.7) / TEXT_SCALE}
+            style={fallbackTitleMainStyle}
+          />
+        </ViroNode>
+      ) : null}
+      <ViroNode position={cardPose.position} rotation={cardPose.rotation}>
+        {layerOn ? (
+          // Depth-writing, zero-alpha hole for the compact quad layer underneath.
           <ViroQuad
-            width={QUEST_MENU_SIZE.widthM}
-            height={QUEST_MENU_SIZE.heightM}
-            materials={['questMenuLayerMask']}
+            width={card.widthM}
+            height={card.heightM}
+            materials={[hasMessages ? 'questMenuLayerMaskAlert' : 'questMenuLayerMask']}
             renderingOrder={-100}
             ignoreEventHandling
           />
         ) : (
           <>
             <ViroQuad
-              width={QUEST_MENU_SIZE.widthM}
-              height={QUEST_MENU_SIZE.heightM}
+              width={card.widthM}
+              height={card.heightM}
               materials={['questMenuBacking']}
               ignoreEventHandling
             />
-            <QuestMenuText
-              text={[questMenuLayerNotice(layer), ...lines].filter(Boolean).join('\n')}
-              width={textWidth}
-              height={textHeight}
-            />
-            <QuestMenuFallbackButtons buttons={buttons} />
+            {fallbackText ? (
+              <QuestMenuText
+                text={fallbackText}
+                width={textWidth}
+                height={textHeight}
+                y={card.heightM / 2 - 0.12}
+              />
+            ) : null}
+            <QuestMenuFallbackButtons buttons={buttons} hasMessages={hasMessages} />
           </>
         )}
-        {hovered ? <QuestMenuFocus button={hovered} /> : null}
-        <ViroText
-          text={formatDiagnostics(tracker)}
-          position={[0, -QUEST_MENU_SIZE.heightM / 2 - 0.08, 0.002]}
-          scale={textScale}
-          width={QUEST_MENU_SIZE.widthM / TEXT_SCALE}
-          height={0.14 / TEXT_SCALE}
-          style={diagnosticsStyle}
-        />
+        {hovered ? <QuestMenuFocus button={hovered} hasMessages={hasMessages} /> : null}
         {buttons.map((button) => {
-          const buttonFrame = questMenuButtonFrame(button);
+          const buttonFrame = questMenuButtonFrame(button, hasMessages);
           return (
             <ViroQuad
               key={`hit-${button.action}`}
@@ -494,7 +557,35 @@ export default function QuestArenaScene() {
       { enabled: questMenuLayer.get() === 'compositor' }
     )
   );
+  const [titleCompositor] = useState(() =>
+    createQuestMenuCompositor(
+      {
+        available: () =>
+          questPanelAvailable() &&
+          typeof questPanelNative?.openTitle === 'function' &&
+          typeof questPanelNative?.drawTitle === 'function' &&
+          typeof questPanelNative?.statusTitle === 'function' &&
+          typeof questPanelNative?.hideTitle === 'function',
+        open: () => {
+          if (!questPanelNative?.openTitle) {
+            throw new Error('QuestPanel title overlay is not linked.');
+          }
+          return questPanelNative.openTitle();
+        },
+        draw: (owner, spec) => questPanelNative?.drawTitle?.(owner, spec),
+        status: (owner) => questPanelNative?.statusTitle?.(owner) ?? -1,
+        hide: (owner) => questPanelNative?.hideTitle?.(owner),
+        log: (level, message) => logMenu(level, `title ${message}`),
+      },
+      { enabled: questMenuLayer.get() === 'compositor' }
+    )
+  );
   const layer = useSyncExternalStore(compositor.subscribe, compositor.getSnapshot);
+  const titleLayer = useSyncExternalStore(titleCompositor.subscribe, titleCompositor.getSnapshot);
+  const [input] = useState(createSceneQuestInputSource);
+  const [markerPipeline, setMarkerPipeline] = useState<'render-thread' | 'js-fallback'>(
+    'render-thread'
+  );
   const [fonts, setFonts] = useState<QuestMenuFonts>(() => ({
     body: initialAssetRef(menuFontModules.body),
     button: initialAssetRef(menuFontModules.button),
@@ -511,15 +602,33 @@ export default function QuestArenaScene() {
   const posture = tracker.calibration.posture;
   const calibration = tracker.calibration;
 
+  const failureMessage =
+    view.message && /failed|could not|error|unavailable|timeout/i.test(view.message)
+      ? view.message
+      : null;
+
   const menuLines = useMemo(() => {
-    const statusLine = tracker.message
-      ? `Head rig (${posture}, ${tracker.status}): ${tracker.message}`
-      : `Head rig (${posture}): ${tracker.status}.`;
-    const lines = [...view.lines, statusLine];
+    if (view.leaving) return [...view.lines];
+    const lines: string[] = [];
+    if (tracker.status === 'no-samples' && tracker.message) lines.push(tracker.message);
+    if (failureMessage) lines.push(failureMessage);
     if (tracker.outOfBounds) lines.push('Outside bounds: return toward the stance ring center.');
+    return lines;
+  }, [
+    failureMessage,
+    tracker.message,
+    tracker.outOfBounds,
+    tracker.status,
+    view.leaving,
+    view.lines,
+  ]);
+
+  const developerLines = useMemo(() => {
+    const lines = view.leaving ? [] : [...view.lines];
+    if (view.message && view.message !== failureMessage) lines.push(view.message);
     lines.push(systemRecenterHint);
     return lines;
-  }, [view.lines, posture, tracker.status, tracker.message, tracker.outOfBounds]);
+  }, [failureMessage, view.leaving, view.lines, view.message]);
 
   // Pose, panel and hit targets all follow the requested screen at once.
   const inputKey = `${view.page}:${view.acknowledged}`;
@@ -527,32 +636,36 @@ export default function QuestArenaScene() {
   const visibleHover = questMenuButtons(view.page, {
     acknowledged: view.acknowledged,
     posture,
+    hasMessages: menuLines.length > 0,
   }).some((button) => button.action === hover)
     ? hover
     : null;
-  // Hover is not part of the panel image; only page, text, posture, fonts and title assets are.
+  // Hover is not part of the panel image; only page, text, posture and fonts are.
   const menu = useMemo(
     () =>
       buildQuestMenu(view.page, menuLines, {
         acknowledged: view.acknowledged,
         posture,
         fonts,
-        titles,
       }),
-    [fonts, menuLines, posture, titles, view.acknowledged, view.page]
+    [fonts, menuLines, posture, view.acknowledged, view.page]
   );
+  const titleModel = useMemo(() => buildQuestMenuTitle({ titles, fonts }), [fonts, titles]);
   const panelLabel = `${view.page} ack=${view.acknowledged} ${posture}`;
 
   useEffect(() => {
     questHeadTracker.setRefSpaceEpochSource(() => questPanelNative?.refSpaceEpoch?.() ?? 0);
     questRuntime.sceneMounted();
+    input.start();
     return () => {
+      input.stop();
       questHeadTracker.dispose();
       session.dispose();
       compositor.dispose();
+      titleCompositor.dispose();
       questRuntime.sceneUnmounted();
     };
-  }, [compositor, session]);
+  }, [compositor, input, session, titleCompositor]);
 
   // Dev builds serve TTFs/PNGs over Metro HTTP until downloaded to a local file;
   // release builds resolve packaged resource names synchronously above.
@@ -625,10 +738,27 @@ export default function QuestArenaScene() {
   useEffect(() => {
     compositor.present({
       label: panelLabel,
-      pose: questMenuPanelPose(calibration, view.page).pose,
+      pose: questMenuPanelPose(calibration, view.page, menu.hasMessages).pose,
       ops: menu.ops,
+      widthPx: menu.widthPx,
+      heightPx: menu.heightPx,
+      widthM: menu.widthM,
+      heightM: menu.heightM,
     });
   }, [calibration, compositor, menu, panelLabel, view.page]);
+
+  useEffect(() => {
+    const titleSize = QUEST_TITLE_SIZE[view.page];
+    titleCompositor.present({
+      label: `title ${view.page}`,
+      pose: questMenuTitlePose(calibration, view.page).pose,
+      ops: titleModel.ops,
+      widthPx: QUEST_TITLE_TEXTURE.widthPx,
+      heightPx: QUEST_TITLE_TEXTURE.heightPx,
+      widthM: titleSize.widthM,
+      heightM: titleSize.heightM,
+    });
+  }, [calibration, titleCompositor, titleModel, view.page]);
 
   const onAction = (action: QuestMenuAction) => {
     logMenu('info', `action ${action} on ${view.page}`);
@@ -649,13 +779,23 @@ export default function QuestArenaScene() {
       <ViroAmbientLight color="#ffffff" intensity={700} />
       <ViroDirectionalLight color="#ffffff" intensity={900} direction={[-0.4, -1, -0.3]} />
       {view.page === 'ring' ? <QuestRing view={view} session={session} tracker={tracker} /> : null}
+      <QuestInputMarkers source={input} onPipelineChange={setMarkerPipeline} />
+      <QuestDiagnosticsPanel
+        source={input}
+        tracker={tracker}
+        developerLines={developerLines}
+        fonts={fonts}
+        menuLayer={layer}
+        markerPipeline={markerPipeline}
+      />
       <QuestMenu
         page={view.page}
         acknowledged={view.acknowledged}
         posture={posture}
-        tracker={tracker}
+        calibration={calibration}
         lines={menuLines}
         layer={layer}
+        titleLayer={titleLayer}
         hover={visibleHover}
         onPress={(action, clickState, source) => {
           if (inputKeyRef.current !== inputKey) {
