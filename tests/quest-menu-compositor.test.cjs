@@ -12,6 +12,7 @@ const {
   questMenuLayerVisible,
   questMenuPanelPose,
   questMenuPanelSpec,
+  questMenuTitlePose,
 } = require('../src/features/quest-vr/quest-menu-compositor.ts');
 const { questMenuLayer } = require('../src/features/quest-vr/quest-menu-layer.ts');
 const { DEFAULT_CALIBRATION, menuFrame } = require('../src/features/quest-vr/quest-head-rig.ts');
@@ -19,7 +20,9 @@ const {
   QUEST_MENU_POSE,
   QUEST_MENU_SIZE,
   QUEST_MENU_TEXTURE,
+  QUEST_TITLE_POSE,
   buildQuestMenu,
+  buildQuestMenuTitle,
 } = require('../src/features/quest-vr/quest-menu-layout.ts');
 
 const repo = path.join(__dirname, '..');
@@ -86,10 +89,15 @@ test('the layer pose is the panel node the scene builds, for any calibration', (
       assert.equal(yaw, frame.rotationY + local.rotation[1]);
     }
   }
-  // Default calibration: the menu is straight ahead, 1.5 m away, facing the wearer.
+  // Default calibration: the compact menu card is straight ahead, 1.5 m away, facing the wearer.
   const menu = questMenuPanelPose(DEFAULT_CALIBRATION, 'menu');
-  assert.ok(close(menu.position, [0, -0.08, -1.5]));
+  assert.ok(close(menu.position, [0, -0.18, -1.5]));
   assert.ok(close(menu.pose.slice(3), [0, 0, 0, 1]));
+
+  // Floating title poses align with QUEST_TITLE_POSE[page] under menuFrame(cal).
+  const ringTitle = questMenuTitlePose(DEFAULT_CALIBRATION, 'ring');
+  assert.ok(close(ringTitle.position, QUEST_TITLE_POSE.ring.position));
+  assert.ok(close(ringTitle.pose.slice(3), [0, 0, 0, 1]));
 });
 
 test('every screen fits the native panel limits and hover is never part of the image', () => {
@@ -102,35 +110,40 @@ test('every screen fits the native panel limits and hover is never part of the i
   for (const page of ['menu', 'ring']) {
     for (const acknowledged of [false, true]) {
       for (const posture of ['standing', 'seated']) {
-        for (const titles of [undefined, sampleTitles]) {
-          const lines = Array.from({ length: 9 }, () => longLine);
+        for (const lines of [[], Array.from({ length: 9 }, () => longLine)]) {
           const menu = buildQuestMenu(page, lines, {
             acknowledged,
             posture,
-            titles,
           });
           const spec = JSON.parse(
             questMenuPanelSpec({
               label: `${page}`,
-              pose: questMenuPanelPose(DEFAULT_CALIBRATION, page).pose,
+              pose: questMenuPanelPose(DEFAULT_CALIBRATION, page, menu.hasMessages).pose,
               ops: menu.ops,
+              widthPx: menu.widthPx,
+              heightPx: menu.heightPx,
+              widthM: menu.widthM,
+              heightM: menu.heightM,
             })
           );
           // QuestPanelModule: 1..160 ops, 1..4096 px, 0..2 m; QuestPanelLayer.h: the same.
           assert.ok(spec.ops.length >= 1 && spec.ops.length <= 160, `${spec.ops.length} ops`);
-          assert.equal(spec.widthPx, QUEST_MENU_TEXTURE.widthPx);
-          assert.equal(spec.heightPx, QUEST_MENU_TEXTURE.heightPx);
+          assert.equal(spec.widthPx, menu.widthPx);
+          assert.equal(spec.heightPx, menu.heightPx);
           assert.ok(spec.widthPx <= 4096 && spec.heightPx <= 4096);
-          assert.equal(spec.widthM, QUEST_MENU_SIZE.widthM);
-          assert.equal(spec.heightM, QUEST_MENU_SIZE.heightM);
+          assert.equal(spec.widthM, menu.widthM);
+          assert.equal(spec.heightM, menu.heightM);
           assert.ok(spec.widthM <= 2 && spec.heightM <= 2);
           assert.equal(spec.pose.length, 7);
           assert.ok(spec.pose.every(Number.isFinite));
-          for (const op of spec.ops) assert.ok(['roundRect', 'text', 'image'].includes(op.op));
+          for (const op of spec.ops) assert.ok(['roundRect', 'text'].includes(op.op));
         }
       }
     }
   }
+  const titleModel = buildQuestMenuTitle({ titles: sampleTitles });
+  assert.equal(titleModel.ops.filter((op) => op.op === 'image').length, 3);
+  assert.equal(titleModel.ops.some((op) => op.op === 'roundRect'), false);
   // The same screen with and without a hover option draws the same pixels.
   const plain = buildQuestMenu('menu', ['a'], { posture: 'standing' });
   const hovered = buildQuestMenu('menu', ['a'], { posture: 'standing', hover: 'solo' });
@@ -359,6 +372,7 @@ test('QuestPanelModule and the renderer patch agree on the JNI contract', () => 
   assert.deepEqual(lock.patches, [
     '0001-openxr-pointer-depth-origin-reticle.patch',
     '0002-openxr-quest-panel-layer.patch',
+    '0003-openxr-quest-input-sampler.patch',
   ]);
   assert.match(kotlin, /^package expo\.modules\.questpanel$/m);
   assert.match(kotlin, /class QuestPanelModule : Module\(\)/);
@@ -372,6 +386,10 @@ test('QuestPanelModule and the renderer patch agree on the JNI contract', () => 
     nativeHide: ['void', '(JNIEnv *, jobject)'],
     nativePose: ['jboolean', 'jfloatArray pose'],
     nativeDraw: ['jboolean', 'jfloatArray pose'],
+    nativeTitleStatus: ['jint', '(JNIEnv *, jobject)'],
+    nativeTitleHide: ['void', '(JNIEnv *, jobject)'],
+    nativeTitlePose: ['jboolean', 'jfloatArray pose'],
+    nativeTitleDraw: ['jboolean', 'jfloatArray pose'],
   };
   for (const [name, [returns, args]] of Object.entries(jni)) {
     const symbol = `Java_expo_modules_questpanel_QuestPanelModule_${name}`;
@@ -382,6 +400,8 @@ test('QuestPanelModule and the renderer patch agree on the JNI contract', () => 
     assert.match(kotlin, new RegExp(`private external fun ${name}\\(`));
   }
   assert.match(kotlin, /Function\("refSpaceEpoch"\)/);
+  assert.match(kotlin, /Function\("openTitle"\)/);
+  assert.match(kotlin, /Function\("drawTitle"\)/);
   assert.match(kotlin, /Typeface\.createFromFile/);
   assert.match(kotlin, /drawExecutor/);
   assert.match(
@@ -389,6 +409,8 @@ test('QuestPanelModule and the renderer patch agree on the JNI contract', () => 
     /external fun nativeDraw\(\s*rgba: ByteArray,\s*width: Int,\s*height: Int,\s*widthM: Float,\s*heightM: Float,\s*pose: FloatArray\s*\): Boolean/
   );
   assert.match(kotlin, /external fun nativePose\(pose: FloatArray\): Boolean/);
+  assert.match(kotlin, /external fun nativeTitleDraw\(/);
+  assert.match(kotlin, /external fun nativeTitlePose\(pose: FloatArray\): Boolean/);
   assert.match(
     read('modules/quest-panel/native/consumer-rules.pro'),
     /-keep class expo\.modules\.questpanel\.QuestPanelModule \{ \*; \}/
@@ -424,13 +446,18 @@ test('the renderer submits the layer under the scene and blends the eye buffer o
   ]);
   const pointer = read('tools/quest/viro-renderer/0001-openxr-pointer-depth-origin-reticle.patch');
   for (const file of files) assert.ok(!pointer.includes(`a/${file}`), `${file} is not in 0001`);
-  // Quad layer, pushed before the projection layer (OpenXR draws later layers on top).
+  // Quad layer, pushed before the projection layer (OpenXR draws later layers on top);
+  // floating transparent title overlay pushed after the projection layer.
   assert.match(added, /XR_TYPE_COMPOSITION_LAYER_QUAD/);
   const cpp = patch.slice(
     patch.indexOf('diff --git a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp')
   );
   assert.ok(
     cpp.indexOf('layers.push_back(questPanel)') < cpp.indexOf('// Projection layer (3D scene)')
+  );
+  assert.ok(
+    cpp.indexOf('layers.push_back(questTitlePanel)') >
+      cpp.indexOf('layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&projLayer))')
   );
   // Premultiplied source alpha, only as the else of the passthrough branch and
   // only while a panel is submitted; the brace and push_back are upstream context.

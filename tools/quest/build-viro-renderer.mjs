@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Builds the Quest-only Viro renderer: ViroCore v3.0.3 plus the patches in
 // tools/quest/viro-renderer, applied in lock.json order (0001 OpenXR pointer, 0002 menu
-// compositor layer). Only arm64 libviro_renderer.so changes. The Java bridge, the
+// compositor layer, 0003 controller input sampler). Only arm64 libviro_renderer.so
+// changes. The Java bridge, the
 // other native libraries and node_modules stay stock. Output goes to
 // native/quest-viro-renderer, which tools/quest/with-quest-viro-renderer.cjs wires into
 // QUEST_BUILD=1 prebuilds.
@@ -307,10 +308,29 @@ const panelJni = [
   'nativePose',
   'nativeDraw',
   'nativeRefSpaceEpoch',
+  'nativeTitleStatus',
+  'nativeTitleHide',
+  'nativeTitlePose',
+  'nativeTitleDraw',
 ].map((name) => `Java_expo_modules_questpanel_QuestPanelModule_${name}`);
 const missingPanelJni = pristine ? [] : panelJni.filter((symbol) => !candidate.exports.has(symbol));
 if (missingPanelJni.length)
   problems.push(`menu layer JNI methods are not exported: ${missingPanelJni.join(', ')}`);
+// 0003 adds the controller input sampler, render-thread markers and sky diagnostics layer.
+const inputJni = [
+  'nativeVersion',
+  'nativeSetMarkersEnabled',
+  'nativeRead',
+  'nativeProfile',
+  'nativeDiagStatus',
+  'nativeDiagHide',
+  'nativeDiagPose',
+  'nativeDiagDraw',
+  'nativeDiagDrawRegion',
+].map((name) => `Java_expo_modules_questinput_QuestInputModule_${name}`);
+const missingInputJni = pristine ? [] : inputJni.filter((symbol) => !candidate.exports.has(symbol));
+if (missingInputJni.length)
+  problems.push(`input sampler JNI methods are not exported: ${missingInputJni.join(', ')}`);
 if (reference) {
   const pristineMissingJni = [...declared].filter((symbol) => !reference.exports.has(symbol));
   const jniRegression = missingJni.filter((symbol) => !pristineMissingJni.includes(symbol));

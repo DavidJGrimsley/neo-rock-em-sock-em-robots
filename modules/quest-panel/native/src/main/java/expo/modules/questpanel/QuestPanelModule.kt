@@ -28,31 +28,23 @@ import java.util.concurrent.Executors
 private const val TAG = "QuestPanel"
 
 // QuestPanelLayer.h in tools/quest/viro-renderer/0002-openxr-quest-panel-layer.patch.
-private const val NATIVE_VERSION = 2
+private const val NATIVE_VERSION = 3
 
-// Draws the clean headset compositor UI with Android Canvas and hands the pixels
-// and pose to the patched Viro renderer, which submits them as an OpenXR quad
-// layer under the scene. Adapted from the Medical Viewer QuestPanelModule
-// (owner token, one worker that coalesces to the newest spec). Nothing here
-// touches Viro materials or the XR session.
+// Draws the compact headset compositor button card (underlay) and the floating
+// transparent branded title (overlay) with Android Canvas, handing pixels and
+// poses to the patched Viro renderer. Nothing here touches Viro materials or
+// the XR session.
 class QuestPanelModule : Module() {
-  @Volatile private var owner = 0
-  @Volatile private var drawFailed = false
-  private val drawLock = Any()
-  private val queueLock = Any()
   private val drawExecutor = Executors.newSingleThreadExecutor()
-  private var pendingDraw: Pair<Int, String>? = null
-  private var drawRunning = false
-
-  // Guarded by drawLock.
-  private var panelBitmap: Bitmap? = null
-  private var panelPixels: ByteBuffer? = null
-  // The pixels the renderer holds; a spec with the same pixels only moves them.
-  private var drawnPixelsKey: String? = null
+  private val assetLock = Any()
   private val typefaces = HashMap<String, Typeface>()
   private val warnedFonts = HashSet<String>()
   private val bitmaps = HashMap<String, Bitmap>()
   private val warnedImages = HashSet<String>()
+  private val colorCache = HashMap<String, Int>()
+  private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+  private val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+  private val glyphPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
 
   private external fun nativeVersion(): Int
   private external fun nativeRefSpaceEpoch(): Int
@@ -60,6 +52,18 @@ class QuestPanelModule : Module() {
   private external fun nativeHide()
   private external fun nativePose(pose: FloatArray): Boolean
   private external fun nativeDraw(
+    rgba: ByteArray,
+    width: Int,
+    height: Int,
+    widthM: Float,
+    heightM: Float,
+    pose: FloatArray
+  ): Boolean
+
+  private external fun nativeTitleStatus(): Int
+  private external fun nativeTitleHide()
+  private external fun nativeTitlePose(pose: FloatArray): Boolean
+  private external fun nativeTitleDraw(
     rgba: ByteArray,
     width: Int,
     height: Int,
@@ -78,18 +82,169 @@ class QuestPanelModule : Module() {
     }
   }
 
-  private fun releaseRaster() {
-    panelBitmap?.recycle()
-    panelBitmap = null
-    panelPixels = null
-    drawnPixelsKey = null
+  private inner class PanelSlot(
+    private val slotName: String,
+    private val nativeStatusFn: () -> Int,
+    private val nativeHideFn: () -> Unit,
+    private val nativePoseFn: (FloatArray) -> Boolean,
+    private val nativeDrawFn: (ByteArray, Int, Int, Float, Float, FloatArray) -> Boolean
+  ) {
+    @Volatile var owner = 0
+    @Volatile var drawFailed = false
+    private val drawLock = Any()
+    private val queueLock = Any()
+    private var pendingDraw: Pair<Int, String>? = null
+    private var drawRunning = false
+
+    private var panelBitmap: Bitmap? = null
+    private var panelPixels: ByteArray? = null
+    private var drawnPixelsKey: String? = null
+
+    private fun releaseRaster() {
+      panelBitmap?.recycle()
+      panelBitmap = null
+      panelPixels = null
+      drawnPixelsKey = null
+    }
+
+    fun open(): Int = synchronized(drawLock) {
+      check(available) { "Quest compositor renderer is not installed." }
+      nativeHideFn()
+      drawFailed = false
+      drawnPixelsKey = null
+      ++owner
+    }
+
+    fun status(id: Int): Int = if (id == owner && !drawFailed) nativeStatusFn() else -1
+
+    fun hide(id: Int) {
+      synchronized(drawLock) {
+        if (id == owner) {
+          ++owner
+          if (available) nativeHideFn()
+          releaseRaster()
+        }
+      }
+    }
+
+    fun destroy() {
+      synchronized(drawLock) {
+        ++owner
+        if (available) nativeHideFn()
+        releaseRaster()
+      }
+    }
+
+    fun enqueueDraw(id: Int, json: String) {
+      if (id != owner) return
+      synchronized(queueLock) {
+        pendingDraw = id to json
+        if (drawRunning) return
+        drawRunning = true
+      }
+      drawExecutor.execute {
+        while (true) {
+          val next = synchronized(queueLock) {
+            val value = pendingDraw
+            pendingDraw = null
+            if (value == null) drawRunning = false
+            value
+          } ?: break
+          try {
+            synchronized(drawLock) { renderOwned(next.first, next.second) }
+          } catch (error: Throwable) {
+            if (next.first == owner) drawFailed = true
+            Log.e(TAG, "$slotName draw failed", error)
+            synchronized(queueLock) {
+              pendingDraw = null
+              drawRunning = false
+            }
+            break
+          }
+        }
+      }
+    }
+
+    private fun renderOwned(id: Int, json: String) {
+      if (id != owner) return
+      check(available) { "Quest compositor renderer is not installed." }
+      val started = System.nanoTime()
+      val spec = JSONObject(json)
+      val label = spec.optString("label", slotName)
+      val width = spec.getInt("widthPx")
+      val height = spec.getInt("heightPx")
+      val widthM = spec.getDouble("widthM").toFloat()
+      val heightM = spec.getDouble("heightM").toFloat()
+      require(width in 1..4096 && height in 1..4096) { "Menu panel size is out of range." }
+      require(widthM.isFinite() && widthM > 0f && widthM <= 2f) { "Menu panel width is out of range." }
+      require(heightM.isFinite() && heightM > 0f && heightM <= 2f) { "Menu panel height is out of range." }
+      val pose = poseOf(spec)
+      val ops = spec.getJSONArray("ops")
+      require(ops.length() in 1..160) { "Menu panel has no drawing operations." }
+      val pixelsKey = "$width:$height:$widthM:$heightM:$ops"
+      if (pixelsKey == drawnPixelsKey) {
+        check(nativePoseFn(pose)) { "The renderer rejected the $slotName pose." }
+        Log.i(TAG, "moved $slotName $label")
+        return
+      }
+      if (panelBitmap?.width != width || panelBitmap?.height != height) {
+        releaseRaster()
+        panelBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        panelPixels = ByteArray(panelBitmap!!.byteCount)
+      }
+      val bitmap = panelBitmap!!
+      val pixels = panelPixels!!
+      val canvas = Canvas(bitmap)
+      canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+      drawOps(canvas, ops, width)
+      val drawn = System.nanoTime()
+      val buffer = ByteBuffer.wrap(pixels)
+      buffer.rewind()
+      bitmap.copyPixelsToBuffer(buffer)
+      check(nativeDrawFn(pixels, width, height, widthM, heightM, pose)) {
+        "The renderer rejected the $slotName panel."
+      }
+      drawnPixelsKey = pixelsKey
+      val end = System.nanoTime()
+      Log.i(
+        TAG,
+        "drawn $slotName $label ${width}x$height ops=${ops.length()} " +
+          "canvas=${(drawn - started) / 1_000_000}ms total=${(end - started) / 1_000_000}ms"
+      )
+    }
   }
 
+  private val menuSlot = PanelSlot(
+    slotName = "menu",
+    nativeStatusFn = { nativeStatus() },
+    nativeHideFn = { nativeHide() },
+    nativePoseFn = { pose -> nativePose(pose) },
+    nativeDrawFn = { rgba, w, h, wm, hm, pose -> nativeDraw(rgba, w, h, wm, hm, pose) }
+  )
+
+  private val titleSlot = PanelSlot(
+    slotName = "title",
+    nativeStatusFn = { nativeTitleStatus() },
+    nativeHideFn = { nativeTitleHide() },
+    nativePoseFn = { pose -> nativeTitlePose(pose) },
+    nativeDrawFn = { rgba, w, h, wm, hm, pose -> nativeTitleDraw(rgba, w, h, wm, hm, pose) }
+  )
+
   private fun releaseAssets() {
-    for (bitmap in bitmaps.values) {
-      if (!bitmap.isRecycled) bitmap.recycle()
+    synchronized(assetLock) {
+      for (bitmap in bitmaps.values) {
+        if (!bitmap.isRecycled) bitmap.recycle()
+      }
+      bitmaps.clear()
+      typefaces.clear()
+      colorCache.clear()
     }
-    bitmaps.clear()
+  }
+
+  private fun colorOf(hex: String): Int {
+    synchronized(assetLock) {
+      return colorCache.getOrPut(hex) { Color.parseColor(hex) }
+    }
   }
 
   private fun existingFile(value: String): File? {
@@ -164,16 +319,18 @@ class QuestPanelModule : Module() {
 
   private fun resolveBitmap(uri: String): Bitmap? {
     if (uri.isEmpty()) return null
-    bitmaps[uri]?.let { if (!it.isRecycled) return it }
+    synchronized(assetLock) {
+      bitmaps[uri]?.let { if (!it.isRecycled) return it }
+    }
     return try {
       val file = materialize(uri, "png")
       val options = BitmapFactory.Options().apply { inScaled = false }
       val decoded = BitmapFactory.decodeFile(file.absolutePath, options)
         ?: error("Quest panel image could not be decoded: $uri")
-      bitmaps[uri] = decoded
+      synchronized(assetLock) { bitmaps[uri] = decoded }
       decoded
     } catch (error: Throwable) {
-      if (warnedImages.add(uri)) {
+      if (synchronized(assetLock) { warnedImages.add(uri) }) {
         Log.w(TAG, "Falling back to text title for $uri", error)
       }
       null
@@ -182,16 +339,18 @@ class QuestPanelModule : Module() {
 
   private fun resolveTypeface(font: String, bold: Boolean): Typeface {
     if (font.isEmpty()) return if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-    typefaces[font]?.let { return it }
+    synchronized(assetLock) { typefaces[font]?.let { return it } }
     return try {
       val file = materialize(font, "ttf")
-      val face = typefaces[file.absolutePath] ?: Typeface.createFromFile(file).also {
-        typefaces[file.absolutePath] = it
+      val face = synchronized(assetLock) {
+        typefaces[file.absolutePath] ?: Typeface.createFromFile(file).also {
+          typefaces[file.absolutePath] = it
+        }
       }
-      typefaces[font] = face
+      synchronized(assetLock) { typefaces[font] = face }
       face
     } catch (error: Throwable) {
-      if (warnedFonts.add(font)) {
+      if (synchronized(assetLock) { warnedFonts.add(font) }) {
         Log.w(TAG, "Falling back to system typeface for $font", error)
       }
       if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
@@ -207,7 +366,6 @@ class QuestPanelModule : Module() {
 
   private fun drawTextOp(
     canvas: Canvas,
-    width: Int,
     text: String,
     x: Float,
     y: Float,
@@ -219,75 +377,73 @@ class QuestPanelModule : Module() {
     maxWidth: Float
   ) {
     if (text.isEmpty()) return
-    val glyph = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
-    glyph.color = Color.parseColor(color)
-    glyph.textSize = size
-    glyph.typeface = resolveTypeface(font, bold)
-    glyph.textAlign = if (align == "center") Paint.Align.CENTER else Paint.Align.LEFT
-    val shown = TextUtils.ellipsize(
-      text,
-      glyph,
-      maxWidth.coerceAtLeast(0f),
-      TextUtils.TruncateAt.END
-    ).toString()
-    // y is the top of the em box. Canvas draws from the baseline.
-    canvas.drawText(shown, x, y - glyph.ascent(), glyph)
+    synchronized(glyphPaint) {
+      glyphPaint.color = colorOf(color)
+      glyphPaint.textSize = size
+      glyphPaint.typeface = resolveTypeface(font, bold)
+      glyphPaint.textAlign = if (align == "center") Paint.Align.CENTER else Paint.Align.LEFT
+      val shown = TextUtils.ellipsize(
+        text,
+        glyphPaint,
+        maxWidth.coerceAtLeast(0f),
+        TextUtils.TruncateAt.END
+      ).toString()
+      // y is the top of the em box. Canvas draws from the baseline.
+      canvas.drawText(shown, x, y - glyphPaint.ascent(), glyphPaint)
+    }
   }
 
   private fun drawOps(canvas: Canvas, ops: JSONArray, width: Int) {
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    for (index in 0 until ops.length()) {
-      val op = ops.getJSONObject(index)
-      when (op.getString("op")) {
-        "roundRect" -> {
-          paint.style = Paint.Style.FILL
-          paint.color = Color.parseColor(op.getString("color"))
-          val radius = op.optDouble("radius", 0.0).toFloat()
-          canvas.drawRoundRect(rect(op), radius, radius, paint)
-        }
-        "image" -> {
-          val bitmap = resolveBitmap(op.optString("uri"))
-          if (bitmap != null) {
-            canvas.drawBitmap(bitmap, null, rect(op), imagePaint)
-          } else {
-            val fallback = op.optString("text")
-            if (fallback.isNotEmpty()) {
-              val boxW = op.getDouble("width").toFloat()
-              val boxH = op.getDouble("height").toFloat()
-              val size = op.optDouble("size", (boxH * 0.6).coerceAtLeast(32.0)).toFloat()
-              drawTextOp(
-                canvas,
-                width,
-                text = fallback,
-                x = (op.getDouble("x") + boxW / 2.0).toFloat(),
-                y = (op.getDouble("y") + ((boxH - size) / 2.0).coerceAtLeast(0.0)).toFloat(),
-                size = size,
-                color = op.optString("color", "#f8fafc"),
-                align = "center",
-                bold = true,
-                font = op.optString("font"),
-                maxWidth = op.optDouble("maxWidth", width.toDouble()).toFloat()
-              )
+    synchronized(fillPaint) {
+      for (index in 0 until ops.length()) {
+        val op = ops.getJSONObject(index)
+        when (op.getString("op")) {
+          "roundRect" -> {
+            fillPaint.color = colorOf(op.getString("color"))
+            val radius = op.optDouble("radius", 0.0).toFloat()
+            canvas.drawRoundRect(rect(op), radius, radius, fillPaint)
+          }
+          "image" -> {
+            val bitmap = resolveBitmap(op.optString("uri"))
+            if (bitmap != null) {
+              canvas.drawBitmap(bitmap, null, rect(op), imagePaint)
+            } else {
+              val fallback = op.optString("text")
+              if (fallback.isNotEmpty()) {
+                val boxW = op.getDouble("width").toFloat()
+                val boxH = op.getDouble("height").toFloat()
+                val size = op.optDouble("size", (boxH * 0.6).coerceAtLeast(32.0)).toFloat()
+                drawTextOp(
+                  canvas,
+                  text = fallback,
+                  x = (op.getDouble("x") + boxW / 2.0).toFloat(),
+                  y = (op.getDouble("y") + ((boxH - size) / 2.0).coerceAtLeast(0.0)).toFloat(),
+                  size = size,
+                  color = op.optString("color", "#f8fafc"),
+                  align = "center",
+                  bold = true,
+                  font = op.optString("font"),
+                  maxWidth = op.optDouble("maxWidth", width.toDouble()).toFloat()
+                )
+              }
             }
           }
+          "text" -> {
+            drawTextOp(
+              canvas,
+              text = op.optString("text"),
+              x = op.getDouble("x").toFloat(),
+              y = op.getDouble("y").toFloat(),
+              size = op.optDouble("size", 32.0).toFloat(),
+              color = op.optString("color", "#f8fafc"),
+              align = op.optString("align"),
+              bold = op.optBoolean("bold"),
+              font = op.optString("font"),
+              maxWidth = op.optDouble("maxWidth", width.toDouble()).toFloat()
+            )
+          }
+          else -> error("Unknown menu draw operation.")
         }
-        "text" -> {
-          drawTextOp(
-            canvas,
-            width,
-            text = op.optString("text"),
-            x = op.getDouble("x").toFloat(),
-            y = op.getDouble("y").toFloat(),
-            size = op.optDouble("size", 32.0).toFloat(),
-            color = op.optString("color", "#f8fafc"),
-            align = op.optString("align"),
-            bold = op.optBoolean("bold"),
-            font = op.optString("font"),
-            maxWidth = op.optDouble("maxWidth", width.toDouble()).toFloat()
-          )
-        }
-        else -> error("Unknown menu draw operation.")
       }
     }
   }
@@ -300,87 +456,6 @@ class QuestPanelModule : Module() {
     }
   }
 
-  private fun renderPanel(id: Int, json: String) {
-    synchronized(drawLock) { renderOwned(id, json) }
-  }
-
-  // Runs on the draw worker with drawLock held.
-  private fun renderOwned(id: Int, json: String) {
-    if (id != owner) return
-    check(available) { "Quest compositor renderer is not installed." }
-    val started = System.nanoTime()
-    val spec = JSONObject(json)
-    val label = spec.optString("label", "menu")
-    val width = spec.getInt("widthPx")
-    val height = spec.getInt("heightPx")
-    val widthM = spec.getDouble("widthM").toFloat()
-    val heightM = spec.getDouble("heightM").toFloat()
-    require(width in 1..4096 && height in 1..4096) { "Menu panel size is out of range." }
-    require(widthM.isFinite() && widthM > 0f && widthM <= 2f) { "Menu panel width is out of range." }
-    require(heightM.isFinite() && heightM > 0f && heightM <= 2f) { "Menu panel height is out of range." }
-    val pose = poseOf(spec)
-    val ops = spec.getJSONArray("ops")
-    require(ops.length() in 1..160) { "Menu panel has no drawing operations." }
-    val pixelsKey = "$width:$height:$widthM:$heightM:$ops"
-    if (pixelsKey == drawnPixelsKey) {
-      check(nativePose(pose)) { "The renderer rejected the menu pose." }
-      Log.i(TAG, "moved $label")
-      return
-    }
-    if (panelBitmap?.width != width || panelBitmap?.height != height) {
-      releaseRaster()
-      panelBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-      panelPixels = ByteBuffer.allocate(panelBitmap!!.byteCount)
-    }
-    val bitmap = panelBitmap!!
-    val pixels = panelPixels!!
-    val canvas = Canvas(bitmap)
-    canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-    drawOps(canvas, ops, width)
-    val drawn = System.nanoTime()
-    pixels.rewind()
-    bitmap.copyPixelsToBuffer(pixels)
-    check(nativeDraw(pixels.array(), width, height, widthM, heightM, pose)) {
-      "The renderer rejected the menu panel."
-    }
-    drawnPixelsKey = pixelsKey
-    val end = System.nanoTime()
-    Log.i(
-      TAG,
-      "drawn $label ${width}x$height ops=${ops.length()} " +
-        "canvas=${(drawn - started) / 1_000_000}ms total=${(end - started) / 1_000_000}ms"
-    )
-  }
-
-  private fun enqueueDraw(id: Int, json: String) {
-    synchronized(queueLock) {
-      pendingDraw = id to json
-      if (drawRunning) return
-      drawRunning = true
-    }
-    drawExecutor.execute {
-      while (true) {
-        val next = synchronized(queueLock) {
-          val value = pendingDraw
-          pendingDraw = null
-          if (value == null) drawRunning = false
-          value
-        } ?: break
-        try {
-          renderPanel(next.first, next.second)
-        } catch (error: Throwable) {
-          if (next.first == owner) drawFailed = true
-          Log.e(TAG, "Menu panel draw failed", error)
-          synchronized(queueLock) {
-            pendingDraw = null
-            drawRunning = false
-          }
-          break
-        }
-      }
-    }
-  }
-
   override fun definition() = ModuleDefinition {
     Name("QuestPanel")
 
@@ -388,39 +463,20 @@ class QuestPanelModule : Module() {
 
     Function("refSpaceEpoch") { if (available) nativeRefSpaceEpoch() else 0 }
 
-    // A new owner starts hidden, so a stale panel from an earlier scene never shows.
-    Function("open") {
-      synchronized(drawLock) {
-        check(available) { "Quest compositor renderer is not installed." }
-        nativeHide()
-        drawFailed = false
-        drawnPixelsKey = null
-        ++owner
-      }
-    }
+    Function("open") { menuSlot.open() }
+    Function("status") { id: Int -> menuSlot.status(id) }
+    Function("draw") { id: Int, json: String -> menuSlot.enqueueDraw(id, json) }
+    Function("hide") { id: Int -> menuSlot.hide(id) }
 
-    // 1 submitted, 0 not yet drawn or hidden, -1 failed or not the current owner.
-    Function("status") { id: Int -> if (id == owner && !drawFailed) nativeStatus() else -1 }
-
-    Function("draw") { id: Int, json: String -> if (id == owner) enqueueDraw(id, json) }
-
-    Function("hide") { id: Int ->
-      synchronized(drawLock) {
-        if (id == owner) {
-          ++owner
-          if (available) nativeHide()
-          releaseRaster()
-        }
-      }
-    }
+    Function("openTitle") { titleSlot.open() }
+    Function("statusTitle") { id: Int -> titleSlot.status(id) }
+    Function("drawTitle") { id: Int, json: String -> titleSlot.enqueueDraw(id, json) }
+    Function("hideTitle") { id: Int -> titleSlot.hide(id) }
 
     OnDestroy {
-      synchronized(drawLock) {
-        ++owner
-        if (available) nativeHide()
-        releaseRaster()
-        releaseAssets()
-      }
+      menuSlot.destroy()
+      titleSlot.destroy()
+      releaseAssets()
       drawExecutor.shutdown()
     }
   }

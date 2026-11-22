@@ -1,25 +1,51 @@
 // Pixel rectangles and metre frames are the same buttons. The headset menu
-// layer (quest-menu-compositor.ts) draws the pixels with Android Canvas;
-// invisible controller targets use the metre frames. Y is up in metres and
-// down in pixels.
+// card layer (quest-menu-compositor.ts) draws a compact padded button card
+// with Android Canvas, while a separate transparent title overlay floats
+// above the opponent robot head in the ring (and above the card on the initial
+// menu). Invisible controller hit targets use the metre frames. Y is up in
+// metres and down in pixels.
 
-export const QUEST_MENU_TEXTURE = { widthPx: 2048, heightPx: 1152 } as const;
-export const QUEST_MENU_SIZE = { widthM: 1.6, heightM: 0.9 } as const;
-export const QUEST_MENU_CARD_RADIUS_PX = 56;
+export const QUEST_MENU_TEXTURE = { widthPx: 1216, heightPx: 432 } as const;
+export const QUEST_MENU_SIZE = { widthM: 0.95, heightM: 0.3375 } as const;
+export const QUEST_MENU_ALERT_TEXTURE = { widthPx: 1216, heightPx: 720 } as const;
+export const QUEST_MENU_ALERT_SIZE = { widthM: 0.95, heightM: 0.5625 } as const;
+export const QUEST_MENU_ALERT_EXTRA_PX =
+  QUEST_MENU_ALERT_TEXTURE.heightPx - QUEST_MENU_TEXTURE.heightPx;
+export const QUEST_MENU_ALERT_SHIFT_M =
+  (QUEST_MENU_ALERT_SIZE.heightM - QUEST_MENU_SIZE.heightM) / 2;
+export const QUEST_MENU_CARD_RADIUS_PX = 44;
+
+export const QUEST_TITLE_TEXTURE = { widthPx: 1024, heightPx: 400 } as const;
+export const QUEST_TITLE_SIZE = {
+  menu: { widthM: 0.96, heightM: 0.375 },
+  ring: { widthM: 1.2, heightM: 0.46875 },
+} as const;
 
 // Child of menuFrame(cal). Default calibration is the identity, so these metres
 // match OpenXR LOCAL at eye height y = 0. Art and hit targets share this node.
-// - menu: center 1.50 m away, 3 degrees below eye level, about 56 degrees wide.
-// - ring: upright, center 1.60 m away and 32 degrees down, about 61 degrees
-//   wide. The opponent's head and torso stay above it. Its lower legs (the
-//   bottom 0.49-0.64 m of the 1.92 m robot) are behind the panel.
+// - menu: compact button card 1.50 m ahead, 6.8 deg below eye level.
+// - ring: compact button card 1.35 m ahead, 30 deg down; opponent robot stays clear above.
 export const QUEST_MENU_POSE = {
   menu: {
-    position: [0, -0.08, -1.5] as [number, number, number],
+    position: [0, -0.18, -1.5] as [number, number, number],
     rotation: [0, 0, 0] as [number, number, number],
   },
   ring: {
-    position: [0, -0.85, -1.35] as [number, number, number],
+    position: [0, -0.78, -1.35] as [number, number, number],
+    rotation: [0, 0, 0] as [number, number, number],
+  },
+};
+
+// Floating transparent branded title poses in menuFrame(cal):
+// - menu: above the compact button card (and above any expanded alert card), well below sky diagnostics.
+// - ring: floating above the opponent robot head (+13.5..+22.8 deg vs robot top +11.4 deg and sky diag +29.3 deg).
+export const QUEST_TITLE_POSE = {
+  menu: {
+    position: [0, 0.43, -1.5] as [number, number, number],
+    rotation: [0, 0, 0] as [number, number, number],
+  },
+  ring: {
+    position: [0, 0.86, -2.6] as [number, number, number],
     rotation: [0, 0, 0] as [number, number, number],
   },
 };
@@ -29,9 +55,7 @@ export type QuestMenuAction = (typeof QUEST_MENU_ACTIONS)[number];
 export type QuestMenuPage = 'menu' | 'ring';
 export type QuestMenuPosture = 'standing' | 'seated';
 
-// Body lines use size 38, step 48. Six lines finish at y <= 728, keeping the
-// top button row (y = 764) clear below the 3-line iOS title on both pages.
-export const QUEST_MENU_TEXT_LINES_MAX = 6;
+export const QUEST_MENU_TEXT_LINES_MAX = 4;
 
 const INK = '#09090b';
 const PAPER = '#f8fafc';
@@ -79,7 +103,19 @@ export interface QuestMenuDrawOp {
 
 export interface QuestMenuModel {
   page: QuestMenuPage;
+  hasMessages: boolean;
+  widthPx: number;
+  heightPx: number;
+  widthM: number;
+  heightM: number;
   buttons: QuestMenuButton[];
+  ops: QuestMenuDrawOp[];
+  specKey: string;
+}
+
+export interface QuestMenuTitleModel {
+  widthPx: number;
+  heightPx: number;
   ops: QuestMenuDrawOp[];
   specKey: string;
 }
@@ -103,12 +139,19 @@ export interface QuestMenuBuildOptions {
   titles?: QuestMenuTitles;
 }
 
+const cardPaddingX = 48;
+const cardPaddingY = 48;
 const buttonWidth = 520;
 const buttonHeight = 156;
 const buttonGap = 80;
 const rowGap = 24;
-const bottomRowY = 944;
-const topRowY = bottomRowY - buttonHeight - rowGap;
+
+function buttonRowsY(hasMessages: boolean) {
+  const offset = hasMessages ? QUEST_MENU_ALERT_EXTRA_PX : 0;
+  const topRowY = cardPaddingY + offset;
+  const bottomRowY = topRowY + buttonHeight + rowGap;
+  return { topRowY, bottomRowY };
+}
 
 function placeRow(
   items: { action: QuestMenuAction; label: string }[],
@@ -124,28 +167,43 @@ function placeRow(
 }
 
 function resolveButtonArgs(
-  arg: boolean | QuestMenuPosture | { acknowledged?: boolean; posture?: QuestMenuPosture } = false,
+  arg:
+    | boolean
+    | QuestMenuPosture
+    | { acknowledged?: boolean; posture?: QuestMenuPosture; hasMessages?: boolean } = false,
   postureArg?: QuestMenuPosture
-): { acknowledged: boolean; posture: QuestMenuPosture } {
+): { acknowledged: boolean; posture: QuestMenuPosture; hasMessages: boolean } {
   if (typeof arg === 'boolean') {
-    return { acknowledged: arg, posture: postureArg ?? 'standing' };
+    return { acknowledged: arg, posture: postureArg ?? 'standing', hasMessages: false };
   }
   if (arg === 'standing' || arg === 'seated') {
-    return { acknowledged: false, posture: arg };
+    return { acknowledged: false, posture: arg, hasMessages: false };
   }
   return {
     acknowledged: arg.acknowledged === true,
     posture: arg.posture ?? postureArg ?? 'standing',
+    hasMessages: arg.hasMessages === true,
   };
+}
+
+export function questMenuCardMetrics(hasMessages: boolean) {
+  const texture = hasMessages ? QUEST_MENU_ALERT_TEXTURE : QUEST_MENU_TEXTURE;
+  const size = hasMessages ? QUEST_MENU_ALERT_SIZE : QUEST_MENU_SIZE;
+  return { ...texture, ...size };
 }
 
 export function questMenuButtons(
   page: QuestMenuPage,
   acknowledgedOrOptions:
-    boolean | QuestMenuPosture | { acknowledged?: boolean; posture?: QuestMenuPosture } = false,
+    | boolean
+    | QuestMenuPosture
+    | { acknowledged?: boolean; posture?: QuestMenuPosture; hasMessages?: boolean } = false,
   postureArg?: QuestMenuPosture
 ): QuestMenuButton[] {
-  const { acknowledged, posture } = resolveButtonArgs(acknowledgedOrOptions, postureArg);
+  const { acknowledged, posture, hasMessages } = resolveButtonArgs(
+    acknowledgedOrOptions,
+    postureArg
+  );
   const postureButton = {
     action: 'posture' as const,
     label: posture === 'seated' ? 'Seated' : 'Standing',
@@ -164,15 +222,15 @@ export function questMenuButtons(
           { action: 'exit' as const, label: 'Exit' },
         ];
   const topCount = 2;
+  const { topRowY, bottomRowY } = buttonRowsY(hasMessages);
   return [
     ...placeRow(items.slice(0, topCount), topRowY),
     ...placeRow(items.slice(topCount), bottomRowY),
   ];
 }
 
-export function questMenuButtonFrame(button: QuestMenuButton) {
-  const { widthPx, heightPx } = QUEST_MENU_TEXTURE;
-  const { widthM, heightM } = QUEST_MENU_SIZE;
+export function questMenuButtonFrame(button: QuestMenuButton, hasMessages = false) {
+  const { widthPx, heightPx, widthM, heightM } = questMenuCardMetrics(hasMessages);
   return {
     position: [
       ((button.x + button.width / 2) / widthPx - 0.5) * widthM,
@@ -189,14 +247,16 @@ export function questMenuHit(
   localX: number,
   localY: number,
   acknowledgedOrOptions:
-    boolean | QuestMenuPosture | { acknowledged?: boolean; posture?: QuestMenuPosture } = false,
+    | boolean
+    | QuestMenuPosture
+    | { acknowledged?: boolean; posture?: QuestMenuPosture; hasMessages?: boolean } = false,
   postureArg?: QuestMenuPosture
 ): QuestMenuAction | null {
-  const { widthPx, heightPx } = QUEST_MENU_TEXTURE;
-  const { widthM, heightM } = QUEST_MENU_SIZE;
+  const resolved = resolveButtonArgs(acknowledgedOrOptions, postureArg);
+  const { widthPx, heightPx, widthM, heightM } = questMenuCardMetrics(resolved.hasMessages);
   const px = (localX / widthM + 0.5) * widthPx;
   const py = (0.5 - localY / heightM) * heightPx;
-  for (const button of questMenuButtons(page, acknowledgedOrOptions, postureArg)) {
+  for (const button of questMenuButtons(page, resolved)) {
     if (
       px >= button.x &&
       px < button.x + button.width &&
@@ -208,7 +268,7 @@ export function questMenuHit(
   return null;
 }
 
-export function wrapMenuLine(text: string, maxChars = 62): string[] {
+export function wrapMenuLine(text: string, maxChars = 48): string[] {
   const words = text.split(/\s+/).filter(Boolean);
   const lines: string[] = [];
   let current = '';
@@ -287,21 +347,27 @@ function pushButton(
   });
 }
 
-function pushTitles(
-  ops: QuestMenuDrawOp[],
-  titles: QuestMenuTitles | undefined,
-  buttonFont?: string | null
-) {
-  // Match the iOS ArenaDisplayText stack (0.7 : 1.0 : 1.0 heights).
-  const rockWidth = 1000;
+/**
+ * Transparent branded title overlay (`Neo` / `Rock 'Em Sock 'Em` / `Robots`),
+ * rendered onto an ARGB_8888 quad without any card background.
+ */
+export function buildQuestMenuTitle(
+  options: { titles?: QuestMenuTitles; fonts?: QuestMenuFonts } = {}
+): QuestMenuTitleModel {
+  const rockWidth = 960;
   const rockHeight = Math.round(rockWidth / TITLE_ASPECT.rock);
   const neoHeight = Math.round(rockHeight * 0.7);
   const neoWidth = Math.round(neoHeight * TITLE_ASPECT.neo);
   const robotsHeight = rockHeight;
   const robotsWidth = Math.round(robotsHeight * TITLE_ASPECT.robots);
-  const center = QUEST_MENU_TEXTURE.widthPx / 2;
-  const useImages = Boolean(titles?.neo && titles?.rock && titles?.robots);
-  let y = 36;
+  const gap = 8;
+  const totalHeight = neoHeight + gap + rockHeight + gap + robotsHeight;
+  const center = QUEST_TITLE_TEXTURE.widthPx / 2;
+  const titleFont = options.fonts?.button ?? options.fonts?.body ?? undefined;
+  const useImages = Boolean(options.titles?.neo && options.titles?.rock && options.titles?.robots);
+  const ops: QuestMenuDrawOp[] = [];
+  let y = Math.round((QUEST_TITLE_TEXTURE.heightPx - totalHeight) / 2);
+
   const place = (
     uri: string | null | undefined,
     text: string,
@@ -321,8 +387,8 @@ function pushTitles(
         text,
         size: textSize,
         color,
-        ...(buttonFont ? { font: buttonFont } : {}),
-        maxWidth: 1760,
+        ...(titleFont ? { font: titleFont } : {}),
+        maxWidth: QUEST_TITLE_TEXTURE.widthPx - 48,
       });
     } else {
       ops.push({
@@ -334,16 +400,27 @@ function pushTitles(
         color,
         align: 'center',
         bold: true,
-        ...(buttonFont ? { font: buttonFont } : {}),
-        maxWidth: 1760,
+        ...(titleFont ? { font: titleFont } : {}),
+        maxWidth: QUEST_TITLE_TEXTURE.widthPx - 48,
       });
     }
-    y += height + 6;
+    y += height + gap;
   };
-  place(titles?.neo, 'Neo', neoWidth, neoHeight, SECONDARY, 56);
-  place(titles?.rock, "Rock 'Em Sock 'Em", rockWidth, rockHeight, PRIMARY, 76);
-  place(titles?.robots, 'Robots', robotsWidth, robotsHeight, PRIMARY, 76);
-  return y - 6;
+
+  place(options.titles?.neo, 'Neo', neoWidth, neoHeight, SECONDARY, 56);
+  place(options.titles?.rock, "Rock 'Em Sock 'Em", rockWidth, rockHeight, PRIMARY, 76);
+  place(options.titles?.robots, 'Robots', robotsWidth, robotsHeight, PRIMARY, 76);
+
+  return {
+    widthPx: QUEST_TITLE_TEXTURE.widthPx,
+    heightPx: QUEST_TITLE_TEXTURE.heightPx,
+    ops,
+    specKey: JSON.stringify({
+      width: QUEST_TITLE_TEXTURE.widthPx,
+      height: QUEST_TITLE_TEXTURE.heightPx,
+      ops,
+    }),
+  };
 }
 
 export function buildQuestMenu(
@@ -357,59 +434,72 @@ export function buildQuestMenu(
   const posture = options.posture ?? 'standing';
   const bodyFont = options.fonts?.body ?? undefined;
   const buttonFont = options.fonts?.button ?? bodyFont;
-  const buttons = questMenuButtons(page, { acknowledged, posture });
+  const wrappedLines = lines
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => wrapMenuLine(line))
+    .slice(0, QUEST_MENU_TEXT_LINES_MAX);
+  const hasMessages = wrappedLines.length > 0;
+  const { widthPx, heightPx, widthM, heightM } = questMenuCardMetrics(hasMessages);
+  const buttons = questMenuButtons(page, { acknowledged, posture, hasMessages });
+  const { topRowY } = buttonRowsY(hasMessages);
+
   const ops: QuestMenuDrawOp[] = [
     {
       op: 'roundRect',
       x: 0,
       y: 0,
-      width: QUEST_MENU_TEXTURE.widthPx,
-      height: QUEST_MENU_TEXTURE.heightPx,
+      width: widthPx,
+      height: heightPx,
       radius: QUEST_MENU_CARD_RADIUS_PX,
       color: CARD,
     },
   ];
-  const titleBottom = pushTitles(ops, options.titles, buttonFont);
-  const dividerY = titleBottom + 17;
-  ops.push({
-    op: 'roundRect',
-    x: 112,
-    y: dividerY,
-    width: QUEST_MENU_TEXTURE.widthPx - 224,
-    height: 4,
-    radius: 2,
-    color: DIVIDER,
-  });
 
-  let textY = dividerY + 26;
-  for (const line of lines
-    .flatMap((line) => wrapMenuLine(line))
-    .slice(0, QUEST_MENU_TEXT_LINES_MAX)) {
-    if (textY + 40 > topRowY - 24) break;
+  if (hasMessages) {
+    let textY = cardPaddingY;
+    for (const line of wrappedLines) {
+      if (textY + 40 > topRowY - 40) break;
+      ops.push({
+        op: 'text',
+        text: line,
+        x: widthPx / 2,
+        y: textY,
+        size: 36,
+        color: MUTED_PAPER,
+        align: 'center',
+        bold: false,
+        ...(bodyFont ? { font: bodyFont } : {}),
+        maxWidth: widthPx - cardPaddingX * 2,
+      });
+      textY += 48;
+    }
     ops.push({
-      op: 'text',
-      text: line,
-      x: QUEST_MENU_TEXTURE.widthPx / 2,
-      y: textY,
-      size: 38,
-      color: MUTED_PAPER,
-      align: 'center',
-      bold: false,
-      ...(bodyFont ? { font: bodyFont } : {}),
-      maxWidth: 1760,
+      op: 'roundRect',
+      x: cardPaddingX,
+      y: topRowY - 28,
+      width: widthPx - cardPaddingX * 2,
+      height: 4,
+      radius: 2,
+      color: DIVIDER,
     });
-    textY += 48;
   }
+
   for (const button of buttons) {
     pushButton(ops, button, options.hover === button.action, acknowledged, buttonFont);
   }
   return {
     page,
+    hasMessages,
+    widthPx,
+    heightPx,
+    widthM,
+    heightM,
     buttons,
     ops,
     specKey: JSON.stringify({
-      width: QUEST_MENU_TEXTURE.widthPx,
-      height: QUEST_MENU_TEXTURE.heightPx,
+      width: widthPx,
+      height: heightPx,
       ops,
     }),
   };

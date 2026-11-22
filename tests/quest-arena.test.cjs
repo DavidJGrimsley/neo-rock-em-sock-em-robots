@@ -6,11 +6,18 @@ const path = require('node:path');
 const layout = require('../src/features/quest-vr/quest-menu-layout.ts');
 const {
   QUEST_MENU_ACTIONS,
+  QUEST_MENU_ALERT_SHIFT_M,
+  QUEST_MENU_ALERT_SIZE,
+  QUEST_MENU_ALERT_TEXTURE,
   QUEST_MENU_POSE,
   QUEST_MENU_SIZE,
   QUEST_MENU_TEXTURE,
   QUEST_MENU_TEXT_LINES_MAX,
+  QUEST_TITLE_POSE,
+  QUEST_TITLE_SIZE,
+  QUEST_TITLE_TEXTURE,
   buildQuestMenu,
+  buildQuestMenuTitle,
   questMenuButtonFrame,
   questMenuButtons,
   questMenuHit,
@@ -58,14 +65,23 @@ test('menu pixels and controller frames describe the same buttons', () => {
   assert.equal(Object.hasOwn(layout, 'QUEST_RING_POSE'), false);
   assert.deepEqual(QUEST_MENU_ACTIONS, ['solo', 'ready', 'back', 'exit', 'posture']);
   assert.deepEqual(QUEST_MENU_POSE.menu, {
-    position: [0, -0.08, -1.5],
+    position: [0, -0.18, -1.5],
     rotation: [0, 0, 0],
   });
   assert.deepEqual(QUEST_MENU_POSE.ring, {
-    position: [0, -0.85, -1.35],
+    position: [0, -0.78, -1.35],
     rotation: [0, 0, 0],
   });
-  assert.deepEqual(QUEST_MENU_SIZE, { widthM: 1.6, heightM: 0.9 });
+  assert.deepEqual(QUEST_MENU_SIZE, { widthM: 0.95, heightM: 0.3375 });
+  assert.deepEqual(QUEST_MENU_ALERT_SIZE, { widthM: 0.95, heightM: 0.5625 });
+  assert.deepEqual(QUEST_TITLE_POSE.menu, {
+    position: [0, 0.43, -1.5],
+    rotation: [0, 0, 0],
+  });
+  assert.deepEqual(QUEST_TITLE_POSE.ring, {
+    position: [0, 0.86, -2.6],
+    rotation: [0, 0, 0],
+  });
 
   const pages = {
     menu: ['solo', 'posture', 'exit'],
@@ -95,6 +111,16 @@ test('menu pixels and controller frames describe the same buttons', () => {
         assert.ok(button.x + button.width <= QUEST_MENU_TEXTURE.widthPx);
         assert.ok(button.y + button.height <= QUEST_MENU_TEXTURE.heightPx);
         const frame = questMenuButtonFrame(button);
+        const alertFrame = questMenuButtonFrame(
+          questMenuButtons(page, { posture, hasMessages: true }).find(
+            (b) => b.action === button.action
+          ),
+          true
+        );
+        // Alert expansion keeps button world Y invariant when shifted by QUEST_MENU_ALERT_SHIFT_M.
+        assert.ok(
+          Math.abs(alertFrame.position[1] + QUEST_MENU_ALERT_SHIFT_M - frame.position[1]) < 1e-9
+        );
         assert.ok(
           Math.abs(frame.position[0]) + frame.width / 2 <= QUEST_MENU_SIZE.widthM / 2 + 1e-9
         );
@@ -127,6 +153,19 @@ test('menu pixels and controller frames describe the same buttons', () => {
   assert.ok(gapM > 0.06, `button gap ${gapM} m`);
   assert.ok(questMenuButtonFrame(ringButtons[0]).height >= 0.11);
 
+  // Compact card without lines hugs buttons closely with no title or empty card body.
+  for (const page of ['menu', 'ring']) {
+    const compact = buildQuestMenu(page, [], { posture: 'standing' });
+    assert.equal(compact.hasMessages, false);
+    assert.equal(compact.widthPx, QUEST_MENU_TEXTURE.widthPx);
+    assert.equal(compact.heightPx, QUEST_MENU_TEXTURE.heightPx);
+    assert.equal(
+      compact.ops.some((op) => op.op === 'image'),
+      false,
+      'compact card does not embed the floating title'
+    );
+  }
+
   const sampleTitles = {
     neo: 'assets_arena_ui_questlettering_neo',
     rock: 'assets_arena_ui_questlettering_rock',
@@ -135,62 +174,73 @@ test('menu pixels and controller frames describe the same buttons', () => {
   const packed = Array.from({ length: 40 }, () => 'status '.repeat(30).trim());
   for (const page of ['menu', 'ring']) {
     for (const posture of ['standing', 'seated']) {
-      for (const titles of [undefined, sampleTitles]) {
-        const menu = buildQuestMenu(page, packed, { posture, titles });
-        assert.ok(menu.ops.length >= 1 && menu.ops.length <= 64);
-        const block = menu.ops.filter(
-          (op) => op.op === 'text' && op.align === 'center' && op.size === 38
-        );
-        assert.equal(block.length, QUEST_MENU_TEXT_LINES_MAX);
-        const titleOps = titles
-          ? menu.ops.filter((op) => op.op === 'image')
-          : menu.ops.filter((op) => op.op === 'text' && (op.size === 56 || op.size === 76));
-        assert.equal(titleOps.length, 3);
-        const divider = menu.ops.find((op) => op.op === 'roundRect' && op.color === '#334155');
-        assert.ok(divider);
-        for (const title of titleOps) {
-          assert.ok(title.y + (title.height ?? title.size) < divider.y);
-        }
+      const menu = buildQuestMenu(page, packed, { posture });
+      assert.equal(menu.hasMessages, true);
+      assert.equal(menu.heightPx, QUEST_MENU_ALERT_TEXTURE.heightPx);
+      assert.ok(menu.ops.length >= 1 && menu.ops.length <= 64);
+      const block = menu.ops.filter(
+        (op) => op.op === 'text' && op.align === 'center' && op.size === 36
+      );
+      assert.equal(block.length, QUEST_MENU_TEXT_LINES_MAX);
+      const divider = menu.ops.find((op) => op.op === 'roundRect' && op.color === '#334155');
+      assert.ok(divider);
+      for (const text of block) {
+        assert.ok(text.y + text.size < divider.y);
+      }
+      for (const button of menu.buttons) {
+        assert.ok(button.y > divider.y + divider.height);
         for (const text of block) {
-          assert.ok(text.y > divider.y + divider.height);
-        }
-        for (const button of menu.buttons) {
-          for (const text of block) {
-            assert.equal(
-              rectanglesOverlap(button, {
-                x: text.x - text.maxWidth / 2,
-                y: text.y,
-                width: text.maxWidth,
-                height: text.size,
-              }),
-              false
-            );
-          }
+          assert.equal(
+            rectanglesOverlap(button, {
+              x: text.x - text.maxWidth / 2,
+              y: text.y,
+              width: text.maxWidth,
+              height: text.size,
+            }),
+            false
+          );
         }
       }
     }
   }
 
-  const menu = buildQuestMenu('menu', ['Solo places both robots in the ring.'], {
-    titles: sampleTitles,
-  });
+  // Floating branded title has transparent surroundings (zero background roundRect) and fallback text.
+  const imageTitle = buildQuestMenuTitle({ titles: sampleTitles });
+  assert.equal(imageTitle.widthPx, QUEST_TITLE_TEXTURE.widthPx);
+  assert.equal(imageTitle.heightPx, QUEST_TITLE_TEXTURE.heightPx);
+  assert.equal(
+    imageTitle.ops.some((op) => op.op === 'roundRect'),
+    false,
+    'floating title has no background card'
+  );
+  assert.deepEqual(
+    imageTitle.ops.filter((op) => op.op === 'image').map((op) => op.uri),
+    [sampleTitles.neo, sampleTitles.rock, sampleTitles.robots]
+  );
+  const textTitle = buildQuestMenuTitle();
+  assert.equal(
+    textTitle.ops.some((op) => op.op === 'image' || op.op === 'roundRect'),
+    false
+  );
+  assert.deepEqual(
+    textTitle.ops.map((op) => op.text),
+    ['Neo', "Rock 'Em Sock 'Em", 'Robots']
+  );
+
+  const menu = buildQuestMenu('menu', ['Solo places both robots in the ring.']);
   assert.match(menu.specKey, /Solo/);
   assert.match(menu.specKey, /Exit/);
   assert.doesNotMatch(menu.specKey, /Recenter|Quest VR Menu|Solo Ring/);
   assert.match(menu.specKey, /Standing/);
-  assert.match(menu.specKey, /Neo/);
-  assert.match(menu.specKey, /Rock 'Em Sock 'Em/);
-  assert.match(menu.specKey, /Robots/);
   assert.match(menu.specKey, /#60a5fa/);
-  assert.match(menu.specKey, /#a78bfa/);
   assert.match(menu.specKey, /#d99a9a/);
   assert.match(menu.specKey, /#0f172a/);
   assert.deepEqual(menu.ops[0], {
     op: 'roundRect',
     x: 0,
     y: 0,
-    width: QUEST_MENU_TEXTURE.widthPx,
-    height: QUEST_MENU_TEXTURE.heightPx,
+    width: QUEST_MENU_ALERT_TEXTURE.widthPx,
+    height: QUEST_MENU_ALERT_TEXTURE.heightPx,
     radius: layout.QUEST_MENU_CARD_RADIUS_PX,
     color: '#0f172a',
   });
@@ -199,22 +249,6 @@ test('menu pixels and controller frames describe the same buttons', () => {
     false
   );
   assert.doesNotMatch(menu.specKey, /#0f766e|#991b1b|#101826/);
-  assert.deepEqual(
-    menu.ops.filter((op) => op.op === 'image').map((op) => op.uri),
-    [sampleTitles.neo, sampleTitles.rock, sampleTitles.robots]
-  );
-
-  const fallbackMenu = buildQuestMenu('menu', ['Solo places both robots in the ring.']);
-  assert.equal(
-    fallbackMenu.ops.some((op) => op.op === 'image'),
-    false
-  );
-  assert.deepEqual(
-    fallbackMenu.ops
-      .filter((op) => op.op === 'text' && (op.size === 56 || op.size === 76))
-      .map((op) => op.text),
-    ['Neo', "Rock 'Em Sock 'Em", 'Robots']
-  );
 
   const ring = buildQuestMenu('ring', ['Both robots are in the ring.']);
   assert.equal(ring.buttons.find((button) => button.action === 'ready').label, 'Ready');
@@ -227,9 +261,9 @@ test('menu pixels and controller frames describe the same buttons', () => {
   assert.equal(
     questMenuHit(
       'ring',
-      questMenuButtonFrame(set.buttons[0]).position[0],
-      questMenuButtonFrame(set.buttons[0]).position[1],
-      true
+      questMenuButtonFrame(set.buttons[0], true).position[0],
+      questMenuButtonFrame(set.buttons[0], true).position[1],
+      { acknowledged: true, hasMessages: true }
     ),
     'ready'
   );
@@ -244,15 +278,15 @@ test('menu pixels and controller frames describe the same buttons', () => {
 
 const degrees = (radians) => (radians * 180) / Math.PI;
 
-function panelView(pose) {
+function panelView(pose, size = QUEST_MENU_SIZE) {
   const [x, y, z] = pose.position;
   const ahead = -z;
   return {
     distance: Math.hypot(x, y, z),
     elevation: degrees(Math.atan2(y, Math.hypot(x, z))),
-    width: degrees(2 * Math.atan(QUEST_MENU_SIZE.widthM / 2 / ahead)),
-    top: degrees(Math.atan2(y + QUEST_MENU_SIZE.heightM / 2, ahead)),
-    bottom: degrees(Math.atan2(y - QUEST_MENU_SIZE.heightM / 2, ahead)),
+    width: degrees(2 * Math.atan(size.widthM / 2 / ahead)),
+    top: degrees(Math.atan2(y + size.heightM / 2, ahead)),
+    bottom: degrees(Math.atan2(y - size.heightM / 2, ahead)),
   };
 }
 
@@ -263,18 +297,22 @@ test('both menu pages sit at a readable distance and angle', () => {
     assert.ok(pose.position[2] < 0, `${page} must be in front`);
     const view = panelView(pose);
     assert.ok(view.distance >= 1.45 && view.distance <= 1.7, `${page} distance ${view.distance}`);
-    assert.ok(view.width >= 50 && view.width <= 62, `${page} width ${view.width}`);
-    // A 38 px body line on the 2048 px texture stays at least ~1 degree tall.
-    const bodyM = (38 / QUEST_MENU_TEXTURE.widthPx) * QUEST_MENU_SIZE.widthM;
-    assert.ok(degrees(bodyM / view.distance) >= 0.95, `${page} body text too small`);
+    assert.ok(view.width >= 30 && view.width <= 45, `${page} width ${view.width}`);
+    // Button label text (54 px on 1216 px = ~0.042 m) stays > 1.4 degrees tall.
+    const labelM = (54 / QUEST_MENU_TEXTURE.widthPx) * QUEST_MENU_SIZE.widthM;
+    assert.ok(degrees(labelM / view.distance) >= 1.4, `${page} button text too small`);
+
+    const titleView = panelView(QUEST_TITLE_POSE[page], QUEST_TITLE_SIZE[page]);
+    assert.ok(titleView.bottom > view.top + (page === 'menu' ? 0.2 : 0), `${page} title clears card`);
+    assert.ok(titleView.top < 25, `${page} title clears 29.3-deg sky diagnostics`);
   }
   const menu = panelView(QUEST_MENU_POSE.menu);
-  assert.ok(Math.abs(menu.elevation) <= 5, `menu elevation ${menu.elevation}`);
-  assert.ok(Math.abs(menu.distance - 1.5) < 0.01);
+  assert.ok(menu.elevation <= -4 && menu.elevation >= -10, `menu elevation ${menu.elevation}`);
+  assert.ok(Math.abs(menu.distance - 1.51) < 0.02);
   const ring = panelView(QUEST_MENU_POSE.ring);
-  assert.ok(ring.elevation <= -30 && ring.elevation >= -34, `ring elevation ${ring.elevation}`);
-  assert.ok(ring.distance > 1.55, 'ring page must be farther than the old 0.93 m');
-  assert.ok(ring.top < -15, `ring top edge ${ring.top}`);
+  assert.ok(ring.elevation <= -28 && ring.elevation >= -33, `ring elevation ${ring.elevation}`);
+  assert.ok(ring.distance > 1.5, 'ring page must be farther than the old 0.93 m');
+  assert.ok(ring.top < -20, `ring top edge ${ring.top}`);
 });
 
 test('the upright ring panel keeps the opponent head and torso in view', () => {

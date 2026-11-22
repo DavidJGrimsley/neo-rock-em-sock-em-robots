@@ -10,6 +10,11 @@ export interface QuestPanelNative {
   status(owner: number): number;
   draw(owner: number, specJson: string): void;
   hide(owner: number): void;
+  /** Floating transparent branded title overlay slot. */
+  openTitle?(): number;
+  statusTitle?(owner: number): number;
+  drawTitle?(owner: number, specJson: string): void;
+  hideTitle?(owner: number): void;
   /** Monotonic count of Horizon LOCAL reference-space resets observed by OpenXR. */
   refSpaceEpoch?(): number;
 }

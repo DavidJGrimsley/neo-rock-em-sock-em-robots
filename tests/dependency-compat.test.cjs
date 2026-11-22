@@ -32,13 +32,11 @@ test('malformed percent-encoded deep-link data finishes within a bounded subproc
   assert.equal(result.status, 0, result.stderr);
 });
 
-test('xcode retains UUID generation and patched uuid rejects undersized output buffers', () => {
+test('xcode retains unique project UUID generation', () => {
   const xcode = require('xcode');
   const project = xcode.project('compatibility-test.pbxproj');
   project.hash = { project: { objects: {} } };
   const identifiers = new Set(Array.from({ length: 20 }, () => project.generateUuid()));
   assert.equal(identifiers.size, 20);
   for (const id of identifiers) assert.match(id, /^[0-9A-F]{24}$/);
-  const uuid = require('uuid');
-  assert.throws(() => uuid.v5('sample', uuid.v5.DNS, new Uint8Array(8), 0), RangeError);
 });

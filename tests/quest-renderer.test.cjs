@@ -53,7 +53,7 @@ test('Quest prebuild retargets viro_renderer without touching a phone settings f
   const once = pointViroRendererAt(crlf, '../native/quest-viro-renderer');
   assert.match(
     once,
-    /project\(':viro_renderer'\)\.projectDir = new File\('\.\.\/native\/quest-viro-renderer'\) \/\/ Quest pointer and menu layer patches$/m
+    /project\(':viro_renderer'\)\.projectDir = new File\('\.\.\/native\/quest-viro-renderer'\) \/\/ Quest pointer, menu layer and input patches$/m
   );
   assert.equal(pointViroRendererAt(once, '../native/quest-viro-renderer'), once);
   // A line written by the earlier pointer-only build is rewritten, not duplicated.
@@ -61,7 +61,7 @@ test('Quest prebuild retargets viro_renderer without touching a phone settings f
     "project(':viro_renderer').projectDir = new File('../native/quest-viro-renderer') // Quest pointer patch\n";
   assert.equal(
     pointViroRendererAt(older, '../native/quest-viro-renderer'),
-    "project(':viro_renderer').projectDir = new File('../native/quest-viro-renderer') // Quest pointer and menu layer patches\n"
+    "project(':viro_renderer').projectDir = new File('../native/quest-viro-renderer') // Quest pointer, menu layer and input patches\n"
   );
   const lf = "project(':viro_renderer').projectDir = new File('stock')\n";
   assert.match(pointViroRendererAt(lf, 'patched'), /File\('patched'\)/);
