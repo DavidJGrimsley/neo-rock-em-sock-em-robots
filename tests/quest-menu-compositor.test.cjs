@@ -181,7 +181,7 @@ function manualClock() {
 }
 
 function fakeBackend() {
-  const calls = { open: 0, draws: [], hides: [], logs: [] };
+  const calls = { open: 0, draws: [], invalidates: [], hides: [], logs: [] };
   const backend = {
     owner: 0,
     statusValue: 0,
@@ -192,6 +192,7 @@ function fakeBackend() {
       return backend.owner;
     },
     draw: (owner, spec) => calls.draws.push({ owner, spec: JSON.parse(spec) }),
+    invalidate: (owner) => calls.invalidates.push(owner),
     status(owner) {
       return owner === backend.owner ? backend.statusValue : -1;
     },
@@ -373,6 +374,7 @@ test('QuestPanelModule and the renderer patch agree on the JNI contract', () => 
     '0001-openxr-pointer-depth-origin-reticle.patch',
     '0002-openxr-quest-panel-layer.patch',
     '0003-openxr-quest-input-sampler.patch',
+    '0004-openxr-quest-rig-sync.patch',
   ]);
   assert.match(kotlin, /^package expo\.modules\.questpanel$/m);
   assert.match(kotlin, /class QuestPanelModule : Module\(\)/);
@@ -498,4 +500,87 @@ test('the renderer submits the layer under the scene and blends the eye buffer o
   const build = read('tools/quest/build-viro-renderer.mjs');
   assert.match(build, /for \(const patchFile of patchFiles\)/);
   assert.match(build, /menu layer JNI methods are not exported/);
+});
+
+test('replay invalidates and re-uploads the current frame on the same owner without hiding or reopening', () => {
+  const clock = manualClock();
+  const { backend, calls } = fakeBackend();
+  const compositor = createQuestMenuCompositor(backend, { clock });
+
+  // replay() before the first present does not draw.
+  compositor.replay();
+  assert.equal(calls.open, 0);
+  assert.equal(calls.draws.length, 0);
+  assert.equal(calls.invalidates.length, 0);
+
+  const initialFrame = frame('ring', 'standing');
+  compositor.present(initialFrame);
+  backend.statusValue = 1;
+  clock.advance(100);
+  assert.equal(compositor.getSnapshot().mode, 'shown');
+  assert.equal(calls.draws.length, 1);
+
+  // After shown, present of the same frame does not draw again.
+  compositor.present(initialFrame);
+  assert.equal(calls.draws.length, 1);
+
+  // replay() calls invalidate(owner) once, then draw once with the same spec and owner, without hide or open.
+  compositor.replay();
+  assert.deepEqual(calls.invalidates, [1]);
+  assert.equal(calls.draws.length, 2);
+  assert.equal(calls.draws[1].owner, 1);
+  assert.deepEqual(calls.draws[1].spec, calls.draws[0].spec);
+  assert.deepEqual(calls.hides, []);
+  assert.equal(calls.open, 1);
+
+  // A second identical present after replay does not draw again.
+  compositor.present(initialFrame);
+  assert.equal(calls.draws.length, 2);
+
+  // replay() in failed mode does not draw.
+  backend.statusValue = -1;
+  clock.advance(1000);
+  assert.equal(compositor.getSnapshot().mode, 'failed');
+  compositor.replay();
+  assert.equal(calls.draws.length, 2);
+  compositor.dispose();
+
+  // replay() in off and unavailable modes does not draw.
+  const off = fakeBackend();
+  const offCompositor = createQuestMenuCompositor(off.backend, { enabled: false, clock });
+  offCompositor.present(initialFrame);
+  offCompositor.replay();
+  assert.equal(off.calls.draws.length, 0);
+  assert.equal(off.calls.invalidates.length, 0);
+
+  const unavail = fakeBackend();
+  const unavailCompositor = createQuestMenuCompositor(
+    { ...unavail.backend, available: () => false },
+    { clock }
+  );
+  unavailCompositor.present(initialFrame);
+  unavailCompositor.replay();
+  assert.equal(unavail.calls.draws.length, 0);
+  assert.equal(unavail.calls.invalidates.length, 0);
+
+  // If invalidate throws, compositor falls back cleanly to Viro buttons ('failed') and hides the owner.
+  const broken = fakeBackend();
+  const brokenClock = manualClock();
+  const throwing = createQuestMenuCompositor(
+    {
+      ...broken.backend,
+      invalidate: () => {
+        throw new Error('native invalidate failed');
+      },
+    },
+    { clock: brokenClock }
+  );
+  throwing.present(initialFrame);
+  broken.backend.statusValue = 1;
+  brokenClock.advance(100);
+  throwing.replay();
+  assert.equal(throwing.getSnapshot().mode, 'failed');
+  assert.match(throwing.getSnapshot().reason, /invalidate native invalidate failed/);
+  assert.deepEqual(broken.calls.hides, [1]);
+  throwing.dispose();
 });

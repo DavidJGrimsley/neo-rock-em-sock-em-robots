@@ -177,7 +177,29 @@ test('the release APK packages the compositor panel module, patched renderer, ti
     ]) {
       assert.match(resDump, new RegExp(`drawable/${resourceName}`));
     }
+    const manifestTree = execFileSync(
+      aapt2Bin,
+      ['dump', 'xmltree', apk, '--file', 'AndroidManifest.xml'],
+      { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }
+    );
+    assert.match(manifestTree, /com\.oculus\.ossplash" \(Raw: "com\.oculus\.ossplash"\)\s*\r?\n\s*A: http:\/\/schemas\.android\.com\/apk\/res\/android:value\(0x01010024\)=true/);
+    assert.match(manifestTree, /com\.oculus\.ossplash\.type" \(Raw: "com\.oculus\.ossplash\.type"\)\s*\r?\n\s*A: http:\/\/schemas\.android\.com\/apk\/res\/android:value\(0x01010024\)="alpha"/);
+    assert.match(manifestTree, /com\.oculus\.ossplash\.background" \(Raw: "com\.oculus\.ossplash\.background"\)\s*\r?\n\s*A: http:\/\/schemas\.android\.com\/apk\/res\/android:value\(0x01010024\)="passthrough-contextual"/);
+    const mainActivityStart = manifestTree.indexOf('"com.djleg.neorobots.MainActivity"');
+    const vrActivityStart = manifestTree.indexOf('"com.djleg.neorobots.VRActivity"');
+    assert.ok(mainActivityStart > -1 && vrActivityStart > mainActivityStart);
+    const vrActivitySection = manifestTree.slice(vrActivityStart);
+    assert.match(vrActivitySection, /android\.intent\.category\.LAUNCHER/);
+    assert.match(vrActivitySection, /com\.oculus\.intent\.category\.VR/);
+    const mainActivitySection = manifestTree.slice(mainActivityStart, vrActivityStart);
+    assert.doesNotMatch(mainActivitySection, /android\.intent\.category\.LAUNCHER/);
   }
+  assert.equal(entries.includes('assets/vr_splash.png'), true, 'assets/vr_splash.png must be packaged');
+  const vrSplashBytes = readZipEntry(apk, 'assets/vr_splash.png');
+  const vrSplashSize = pngSize(vrSplashBytes);
+  assert.equal(vrSplashSize.width, 1594);
+  assert.equal(vrSplashSize.height, 598);
+  assert.equal(vrSplashBytes[25], 6, 'vr_splash.png must be RGBA transparent');
   const provenanceFile = path.join(__dirname, '../native/quest-viro-renderer/provenance.json');
   if (fs.existsSync(provenanceFile)) {
     const provenance = JSON.parse(fs.readFileSync(provenanceFile, 'utf8'));
@@ -198,7 +220,19 @@ test('the release APK packages the compositor panel module, patched renderer, ti
   assert.ok(bundle.includes('QuestPanel'));
   assert.ok(bundle.includes('quest-lettering'));
   assert.ok(bundle.includes("Rock 'Em Sock 'Em"));
+  assert.ok(bundle.includes('questLauncherReopen'));
   assert.equal(bundle.includes('Menu texture failed'), false);
+  // Splash title resource must be registered in resources.arsc and match the non-Expo splash title.
+  assert.equal(
+    arsc.includes('assets_arena_ui_questlettering_questsplashtitle'),
+    true,
+    'quest-splash-title drawable must be packaged in APK'
+  );
+  assert.equal(
+    arsc.includes('splashscreen_logo'),
+    true,
+    'splashscreen_logo drawable must be registered in resources.arsc'
+  );
 });
 
 function readZipListing(apk) {

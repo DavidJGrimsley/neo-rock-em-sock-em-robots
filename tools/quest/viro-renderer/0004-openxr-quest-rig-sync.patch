@@ -1,0 +1,241 @@
+diff --git a/android/sharedCode/src/main/cpp/QuestRigSync.h b/android/sharedCode/src/main/cpp/QuestRigSync.h
+new file mode 100644
+index 0000000..9c097c2
+--- /dev/null
++++ b/android/sharedCode/src/main/cpp/QuestRigSync.h
+@@ -0,0 +1,200 @@
++// App-owned addition to ReactVision/virocore v3.0.3 (MIT) for the Neo Rock 'Em
++// Sock 'Em Robots Quest render-thread rig and fighter transform sync. Included
++// once, by VROSceneRendererOpenXR.cpp: the JNI entry points and state below
++// must exist in exactly one translation unit.
++//
++// Applies the latest JS simulation poses (rig outer, stance ring, red fighter,
++// blue fighter) with bounded CLOCK_MONOTONIC constant-velocity extrapolation on
++// the OpenXR render thread before VRORenderer::prepareFrame(), so scene
++// transforms and both eye renders read the same synchronized pose on every XR
++// frame without Fabric DISPATCH_UI or AsyncRenderer queue jitter.
++#pragma once
++#include <jni.h>
++#include <openxr/openxr.h>
++#include <android/log.h>
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <time.h>
++#include "VRONode.h"
++#include "VROQuaternion.h"
++#include "VROVector3f.h"
++
++namespace quest_rig {
++constexpr int kVersion = 1;
++constexpr int kNodeCount = 4;
++constexpr int kFloatsPerNode = 8; // px, py, pz, vx, vy, vz, yawDeg, yawRateDeg
++constexpr int kPayloadFloats = kNodeCount * kFloatsPerNode;
++constexpr double kMaxExtrapolateSec = 0.05;
++constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
++
++static const char *const kNodeTags[kNodeCount] = {
++    "quest-rig-outer",
++    "quest-stance-ring",
++    "quest-red-node",
++    "quest-blue-node",
++};
++
++struct State {
++    std::mutex mutex;
++    bool active = false;
++    int64_t sampleMonoNs = 0;
++    uint64_t revision = 0;
++    std::array<float, kPayloadFloats> values{};
++};
++
++struct RenderCache {
++    std::weak_ptr<VRONode> sceneRoot;
++    std::array<std::weak_ptr<VRONode>, kNodeCount> nodes;
++    uint64_t appliedFrames = 0;
++    int64_t lastLogNs = 0;
++    double maxExtrapMs = 0.0;
++
++    void resetNodes() {
++        sceneRoot.reset();
++        for (auto &n : nodes) n.reset();
++    }
++};
++
++static State state;
++static RenderCache renderCache;
++
++inline int64_t monotonicNow() {
++    struct timespec ts{};
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + static_cast<int64_t>(ts.tv_nsec);
++}
++
++inline std::shared_ptr<VRONode> findNodeByTag(const std::shared_ptr<VRONode> &node,
++                                              const char *tag) {
++    if (!node || !tag || tag[0] == '\0') return nullptr;
++    if (node->getTag() == tag) return node;
++    for (const auto &child : node->getChildNodes()) {
++        if (auto hit = findNodeByTag(child, tag)) return hit;
++    }
++    return nullptr;
++}
++
++inline void resetRenderCache() {
++    renderCache.resetNodes();
++}
++
++// Called on VROOpenXRRender inside renderFrame() right before _renderer->prepareFrame().
++inline void applyToScene(const std::shared_ptr<VRONode> &sceneRoot, int sessionState) {
++    bool active = false;
++    int64_t sampleMonoNs = 0;
++    uint64_t revision = 0;
++    std::array<float, kPayloadFloats> values{};
++    {
++        std::lock_guard<std::mutex> lock(state.mutex);
++        active = state.active;
++        sampleMonoNs = state.sampleMonoNs;
++        revision = state.revision;
++        values = state.values;
++    }
++
++    if (!active || !sceneRoot) {
++        renderCache.resetNodes();
++        return;
++    }
++
++    if (renderCache.sceneRoot.lock() != sceneRoot) {
++        renderCache.resetNodes();
++        renderCache.sceneRoot = sceneRoot;
++    }
++
++    const int64_t nowNs = monotonicNow();
++    double rawDtSec = 0.0;
++    if (sessionState == XR_SESSION_STATE_FOCUSED && sampleMonoNs > 0) {
++        rawDtSec = static_cast<double>(nowNs - sampleMonoNs) * 1e-9;
++    }
++    const double clampedDtSec = std::max(0.0, std::min(kMaxExtrapolateSec, rawDtSec));
++    const float dtSec = static_cast<float>(clampedDtSec);
++
++    int resolvedCount = 0;
++    for (int i = 0; i < kNodeCount; ++i) {
++        auto node = renderCache.nodes[i].lock();
++        if (!node || !node->getParentNode() || node->getTag() != kNodeTags[i]) {
++            node = findNodeByTag(sceneRoot, kNodeTags[i]);
++            if (node) {
++                renderCache.nodes[i] = node;
++            } else {
++                renderCache.nodes[i].reset();
++            }
++        }
++        if (!node) continue;
++        ++resolvedCount;
++
++        const size_t base = static_cast<size_t>(i) * static_cast<size_t>(kFloatsPerNode);
++        const float px = values[base + 0] + values[base + 3] * dtSec;
++        const float py = values[base + 1] + values[base + 4] * dtSec;
++        const float pz = values[base + 2] + values[base + 5] * dtSec;
++        const float yawDeg = values[base + 6] + values[base + 7] * dtSec;
++        const float halfYawRad = 0.5f * yawDeg * kDegToRad;
++
++        node->setPosition({ px, py, pz });
++        node->setRotation(VROQuaternion(0.0f, std::sin(halfYawRad), 0.0f, std::cos(halfYawRad)));
++    }
++
++    ++renderCache.appliedFrames;
++    const double extrapMs = clampedDtSec * 1000.0;
++    if (extrapMs > renderCache.maxExtrapMs) {
++        renderCache.maxExtrapMs = extrapMs;
++    }
++    if (renderCache.lastLogNs == 0 || (nowNs - renderCache.lastLogNs) >= 2000000000LL) {
++        renderCache.lastLogNs = nowNs;
++        __android_log_print(
++            ANDROID_LOG_INFO, "QuestRigSync",
++            "applied=%llu rev=%llu found=%d/%d session=%d dtMs=%.2f maxExtrapMs=%.2f",
++            static_cast<unsigned long long>(renderCache.appliedFrames),
++            static_cast<unsigned long long>(revision),
++            resolvedCount, kNodeCount, sessionState, extrapMs, renderCache.maxExtrapMs);
++        renderCache.maxExtrapMs = 0.0;
++    }
++}
++} // namespace quest_rig
++
++extern "C" JNIEXPORT jint JNICALL
++Java_expo_modules_questinput_QuestInputModule_nativeRigSyncVersion(JNIEnv *, jobject) {
++    return quest_rig::kVersion;
++}
++
++extern "C" JNIEXPORT jboolean JNICALL
++Java_expo_modules_questinput_QuestInputModule_nativePublishRigState(
++        JNIEnv *env, jobject, jboolean active, jfloatArray values) {
++    if (active == JNI_FALSE) {
++        std::lock_guard<std::mutex> lock(quest_rig::state.mutex);
++        quest_rig::state.active = false;
++        ++quest_rig::state.revision;
++        return JNI_TRUE;
++    }
++    if (values == nullptr || env->GetArrayLength(values) != quest_rig::kPayloadFloats) {
++        return JNI_FALSE;
++    }
++    std::array<float, quest_rig::kPayloadFloats> buf{};
++    env->GetFloatArrayRegion(values, 0, quest_rig::kPayloadFloats, buf.data());
++    for (float v : buf) {
++        if (!std::isfinite(v)) return JNI_FALSE;
++    }
++    const int64_t nowNs = quest_rig::monotonicNow();
++    {
++        std::lock_guard<std::mutex> lock(quest_rig::state.mutex);
++        quest_rig::state.values = buf;
++        quest_rig::state.sampleMonoNs = nowNs;
++        quest_rig::state.active = true;
++        ++quest_rig::state.revision;
++    }
++    return JNI_TRUE;
++}
++
++extern "C" JNIEXPORT void JNICALL
++Java_expo_modules_questinput_QuestInputModule_nativeClearRigState(JNIEnv *, jobject) {
++    std::lock_guard<std::mutex> lock(quest_rig::state.mutex);
++    quest_rig::state.active = false;
++    ++quest_rig::state.revision;
++}
+diff --git a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
+index b3a1f20..40afa8c 100644
+--- a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
++++ b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
+@@ -7,6 +7,7 @@
+ #include "VROSceneRendererOpenXR.h"
+ #include "QuestPanelLayer.h"
+ #include "QuestInputSampler.h"
++#include "QuestRigSync.h"
+ 
+ #include <android/log.h>
+ #include <sys/prctl.h>
+@@ -897,6 +898,7 @@ void VROSceneRendererOpenXR::destroySwapchains() {
+ void VROSceneRendererOpenXR::destroySession() {
+     // App input bridge: this session's samples end here; a newer session is untouched.
+     quest_input::endSession(_questInputGeneration);
++    quest_rig::resetRenderCache();
+     // AR session teardown — destroy the plane detector before the XrSession.
+     if (_arSession) {
+         _arSession->destroyPlaneDetector();
+@@ -1326,6 +1328,14 @@ void VROSceneRendererOpenXR::renderFrame() {
+             quest_input::noteFrameWithoutInput(_questInputGeneration);
+         }
+ 
++        // App rig sync: apply JS simulation poses with bounded extrapolation BEFORE prepareFrame()
++        // so computeTransforms() and both eye renders read one synchronized pose per XR frame.
++        std::shared_ptr<VRONode> rigSceneRoot = nullptr;
++        if (_sceneController && _sceneController->getScene()) {
++            rigSceneRoot = _sceneController->getScene()->getRootNode();
++        }
++        quest_rig::applyToScene(rigSceneRoot, (int)_sessionState);
++
+         // ── Prepare the Viro renderer (once per frame, before any eye render) ─
+         // Use the left eye pose/fov to drive scene-level preparation (culling,
+         // animation ticks, physics, etc.). Per-eye projection is applied in renderEye.

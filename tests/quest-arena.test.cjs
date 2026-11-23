@@ -31,9 +31,7 @@ const { ARENA_LAYOUT, ARENA_RULES } = require('../src/features/arena-fighter/are
 const {
   QUEST_ASSET_TIMEOUT_MS,
   QUEST_LEAVING,
-  QUEST_READY_SAVED,
   createQuestArenaSession,
-  questReadyAcknowledgement,
 } = require('../src/features/quest-vr/quest-arena-session.ts');
 
 const source = (file) => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
@@ -303,7 +301,10 @@ test('both menu pages sit at a readable distance and angle', () => {
     assert.ok(degrees(labelM / view.distance) >= 1.4, `${page} button text too small`);
 
     const titleView = panelView(QUEST_TITLE_POSE[page], QUEST_TITLE_SIZE[page]);
-    assert.ok(titleView.bottom > view.top + (page === 'menu' ? 0.2 : 0), `${page} title clears card`);
+    assert.ok(
+      titleView.bottom > view.top + (page === 'menu' ? 0.2 : 0),
+      `${page} title clears card`
+    );
     assert.ok(titleView.top < 25, `${page} title clears 29.3-deg sky diagnostics`);
   }
   const menu = panelView(QUEST_MENU_POSE.menu);
@@ -417,23 +418,37 @@ test('trigger presses and hover ignore gaze, grips, and repeat clicks', () => {
   assert.equal(questPointerHover(hover, false, 1), false);
 });
 
-test('Ready acknowledges the lobby and does not call ArenaMatch.ready', () => {
-  assert.deepEqual(questReadyAcknowledgement(false), {
-    called: false,
-    started: false,
-    reason: 'no-match',
-  });
-  assert.deepEqual(questReadyAcknowledgement(true), {
-    called: false,
-    started: false,
-    reason: 'acknowledged',
-  });
+test('Ready starts the virtual Quest match once assets load without asserting AR tracking', () => {
+  const clock = fakeClock();
+  const session = createQuestArenaSession(clock);
+  assert.equal(session.ready().reason, 'no-match');
   const sessionSource = source('src/features/quest-vr/quest-arena-session.ts');
-  assert.doesNotMatch(sessionSource, /match\.ready\(|invalidatePlacementReady|questReadyDecision/);
-  assert.doesNotMatch(sessionSource, /setTracking|setPlacement|tick\(/);
+  assert.doesNotMatch(sessionSource, /setTracking|setPlacement/);
+
+  assert.equal(session.solo(), true);
+  // Queue Ready before assets finish loading; loading completes into countdown automatically.
+  const queued = session.ready();
+  assert.equal(queued.called, false);
+  assert.equal(queued.started, false);
+  assert.equal(queued.reason, 'loading');
+  assert.equal(session.getSnapshot().acknowledged, true);
+
+  const open = session.getSnapshot();
+  session.assetLoaded(open.lease, open.token, open.placementVersion, 'arena');
+  session.assetLoaded(open.lease, open.token, open.placementVersion, 'blue');
+  session.assetLoaded(open.lease, open.token, open.placementVersion, 'red');
+
+  const started = session.getSnapshot();
+  assert.equal(started.assetsLoaded, 3);
+  assert.equal(started.virtualReady, true);
+  assert.equal(started.tracking, false);
+  assert.equal(started.placed, false);
+  assert.equal(started.stage, 'countdown');
+  assert.equal(started.lastReady?.reason, 'started');
+  session.dispose();
 });
 
-test('solo keeps ArenaMatch untracked and Ready does not leave the lobby', () => {
+test('solo keeps ArenaMatch virtually ready without AR tracking and cleans up leases', () => {
   const clock = fakeClock();
   const session = createQuestArenaSession(clock);
   assert.equal(session.getSnapshot().page, 'menu');
@@ -444,46 +459,47 @@ test('solo keeps ArenaMatch untracked and Ready does not leave the lobby', () =>
   assert.equal(opened.page, 'ring');
   assert.equal(opened.mode, 'solo');
   assert.equal(opened.stage, 'lobby');
+  assert.equal(opened.virtualReady, true);
   assert.equal(opened.tracking, false);
   assert.equal(opened.placed, false);
   assert.equal(opened.landscape, true);
   assert.equal(opened.canReady, false);
   assert.equal(opened.localReady, false);
   assert.equal(opened.acknowledged, false);
-  assert.match(opened.message, /tracking is stable/);
   assert.match(opened.lines.join('\n'), /Both robots are in the ring/);
-  const result = session.ready();
-  const afterReady = session.getSnapshot();
-  assert.equal(result.called, false);
-  assert.equal(result.started, false);
-  assert.equal(result.reason, 'acknowledged');
-  assert.equal(afterReady.stage, 'lobby');
-  assert.equal(afterReady.localReady, false);
-  assert.equal(afterReady.acknowledged, true);
-  assert.equal(afterReady.tracking, false);
-  assert.equal(afterReady.placed, false);
-  assert.ok(afterReady.lines.includes(QUEST_READY_SAVED));
 
-  const staleLease = afterReady.lease;
-  session.assetLoaded(staleLease, afterReady.token, afterReady.placementVersion, 'arena');
-  session.assetLoaded(staleLease, afterReady.token, afterReady.placementVersion, 'blue');
-  session.assetLoaded(staleLease, afterReady.token, afterReady.placementVersion, 'red');
+  const staleLease = opened.lease;
+  session.assetLoaded(staleLease, opened.token, opened.placementVersion, 'arena');
+  session.assetLoaded(staleLease, opened.token, opened.placementVersion, 'blue');
+  session.assetLoaded(staleLease, opened.token, opened.placementVersion, 'red');
   assert.equal(session.getSnapshot().assetsLoaded, 3);
+  assert.equal(session.getSnapshot().canReady, true);
   assert.equal(session.getSnapshot().tracking, false);
   assert.equal(session.getSnapshot().placed, false);
   assert.equal(session.getSnapshot().stage, 'lobby');
   assert.equal(clock.pending.size, 0);
 
+  const result = session.ready();
+  const afterReady = session.getSnapshot();
+  assert.equal(result.called, true);
+  assert.equal(result.started, true);
+  assert.equal(result.reason, 'started');
+  assert.equal(afterReady.stage, 'countdown');
+  assert.equal(afterReady.virtualReady, true);
+  assert.equal(afterReady.acknowledged, true);
+  assert.equal(afterReady.tracking, false);
+  assert.equal(afterReady.placed, false);
+
   assert.equal(session.back(), 'menu');
   assert.equal(session.getSnapshot().mode, null);
   assert.equal(session.getSnapshot().page, 'menu');
   assert.equal(session.getSnapshot().acknowledged, false);
-  session.assetLoaded(staleLease, afterReady.token, afterReady.placementVersion, 'arena');
+  session.assetLoaded(staleLease, opened.token, opened.placementVersion, 'arena');
   assert.equal(session.solo(), true);
   const reopened = session.getSnapshot();
   assert.notEqual(reopened.lease, staleLease);
   assert.equal(reopened.assetsLoaded, 0);
-  session.assetLoaded(staleLease, afterReady.token, afterReady.placementVersion, 'arena');
+  session.assetLoaded(staleLease, opened.token, opened.placementVersion, 'arena');
   assert.equal(session.getSnapshot().assetsLoaded, 0);
   session.exit();
   assert.equal(session.getSnapshot().mode, null);
@@ -536,13 +552,16 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
   assert.match(scene, /resolveQuestMenuAssetFile/);
   assert.doesNotMatch(source('src/features/quest-vr/quest-menu-layout.ts'), /menu-background/);
   assert.match(scene, /session\.exit\(\)/);
-  assert.match(scene, /exitVRScene\(\)/);
+  assert.match(scene, /questPanelNative\?\.exitApp\?\.\(\)/);
+  assert.doesNotMatch(scene, /exitVRScene\(\)/);
   assert.doesNotMatch(scene, /onClick=\{/);
   assert.doesNotMatch(scene, /exitRequest !== null/);
   assert.doesNotMatch(
     scene,
-    /ViroARScene|ViroXRSceneNavigator|setTracking|setPlacement|ViroGameLoop/
+    /ViroARScene|ViroXRSceneNavigator|setTracking|setPlacement/
   );
+  assert.match(scene, /ViroGameLoop/);
+  assert.match(scene, /ViroGameLoopUtils/);
   assert.match(navigator, /passthroughEnabled=\{false\}/);
   assert.doesNotMatch(navigator, /hdrEnabled=\{false\}/);
   assert.match(navigator, /\bhdrEnabled\b/);

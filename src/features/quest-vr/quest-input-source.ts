@@ -147,7 +147,11 @@ export function createQuestInputSource(deps: {
   const log = deps.log ?? (() => {});
   const listeners = new Set<() => void>();
   const sampleListeners = new Set<
-    (sample: QuestInputSample | null, status: QuestInputStatus) => void
+    (
+      sample: QuestInputSample | null,
+      status: QuestInputStatus,
+      acceptedSamples?: readonly QuestInputSample[]
+    ) => void
   >();
   const ring: (QuestInputSample | null)[] = new Array(SAMPLE_BUFFER_CAPACITY).fill(null);
   let ringHead = 0;
@@ -312,6 +316,7 @@ export function createQuestInputSource(deps: {
     }
     readCost.push(deps.now() - startedAt);
     const batch = decodeBatch(raw);
+    let acceptedSamples: readonly QuestInputSample[] | undefined;
     if (!batch.ok) {
       if (raw && raw.available === false) {
         setStatus('unavailable', 'Renderer has no input sampler (patch 0003).');
@@ -341,7 +346,13 @@ export function createQuestInputSource(deps: {
         }
       }
       // Later seq gaps, including ring overruns between reads, are counted in accept().
-      for (const sample of batch.samples) if (!latest || sample.seq > latest.seq) accept(sample);
+      const newlyAccepted: QuestInputSample[] = [];
+      for (const sample of batch.samples) {
+        if (!latest || sample.seq > latest.seq) {
+          accept(sample);
+          newlyAccepted.push(sample);
+        }
+      }
       ageNs = latest && batch.nowNs !== null ? Math.max(0, batch.nowNs - latest.capturedNs) : null;
       // Generation 0 is the sampler before any renderer session exists, not a teardown.
       if (!batch.live && batch.generation === 0) setStatus('waiting', 'No OpenXR session yet.');
@@ -352,6 +363,7 @@ export function createQuestInputSource(deps: {
         setStatus('stale', `no input for ${(ageNs / NS_PER_MS).toFixed(0)} ms`);
       else if (!latest.focused) setStatus('unfocused', 'Session not focused; input inactive.');
       else setStatus('live', null);
+      if (status === 'live' && newlyAccepted.length > 0) acceptedSamples = newlyAccepted;
     }
     const now = deps.now();
     if (
@@ -371,7 +383,7 @@ export function createQuestInputSource(deps: {
       }
     }
     const visible = status === 'live' || status === 'unfocused' ? latest : null;
-    for (const listener of sampleListeners) listener(visible, status);
+    for (const listener of sampleListeners) listener(visible, status, acceptedSamples);
     emit(false);
     if (lastLogAt === null || now - lastLogAt >= LOG_INTERVAL_MS) {
       lastLogAt = now;
@@ -436,7 +448,13 @@ export function createQuestInputSource(deps: {
       return out;
     },
     /** Every poll, outside React: the newest sample while live or unfocused, else null. */
-    onSample(listener: (sample: QuestInputSample | null, status: QuestInputStatus) => void) {
+    onSample(
+      listener: (
+        sample: QuestInputSample | null,
+        status: QuestInputStatus,
+        acceptedSamples?: readonly QuestInputSample[]
+      ) => void
+    ) {
       sampleListeners.add(listener);
       return () => {
         sampleListeners.delete(listener);

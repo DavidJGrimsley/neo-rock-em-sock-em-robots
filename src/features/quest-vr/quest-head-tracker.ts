@@ -41,6 +41,19 @@ export interface QuestHeadTrackerSnapshot {
   referenceResets: number;
 }
 
+export type QuestHeadLiveEvent = 'sample' | 'jump-pending' | 'recenter' | 'calibrate' | 'dispose';
+
+export interface QuestLiveHeadState {
+  sample: HeadSample | null;
+  calibration: Calibration;
+  status: QuestHeadTrackerSnapshot['status'];
+  recentering: boolean;
+  referenceResets: number;
+  lastValidYaw: number | null;
+  refEpoch: number | null;
+  nowMs: number;
+}
+
 const fmt = (v: Vec3) => `[${v.map((n) => n.toFixed(3)).join(',')}]`;
 const fmtYaw = (yaw: number | null) => (yaw === null ? '--' : yaw.toFixed(1));
 
@@ -56,6 +69,7 @@ export function createQuestHeadTracker(deps: {
 }) {
   const log = deps.log ?? (() => {});
   const listeners = new Set<() => void>();
+  const liveListeners = new Set<(event: QuestHeadLiveEvent) => void>();
   const ring: (HeadSample | null)[] = new Array(SAMPLE_BUFFER_CAPACITY).fill(null);
   let ringHead = 0;
   let ringCount = 0;
@@ -89,8 +103,27 @@ export function createQuestHeadTracker(deps: {
   } | null = null;
   let jumpCooldown = 0;
   let referenceResets = 0;
+  let lastValidYaw: number | null = null;
 
   let snapshot: QuestHeadTrackerSnapshot = buildSnapshot();
+
+  function emitLive(event: QuestHeadLiveEvent) {
+    liveListeners.forEach((listener) => listener(event));
+  }
+
+  function getLiveHeadState(): QuestLiveHeadState {
+    const hasRefSource = Boolean(refSpaceEpochSource ?? deps.refSpaceEpoch);
+    return {
+      sample: latestSample,
+      calibration,
+      status,
+      recentering: pendingJump !== null,
+      referenceResets,
+      lastValidYaw,
+      refEpoch: hasRefSource ? lastRefSpaceEpoch : null,
+      nowMs: deps.now(),
+    };
+  }
 
   function buildSnapshot(): QuestHeadTrackerSnapshot {
     const pose = latestSample ? gameplayHeadPose(calibration, latestSample) : null;
@@ -177,6 +210,7 @@ export function createQuestHeadTracker(deps: {
     };
     calibrationVersion += 1;
     referenceResets += 1;
+    lastValidYaw = yaw;
     status = 'ready';
     message = null;
     log(
@@ -251,6 +285,8 @@ export function createQuestHeadTracker(deps: {
     if (ringCount < SAMPLE_BUFFER_CAPACITY) ringCount += 1;
     samplesSeen += 1;
     latestSample = sample;
+    const liveYaw = yawFromForward(sample.forward);
+    if (liveYaw !== null) lastValidYaw = liveYaw;
 
     if (ringCount >= 2) {
       const oldest = ring[(ringHead - ringCount + SAMPLE_BUFFER_CAPACITY) % SAMPLE_BUFFER_CAPACITY];
@@ -263,6 +299,7 @@ export function createQuestHeadTracker(deps: {
       sampleHz = null;
     }
 
+    const prevResets = referenceResets;
     const epoch = (refSpaceEpochSource ?? deps.refSpaceEpoch)?.() ?? 0;
     if (lastRefSpaceEpoch === null) {
       lastRefSpaceEpoch = epoch;
@@ -276,6 +313,9 @@ export function createQuestHeadTracker(deps: {
       trackReferenceFrame(previous, sample);
     }
 
+    emitLive(
+      referenceResets !== prevResets ? 'recenter' : pendingJump !== null ? 'jump-pending' : 'sample'
+    );
     schedulePublish(t);
   };
 
@@ -287,6 +327,7 @@ export function createQuestHeadTracker(deps: {
       if (anchor === null) {
         anchor = cleanAnchor;
         publishNow();
+        emitLive('calibrate');
       }
       return calibration;
     }
@@ -338,9 +379,14 @@ export function createQuestHeadTracker(deps: {
       }
     }
 
+    lastValidYaw =
+      status === 'ready'
+        ? ((latestSample ? yawFromForward(latestSample.forward) : null) ?? calibration.yaw)
+        : null;
     calibrationVersion += 1;
     logCalibration(result.ok ? 'solo-window' : status === 'ready' ? 'solo-latest' : 'solo-default');
     publishNow();
+    emitLive('calibrate');
     return calibration;
   }
 
@@ -363,6 +409,7 @@ export function createQuestHeadTracker(deps: {
     pendingJump = null;
     jumpCooldown = 0;
     referenceResets = 0;
+    lastValidYaw = null;
     calibrationVersion += 1;
     // Clear previous-session origin/yaw and samples so a new VRActivity entry
     // opens its pre-Solo menu in front of the wearer instead of anchored to
@@ -384,6 +431,7 @@ export function createQuestHeadTracker(deps: {
       posture: calibration.posture,
     };
     snapshot = buildSnapshot();
+    emitLive('dispose');
   }
 
   return {
@@ -393,7 +441,14 @@ export function createQuestHeadTracker(deps: {
         listeners.delete(listener);
       };
     },
+    subscribeLive: (listener: (event: QuestHeadLiveEvent) => void) => {
+      liveListeners.add(listener);
+      return () => {
+        liveListeners.delete(listener);
+      };
+    },
     getSnapshot: () => snapshot,
+    getLiveHeadState,
     onCameraTransform,
     calibrateForSolo,
     cyclePosture,

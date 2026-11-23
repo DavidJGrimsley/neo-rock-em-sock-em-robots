@@ -34,7 +34,10 @@ const {
   questTriggerPress,
 } = require('../src/features/quest-vr/quest-menu-input.ts');
 const compositorModule = require('../src/features/quest-vr/quest-menu-compositor.ts');
-const { QUEST_DIAG_POSE, QUEST_DIAG_SIZE } = require('../src/features/quest-vr/quest-diagnostics-layout.ts');
+const {
+  QUEST_DIAG_POSE,
+  QUEST_DIAG_SIZE,
+} = require('../src/features/quest-vr/quest-diagnostics-layout.ts');
 const { questMenuLayer } = require('../src/features/quest-vr/quest-menu-layer.ts');
 const { questMenuPanelPose, questMenuTitlePose } = compositorModule;
 
@@ -173,7 +176,10 @@ test('ring-page menu rectangle placed through menuFrame(DEFAULT) clears the oppo
       false,
       `Menu rectangle occluded opponent ray to ${JSON.stringify(corner)}`
     );
-    const diagCenter = addVec(frame.position, rotateYDeg(QUEST_DIAG_POSE.position, frame.rotationY));
+    const diagCenter = addVec(
+      frame.position,
+      rotateYDeg(QUEST_DIAG_POSE.position, frame.rotationY)
+    );
     const rotateDiag = (vec) =>
       rotateYDeg(rotateEulerDeg(vec, QUEST_DIAG_POSE.rotation), frame.rotationY);
     assert.equal(
@@ -204,7 +210,6 @@ test('Quest VR sources enforce tracking/rig safety guards and real blue asset le
   const forbidden = [
     /\bViroCamera\b/,
     /\brecenterTracking\b/,
-    /\bViroGameLoop(?:Utils)?\b/,
     /\bViroARScene\b/,
     /\bsetTracking\b/,
     /\bsetPlacement\b/,
@@ -220,6 +225,8 @@ test('Quest VR sources enforce tracking/rig safety guards and real blue asset le
   const scene = source('src/features/quest-vr/quest-arena-scene.native.tsx');
   const navigator = source('src/features/quest-vr/quest-xr-navigator.native.tsx');
   assert.match(scene, /onCameraTransformUpdate=\{questHeadTracker\.onCameraTransform\}/);
+  assert.match(scene, /\bViroGameLoop\b/);
+  assert.match(scene, /\bViroGameLoopUtils\b/);
   assert.match(scene, /visible=\{false\}/);
   assert.match(scene, /onLoadEnd=\{/);
   assert.match(scene, /questMenuButtonFrame/);
@@ -306,7 +313,12 @@ function fakePanel() {
     drawTitle: (owner, json) => panel.titleDraws.push({ owner, spec: JSON.parse(json) }),
     statusTitle: (owner) => (owner === panel.titleOwner ? panel.titleStatus : -1),
     hideTitle: (owner) => panel.titleHidden.push(owner),
+    exitApp: () => {
+      panel.exited += 1;
+      return true;
+    },
   };
+  panel.exited = 0;
   panel.latest = () => panel.draws.at(-1)?.spec ?? null;
   panel.latestTitle = () => panel.titleDraws.at(-1)?.spec ?? null;
   panel.texts = (spec = panel.latest()) =>
@@ -516,6 +528,10 @@ function createSceneHarness({ panelAvailable = true } = {}) {
       buildQuestMenuTitle,
     },
     './quest-runtime-store.ts': { questRuntime: mockRuntime },
+    '../../../modules/quest-input/src/index.ts': {
+      questRigSyncAvailable: () => false,
+      questInputNative: null,
+    },
     './quest-diagnostics-layout.ts': {
       questDiagLayerMaterials: () => ({
         questDiagLayerMask: {
@@ -676,7 +692,10 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
   assert.equal(panel.latest().ops[0].op, 'roundRect');
   assert.equal(panel.latest().ops[0].color, '#0f172a');
   assert.equal(panel.latest().ops[0].radius, QUEST_MENU_CARD_RADIUS_PX);
-  assert.equal(panel.latestTitle().ops.some((op) => op.op === 'roundRect'), false);
+  assert.equal(
+    panel.latestTitle().ops.some((op) => op.op === 'roundRect'),
+    false
+  );
   const textOps = panel.latest().ops.filter((op) => op.op === 'text');
   assert.ok(textOps.some((op) => op.font === 'file:///sans-semibold.ttf'));
   // Normal menu stays free of developer prose (moved to QuestDiagnosticsPanel).
@@ -768,8 +787,15 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
   assert.ok(Math.abs(markerNode.props.position[2] - marker[2]) < 1e-12);
   assert.ok(Math.abs(markerNode.props.position[1] - (marker[1] + 0.0005)) < 1e-12);
   assert.notEqual(markerNode.props.position[0], calls.calibratedWith.x);
-  assert.equal(blueModel.props.position[0], calls.calibratedWith.x);
-  assert.equal(blueModel.props.position[2], calls.calibratedWith.z);
+  const blueFighterNode = inRing.all.find(
+    (n) =>
+      n.type === 'ViroNode' &&
+      collectNodes(n.props.children).includes(blueModel) &&
+      !collectNodes(n.props.children).some((child) => child.props?.source === 'red.glb')
+  );
+  assert.ok(blueFighterNode);
+  assert.equal(blueFighterNode.props.position[0], calls.calibratedWith.x);
+  assert.equal(blueFighterNode.props.position[2], calls.calibratedWith.z);
 
   assert.ok(harness.builtMenus.some((entry) => entry.options?.posture === 'seated'));
   assert.ok(harness.buttonLookups.some((entry) => entry.arg?.posture === 'seated'));
@@ -796,7 +822,7 @@ test('controller trigger hits flip the Posture label and Exit leaves; gaze never
   clickAction(frame.all, 'posture', 12);
   clickAction(frame.all, 'exit', 12);
   assert.equal(calls.posture, 0);
-  assert.equal(calls.exitVRScene, 0);
+  assert.equal(panel.exited, 0);
 
   // Left trigger (1) flips the label in the very next panel image.
   const before = panel.draws.length;
@@ -807,9 +833,10 @@ test('controller trigger hits flip the Posture label and Exit leaves; gaze never
   assert.ok(panel.texts().includes('Seated'));
   assert.ok(!panel.texts().includes('Standing'));
 
-  // Right trigger (4) on Exit leaves VR.
+  // Right trigger (4) on Exit closes the Quest app cleanly without Viro launchPanelThroughHome.
   clickAction(frame.all, 'exit', 4);
-  assert.equal(calls.exitVRScene, 1);
+  assert.equal(panel.exited, 1);
+  assert.equal(calls.exitVRScene, 0);
   assert.deepEqual(calls.exitRequested, ['scene-exit']);
   assert.ok(harness.logs.some((line) => /QuestMenu action exit on menu/.test(line)));
   assert.ok(
@@ -866,7 +893,7 @@ test('page changes move the layer, panel and targets together with no loading bl
 
   // A press on a target from the previous screen is dropped and logged once.
   clickAction(staleMenu, 'exit', 1);
-  assert.equal(harness.calls.exitVRScene, 0);
+  assert.equal(harness.panel.exited, 0);
   const blocked = harness.logs.filter((line) => /QuestMenu click exit blocked/.test(line));
   assert.equal(blocked.length, 1);
   assert.match(blocked[0], /source 1$/);
@@ -898,7 +925,8 @@ test('page changes move the layer, panel and targets together with no loading bl
   }
   assert.equal(panel.opened, 1, 'one owner for the whole scene');
   clickAction(frame.all, 'exit', 1);
-  assert.equal(harness.calls.exitVRScene, 1);
+  assert.equal(harness.panel.exited, 1);
+  assert.equal(harness.calls.exitVRScene, 0);
   harness.unmount();
 });
 
@@ -973,7 +1001,8 @@ test('a failed or missing layer falls back to Viro buttons that still work', asy
     frame.all.some((n) => n.type === 'ViroText' && /no headset menu layer/.test(n.props.text))
   );
   clickAction(frame.all, 'exit', 4);
-  assert.equal(missing.calls.exitVRScene, 1);
+  assert.equal(missing.panel.exited, 1);
+  assert.equal(missing.calls.exitVRScene, 0);
   missing.unmount();
 
   // The launcher choice applies to the next scene.

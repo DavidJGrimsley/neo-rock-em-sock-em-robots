@@ -1,7 +1,7 @@
 {
   "name": "neo-rock-em-sock-em-robots",
   "version": "1.0.0",
-  "main": "expo-router/entry",
+  "main": "index.ts",
   "scripts": {
     "postinstall": "node tools/compat/prepare-uri-decoder.cjs",
     "android": "expo start --android",

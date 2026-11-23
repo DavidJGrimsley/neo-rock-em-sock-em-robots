@@ -1,6 +1,7 @@
 package expo.modules.questpanel
 
 import android.annotation.SuppressLint
+import android.app.ActivityManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -11,6 +12,8 @@ import android.graphics.PorterDuff
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.text.TextPaint
 import android.text.TextUtils
 import android.util.Log
@@ -116,6 +119,14 @@ class QuestPanelModule : Module() {
     }
 
     fun status(id: Int): Int = if (id == owner && !drawFailed) nativeStatusFn() else -1
+
+    fun invalidate(id: Int) {
+      synchronized(drawLock) {
+        if (id == owner) {
+          drawnPixelsKey = null
+        }
+      }
+    }
 
     fun hide(id: Int) {
       synchronized(drawLock) {
@@ -466,12 +477,33 @@ class QuestPanelModule : Module() {
     Function("open") { menuSlot.open() }
     Function("status") { id: Int -> menuSlot.status(id) }
     Function("draw") { id: Int, json: String -> menuSlot.enqueueDraw(id, json) }
+    Function("invalidate") { id: Int -> menuSlot.invalidate(id) }
     Function("hide") { id: Int -> menuSlot.hide(id) }
 
     Function("openTitle") { titleSlot.open() }
     Function("statusTitle") { id: Int -> titleSlot.status(id) }
     Function("drawTitle") { id: Int, json: String -> titleSlot.enqueueDraw(id, json) }
+    Function("invalidateTitle") { id: Int -> titleSlot.invalidate(id) }
     Function("hideTitle") { id: Int -> titleSlot.hide(id) }
+
+    Function("exitApp") {
+      val reactContext = appContext.reactContext ?: return@Function false
+      Handler(Looper.getMainLooper()).post {
+        try {
+          appContext.currentActivity?.finishAndRemoveTask()
+          val am = reactContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+          am?.appTasks?.forEach { task ->
+            try {
+              task.finishAndRemoveTask()
+            } catch (_: Throwable) {
+            }
+          }
+        } catch (error: Throwable) {
+          Log.w(TAG, "exitApp failed", error)
+        }
+      }
+      true
+    }
 
     OnDestroy {
       menuSlot.destroy()

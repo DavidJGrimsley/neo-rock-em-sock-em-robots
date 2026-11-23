@@ -28,7 +28,10 @@ const {
   questDiagPanelSpec,
 } = require('../src/features/quest-vr/quest-diagnostics-layout.ts');
 const { menuFrame } = require('../src/features/quest-vr/quest-head-rig.ts');
-const { QUEST_MENU_POSE, QUEST_MENU_SIZE } = require('../src/features/quest-vr/quest-menu-layout.ts');
+const {
+  QUEST_MENU_POSE,
+  QUEST_MENU_SIZE,
+} = require('../src/features/quest-vr/quest-menu-layout.ts');
 
 const repo = path.join(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(repo, file), 'utf8');
@@ -686,8 +689,35 @@ test('patch 0003, QuestInputModule and the JS decoder agree on one layout', () =
     assert.ok(patch.slice(at, at + 260).includes(args), `${name} arguments`);
     assert.match(kotlin, kotlinDecl);
   }
+
+  const rigPatch = read('tools/quest/viro-renderer/0004-openxr-quest-rig-sync.patch');
+  const rigJni = {
+    nativeRigSyncVersion: [
+      'jint',
+      '(JNIEnv *, jobject)',
+      /private external fun nativeRigSyncVersion\(\): Int/,
+    ],
+    nativePublishRigState: [
+      'jboolean',
+      'jboolean active, jfloatArray values',
+      /private external fun nativePublishRigState\(active: Boolean, values: FloatArray\?\): Boolean/,
+    ],
+    nativeClearRigState: [
+      'void',
+      '(JNIEnv *, jobject)',
+      /private external fun nativeClearRigState\(\)/,
+    ],
+  };
+  for (const [name, [returns, args, kotlinDecl]] of Object.entries(rigJni)) {
+    const symbol = `Java_expo_modules_questinput_QuestInputModule_${name}`;
+    const at = rigPatch.indexOf(symbol);
+    assert.ok(at > 0, symbol);
+    assert.match(rigPatch.slice(at - 60, at), new RegExp(`JNIEXPORT ${returns} JNICALL`));
+    assert.ok(rigPatch.slice(at, at + 260).includes(args), `${name} arguments`);
+    assert.match(kotlin, kotlinDecl);
+  }
   const build = read('tools/quest/build-viro-renderer.mjs');
-  for (const name of Object.keys(jni)) {
+  for (const name of [...Object.keys(jni), ...Object.keys(rigJni)]) {
     assert.match(build, new RegExp(`'${name}'`), `${name} checked by build-viro-renderer`);
   }
   assert.match(build, /Java_expo_modules_questinput_QuestInputModule_/);
@@ -701,7 +731,7 @@ test('patch 0003, QuestInputModule and the JS decoder agree on one layout', () =
 test('patch 0003 stays inside the existing session and keeps native locking simple', () => {
   const patch = read('tools/quest/viro-renderer/0003-openxr-quest-input-sampler.patch');
   const lock = JSON.parse(read('tools/quest/viro-renderer/lock.json'));
-  assert.equal(lock.patches.at(-1), '0003-openxr-quest-input-sampler.patch');
+  assert.ok(lock.patches.includes('0003-openxr-quest-input-sampler.patch'));
   assert.doesNotMatch(patch, /anthropic|claude|openai|grok/i);
   const files = [...patch.matchAll(/^diff --git a\/(\S+)/gm)].map((match) => match[1]).sort();
   assert.deepEqual(files, [
@@ -740,10 +770,7 @@ test('patch 0003 stays inside the existing session and keeps native locking simp
     patch,
     /_inputController->syncQuestInput\(_session, _stageSpace,[\s\S]*quest_input::updateMarkers\([\s\S]*Prepare the Viro renderer/
   );
-  assert.match(
-    patch,
-    /_inputController->onProcess\([\s\S]*presenterRoot->computeTransforms\(/
-  );
+  assert.match(patch, /_inputController->onProcess\([\s\S]*presenterRoot->computeTransforms\(/);
   assert.match(
     added,
     /if \(XR_FAILED\(xrWaitSwapchainImage\(_swapchain, &wait\)\)\) \{[\s\S]*?XrSwapchainImageReleaseInfo release = \{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO\};[\s\S]*?xrReleaseSwapchainImage\(_swapchain, &release\);/
@@ -779,6 +806,43 @@ test('patch 0003 stays inside the existing session and keeps native locking simp
     added,
     /if \(!state\.live \|\| generation != state\.generation\) \{\n\+        \+\+state\.rejected;/
   );
+});
+
+test('patch 0004 synchronizes rig and fighter transforms on the OpenXR render thread before prepareFrame', () => {
+  const patch = read('tools/quest/viro-renderer/0004-openxr-quest-rig-sync.patch');
+  const lock = JSON.parse(read('tools/quest/viro-renderer/lock.json'));
+  assert.equal(lock.patches.at(-1), '0004-openxr-quest-rig-sync.patch');
+  assert.doesNotMatch(patch, /anthropic|claude|openai|grok/i);
+  const files = [...patch.matchAll(/^diff --git a\/(\S+)/gm)].map((match) => match[1]).sort();
+  assert.deepEqual(files, [
+    'android/sharedCode/src/main/cpp/QuestRigSync.h',
+    'android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp',
+  ]);
+  const added = patch
+    .split('\n')
+    .filter((line) => line.startsWith('+') && !line.startsWith('+++'))
+    .join('\n');
+  assert.equal((patch.match(/#include "QuestRigSync\.h"/g) ?? []).length, 1);
+  assert.match(
+    patch,
+    /\+\+\+ b\/android\/sharedCode\/src\/main\/cpp\/VROSceneRendererOpenXR\.cpp[\s\S]*#include "QuestRigSync\.h"/
+  );
+  // Applied synchronously on VROOpenXRRender before prepareFrame() so computeTransforms() and both eyes share one pose.
+  assert.match(
+    patch,
+    /quest_rig::applyToScene\(rigSceneRoot, \(int\)_sessionState\);[\s\S]*Prepare the Viro renderer \(once per frame, before any eye render\)/
+  );
+  assert.match(patch, /quest_rig::resetRenderCache\(\);/);
+  // Plain mutex only; bounded extrapolation; freeze when not XR_SESSION_STATE_FOCUSED; no session creation.
+  assert.doesNotMatch(added, /memory_order_acquire|memory_order_release|seqlock|try_lock|spin/);
+  assert.doesNotMatch(added, /xrCreateSession|xrCreateInstance|std::clamp/);
+  assert.match(added, /constexpr double kMaxExtrapolateSec = 0\.05;/);
+  assert.match(added, /sessionState == XR_SESSION_STATE_FOCUSED/);
+  for (const tag of ['quest-rig-outer', 'quest-stance-ring', 'quest-red-node', 'quest-blue-node']) {
+    assert.ok(added.includes(`"${tag}"`), `node tag ${tag}`);
+  }
+  assert.match(added, /node->setPosition\(/);
+  assert.match(added, /node->setRotation\(VROQuaternion\(/);
 });
 
 test('the Quest scene mounts world markers and the 45-degree sky diagnostics panel without touching menu hits', () => {
@@ -984,7 +1048,9 @@ test('diagnostics live patch targets bounded sub-regions and responds faster tha
       // Sub-regions stay clear of flags (y<=264) and Aim line (y>=694).
       if (kind === 'controls') {
         assert.ok(r.y >= 275 && r.y + r.height <= 690);
-        assert.ok(r.width * r.height < QUEST_DIAG_TEXTURE.widthPx * QUEST_DIAG_TEXTURE.heightPx * 0.2);
+        assert.ok(
+          r.width * r.height < QUEST_DIAG_TEXTURE.widthPx * QUEST_DIAG_TEXTURE.heightPx * 0.2
+        );
       }
     }
   }
@@ -1040,7 +1106,9 @@ test('diagnostics live patch targets bounded sub-regions and responds faster tha
   assert.equal(lastRegion.y, QUEST_DIAG_LIVE_RECTS.right.controls.y);
   assert.ok(lastRegion.ops.some((op) => op.op === 'text' && /Stick  X/.test(op.text)));
   assert.ok(
-    patches.some((p) => p.patch.regions[0].ops.some((op) => op.op === 'text' && op.text === 'A:ON')),
+    patches.some((p) =>
+      p.patch.regions[0].ops.some((op) => op.op === 'text' && op.text === 'A:ON')
+    ),
     'short 3-frame A-button tap is captured by live patch'
   );
   source.stop();

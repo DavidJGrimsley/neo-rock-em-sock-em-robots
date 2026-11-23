@@ -12,9 +12,13 @@ import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { experiences } from '@/features/experiences/experience-catalog';
 import { arSessionCoordinator } from '@/features/ar/ar-session-controller';
+import { isQuestDevice } from '@/features/quest-vr/quest-platform';
+import { ensureQuestVRRegistered } from '@/features/quest-vr/quest-vr-bootstrap';
 import themeFontAssets from '../theme/font-assets';
 import { AppThemeProvider, useAppTheme } from '../theme/provider';
 import { GameButton } from '@/ui/game-button';
+
+ensureQuestVRRegistered();
 
 function HeaderAction({ label, onPress }: { label: string; onPress: () => void }) {
   const { activeColors: colors } = useAppTheme();
@@ -85,6 +89,7 @@ function LayoutInner() {
                 options={{
                   title: "Neo Rock 'Em Sock 'Em Robots",
                   orientation: 'default',
+                  headerShown: !isQuestDevice(Platform),
                 }}
               />
               {experiences.map((experience) => (
