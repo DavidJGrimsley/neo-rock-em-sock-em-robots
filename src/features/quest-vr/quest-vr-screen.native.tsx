@@ -5,6 +5,7 @@ import {
   AppState,
   BackHandler,
   DeviceEventEmitter,
+  Image,
   NativeModules,
   Platform,
   ScrollView,
@@ -24,6 +25,10 @@ import {
 
 // Never loaded on phones: this is the only path to @reactvision/react-viro's Quest navigator.
 const QuestXRNavigator = lazy(() => import('./quest-xr-navigator.native'));
+
+// Exact main-menu title composition (`Neo / Rock 'Em Sock 'Em / Robots`) with transparent background.
+const questSplashTitleSource =
+  require('../../../assets/arena/ui/quest-lettering/quest-splash-title.png') as number;
 
 class QuestErrorBoundary extends Component<
   { children: ReactNode; fallback: ReactNode },
@@ -71,11 +76,13 @@ export function questPanelModel(
   const reentryLabel =
     snapshot.entries > 0 || snapshot.reentryCount > 0 ? 'Re-enter VR' : 'Enter VR';
   switch (snapshot.status) {
+    case 'idle':
     case 'launching':
       return {
-        title: 'Opening VR',
-        message: 'Put the headset view in front of you.',
+        title: "Neo Rock 'Em Sock 'Em Robots",
+        message: '',
         canEnter: false,
+        titleOnly: true,
       };
     // The panel is in front while VRActivity survives (e.g. paused/stopped when Horizon OS
     // brings the panel forward). Relaunching brings the singleTask VRActivity back without a new OpenXR session.
@@ -108,31 +115,105 @@ export function questPanelModel(
         canEnter: true,
         label: reentryLabel,
       };
-    default:
-      return {
-        title: 'Quest VR runtime',
-        message:
-          'Enter VR for the headset menu and the fixed ring. This panel is only the launcher.',
-        canEnter: true,
-        label: 'Enter VR',
-      };
   }
+}
+
+function QuestFloatingTitleView({
+  backgroundColor,
+  insets,
+}: {
+  backgroundColor: string;
+  insets: { left: number; right: number; top: number; bottom: number };
+}) {
+  return (
+    <View
+      testID="quest-floating-title-splash"
+      accessible
+      accessibilityRole="header"
+      accessibilityLabel="Neo Rock 'Em Sock 'Em Robots"
+      style={{
+        flex: 1,
+        backgroundColor,
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingLeft: Math.max(24, insets.left),
+        paddingRight: Math.max(24, insets.right),
+        paddingTop: Math.max(24, insets.top),
+        paddingBottom: Math.max(24, insets.bottom),
+      }}>
+      <Image
+        source={questSplashTitleSource}
+        resizeMode="contain"
+        style={{
+          width: '82%',
+          maxWidth: 520,
+          aspectRatio: 1594 / 598,
+          backgroundColor: 'transparent',
+        }}
+      />
+    </View>
+  );
 }
 
 export default function QuestVRScreen() {
   const { activeColors: colors } = useAppTheme();
   const insets = useSafeAreaInsets();
   const snapshot = useSyncExternalStore(questRuntime.subscribe, questRuntime.getSnapshot);
-  // 0 until the first explicit Enter; bumped to remount after a load or render failure.
-  const [attempt, setAttempt] = useState(0);
-  // Remounts native Compose HostViews when returning to MainActivity so buttons never retain a destroyed VRActivity lifecycle.
-  const [panelMountKey, setPanelMountKey] = useState(0);
   const quest = isQuestDevice(Platform);
   const launcher = typeof NativeModules.VRLauncher?.launchVRScene === 'function';
+  const initiallyActive = AppState?.currentState === 'active';
+  // Cold launch on Quest starts at attempt 1 when active so QuestXRNavigator mounts immediately; bumped on retry/re-entry.
+  const [attempt, setAttempt] = useState(() =>
+    quest && launcher && initiallyActive && questRuntime.getSnapshot().status === 'idle' ? 1 : 0
+  );
+  // Remounts native Compose HostViews when returning to MainActivity so buttons never retain a destroyed VRActivity lifecycle.
+  const [panelMountKey, setPanelMountKey] = useState(0);
   const model = questPanelModel(snapshot, { quest, launcher });
 
+  const invokeLaunch = (launch?: () => void) => {
+    const fn = launch ?? NativeModules.VRLauncher?.launchVRScene;
+    if (typeof fn !== 'function') {
+      questRuntime.fail(new Error('VRLauncher is unavailable.'));
+      return;
+    }
+    try {
+      fn();
+    } catch (error) {
+      questRuntime.fail(error);
+    }
+  };
+
+  const enter = (launch?: () => void) => {
+    const current = questRuntime.getSnapshot();
+    if (!quest || !launcher) return;
+    if (
+      current.status === 'immersive' &&
+      current.vrActivityState !== 'finishing' &&
+      current.vrActivityState !== 'destroyed'
+    ) {
+      invokeLaunch(launch);
+      return;
+    }
+    if (current.status === 'launching') return;
+    const shouldRemountNavigator =
+      !launch || current.status === 'error' || current.status === 'idle';
+    if (!questRuntime.requestEnter()) return;
+    if (shouldRemountNavigator) setAttempt((value) => value + 1);
+    else invokeLaunch(launch);
+  };
+
   useEffect(() => {
-    const subscription = DeviceEventEmitter?.addListener?.(
+    // Arm the launch timer once on active cold launch (StrictMode-safe because requestEnter is idempotent while launching).
+    if (
+      quest &&
+      launcher &&
+      AppState?.currentState === 'active' &&
+      questRuntime.getSnapshot().status === 'idle'
+    ) {
+      questRuntime.requestEnter();
+    }
+
+    const vrStateSub = DeviceEventEmitter?.addListener?.(
       'questVRActivityState',
       (event: { state?: unknown; finishing?: unknown } | null | undefined) => {
         const nextState =
@@ -147,6 +228,21 @@ export default function QuestVRScreen() {
         }
       }
     );
+
+    const handleAutoAction = (action: 'enter' | 'launch-live' | null) => {
+      if (!quest || !launcher || !action) return;
+      if (action === 'launch-live') {
+        invokeLaunch();
+      } else {
+        if (!questRuntime.requestEnter()) return;
+        setAttempt((value) => value + 1);
+      }
+    };
+
+    const reopenSub = DeviceEventEmitter?.addListener?.('questLauncherReopen', () => {
+      handleAutoAction(questRuntime.resolveLauncherReopen?.() ?? null);
+    });
+
     let previousAppState = AppState?.currentState;
     questRuntime.appStateChanged?.(
       previousAppState !== 'background' && previousAppState !== 'inactive'
@@ -157,13 +253,16 @@ export default function QuestVRScreen() {
       questRuntime.appStateChanged?.(nextState === 'active');
       if (returnedToActive) {
         setPanelMountKey((value) => value + 1);
+        handleAutoAction(questRuntime.consumeAutoReenter?.() ?? null);
       }
     });
+
     return () => {
-      subscription?.remove?.();
+      vrStateSub?.remove?.();
+      reopenSub?.remove?.();
       appStateSubscription?.remove?.();
     };
-  }, []);
+  }, [launcher, quest]);
 
   // Leaving mid-launch would orphan the VRActivity that is about to open.
   useEffect(() => {
@@ -172,53 +271,41 @@ export default function QuestVRScreen() {
     return () => subscription.remove();
   }, [snapshot.status]);
 
-  const enter = (launch?: () => void) => {
-    if (!model.canEnter) return;
-    // Without a mounted navigator (this screen remounted), relaunch the live VRActivity directly.
-    if (
-      snapshot.status === 'immersive' &&
-      snapshot.vrActivityState !== 'finishing' &&
-      snapshot.vrActivityState !== 'destroyed'
-    ) {
-      return (launch ?? NativeModules.VRLauncher?.launchVRScene)?.();
+  const panel = (launch?: () => void) => {
+    if (model.titleOnly) {
+      return <QuestFloatingTitleView backgroundColor="#000000" insets={insets} />;
     }
-    const shouldRemountNavigator = !launch || snapshot.status === 'error';
-    if (!questRuntime.requestEnter()) return;
-    if (shouldRemountNavigator) setAttempt((value) => value + 1);
-    else launch();
+    return (
+      <ScrollView
+        style={{ flex: 1, backgroundColor: colors.background }}
+        contentContainerStyle={{
+          flexGrow: 1,
+          justifyContent: 'center',
+          padding: 20,
+          paddingLeft: Math.max(20, insets.left),
+          paddingRight: Math.max(20, insets.right),
+          paddingBottom: Math.max(20, insets.bottom),
+        }}>
+        <View key={panelMountKey} style={{ alignSelf: 'center', width: '100%', maxWidth: 720 }}>
+          <GameStatusPanel
+            title={model.title}
+            message={model.message}
+            actions={[
+              ...(model.canEnter
+                ? [{ label: model.label ?? 'Re-enter VR', onPress: () => enter(launch) }]
+                : []),
+              ...(!quest || !launcher
+                ? [{ label: 'Home', onPress: () => router.dismissTo('/') }]
+                : []),
+            ]}
+            selectableMessage
+            compact
+            outlinedActions={['Home']}
+          />
+        </View>
+      </ScrollView>
+    );
   };
-
-  const panel = (launch?: () => void) => (
-    <ScrollView
-      style={{ flex: 1, backgroundColor: colors.background }}
-      contentContainerStyle={{
-        flexGrow: 1,
-        justifyContent: 'center',
-        padding: 20,
-        paddingLeft: Math.max(20, insets.left),
-        paddingRight: Math.max(20, insets.right),
-        paddingBottom: Math.max(20, insets.bottom),
-      }}>
-      <View key={panelMountKey} style={{ alignSelf: 'center', width: '100%', maxWidth: 720 }}>
-        <GameStatusPanel
-          title={model.title}
-          message={model.message}
-          loading={snapshot.status === 'launching'}
-          actions={[
-            ...(model.canEnter
-              ? [{ label: model.label ?? 'Enter VR', onPress: () => enter(launch) }]
-              : []),
-            ...(snapshot.status === 'launching'
-              ? []
-              : [{ label: 'Home', onPress: () => router.dismissTo('/') }]),
-          ]}
-          selectableMessage
-          compact
-          outlinedActions={['Home']}
-        />
-      </View>
-    </ScrollView>
-  );
 
   if (attempt === 0) return panel();
   return (

@@ -3,8 +3,11 @@ const path = require('node:path');
 const { withFinalizedMod } = require('@expo/config-plugins');
 
 const PATCH_MARKER = 'supersededByOtherActivity';
+const MAIN_ACTIVITY_PATCH_MARKER = 'questLauncherReopen';
 
 const IMPORT_ANCHOR = 'import android.app.Activity';
+const MAIN_IMPORT_ANCHOR = 'import android.os.Bundle';
+const MAIN_CLASS_ANCHOR = 'class MainActivity : ReactActivity() {';
 const FIELD_ANCHOR = '    private var expectingForeignPause = false';
 const DELEGATE_ANCHOR =
   '        object : DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled) {';
@@ -202,11 +205,91 @@ function applyQuestVRActivityPatch(platformProjectRoot, packageName) {
   return { activityPath, changed: patched !== source };
 }
 
+function patchMainActivitySource(source) {
+  const lineEnding = source.includes('\r\n') ? '\r\n' : '\n';
+  const normalized = source.replace(/\r\n/g, '\n');
+
+  if (normalized.includes(MAIN_ACTIVITY_PATCH_MARKER)) {
+    return source;
+  }
+
+  let patched = replaceOnce(
+    normalized,
+    MAIN_IMPORT_ANCHOR,
+    [
+      'import android.content.Intent',
+      MAIN_IMPORT_ANCHOR,
+      'import com.facebook.react.modules.core.DeviceEventManagerModule',
+    ].join('\n'),
+    'MainActivity Bundle import'
+  );
+
+  patched = replaceOnce(
+    patched,
+    MAIN_CLASS_ANCHOR,
+    [
+      MAIN_CLASS_ANCHOR,
+      '  override fun onNewIntent(intent: Intent) {',
+      '    super.onNewIntent(intent)',
+      '    setIntent(intent)',
+      '    if (',
+      '      intent.action == Intent.ACTION_MAIN &&',
+      '      intent.hasCategory(Intent.CATEGORY_LAUNCHER)',
+      '    ) {',
+      '      val reactContext = reactHost?.currentReactContext',
+      '      if (reactContext != null && reactContext.hasActiveReactInstance()) {',
+      '        try {',
+      '          reactContext',
+      '            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)',
+      `            .emit("${MAIN_ACTIVITY_PATCH_MARKER}", null)`,
+      '        } catch (_: Throwable) {',
+      '        }',
+      '      }',
+      '    }',
+      '  }',
+      '',
+    ].join('\n'),
+    'MainActivity class header'
+  );
+
+  return lineEnding === '\r\n' ? patched.replace(/\n/g, '\r\n') : patched;
+}
+
+function applyQuestMainActivityPatch(platformProjectRoot, packageName) {
+  if (!packageName) {
+    throw new Error('android.package is required to locate MainActivity.kt');
+  }
+  const activityPath = path.join(
+    platformProjectRoot,
+    'app',
+    'src',
+    'main',
+    'java',
+    ...packageName.split('.'),
+    'MainActivity.kt'
+  );
+  if (!fs.existsSync(activityPath)) {
+    throw new Error(
+      `Expected Quest MainActivity.kt at ${activityPath} before finalizing Android prebuild`
+    );
+  }
+  const source = fs.readFileSync(activityPath, 'utf8');
+  const patched = patchMainActivitySource(source);
+  if (patched !== source) {
+    fs.writeFileSync(activityPath, patched, 'utf8');
+  }
+  return { activityPath, changed: patched !== source };
+}
+
 function withQuestVRActivity(config) {
   return withFinalizedMod(config, [
     'android',
     async (modConfig) => {
       applyQuestVRActivityPatch(
+        modConfig.modRequest.platformProjectRoot,
+        modConfig.android?.package
+      );
+      applyQuestMainActivityPatch(
         modConfig.modRequest.platformProjectRoot,
         modConfig.android?.package
       );
@@ -216,7 +299,10 @@ function withQuestVRActivity(config) {
 }
 
 withQuestVRActivity.PATCH_MARKER = PATCH_MARKER;
+withQuestVRActivity.MAIN_ACTIVITY_PATCH_MARKER = MAIN_ACTIVITY_PATCH_MARKER;
 withQuestVRActivity.patchVRActivitySource = patchVRActivitySource;
 withQuestVRActivity.applyQuestVRActivityPatch = applyQuestVRActivityPatch;
+withQuestVRActivity.patchMainActivitySource = patchMainActivitySource;
+withQuestVRActivity.applyQuestMainActivityPatch = applyQuestMainActivityPatch;
 
 module.exports = withQuestVRActivity;

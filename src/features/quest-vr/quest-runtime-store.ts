@@ -5,6 +5,8 @@ export type QuestRuntimeStatus = 'idle' | 'launching' | 'immersive' | 'returned'
 export type QuestVRActivityState =
   'unknown' | 'resumed' | 'paused' | 'stopped' | 'finishing' | 'destroyed';
 
+export type QuestAutoReentryAction = 'enter' | 'launch-live' | null;
+
 export interface QuestRuntimeSnapshot {
   status: QuestRuntimeStatus;
   // Latest native VRActivity lifecycle state emitted by VRActivity.kt.
@@ -54,11 +56,21 @@ export function createQuestRuntime(
 ) {
   const store = createStore<QuestRuntimeSnapshot>(() => initial);
   let launchTimer: unknown = null;
+  // Tracks whether MainActivity was actually foreground-active while returned before
+  // going to background (Quest Home), distinguishing a Quest Home reopen from the
+  // transient onPause/onResume AppState flicker during VRActivity -> MainActivity exit.
+  let panelActiveSinceReturn = false;
+  let reenterOnAppActive = false;
+
   const set = (patch: Partial<QuestRuntimeSnapshot>) =>
     store.setState({ ...store.getState(), ...patch });
   const clearTimer = () => {
     if (launchTimer !== null) clock.cancel(launchTimer);
     launchTimer = null;
+  };
+  const resetReturnHandoff = () => {
+    panelActiveSinceReturn = false;
+    reenterOnAppActive = false;
   };
 
   return {
@@ -75,6 +87,7 @@ export function createQuestRuntime(
       ) {
         return false;
       }
+      resetReturnHandoff();
       clearTimer();
       launchTimer = clock.schedule(() => {
         launchTimer = null;
@@ -88,6 +101,7 @@ export function createQuestRuntime(
         status: 'launching',
         vrActivityState: 'unknown',
         reentryCount: state.reentryCount + (state.status === 'idle' ? 0 : 1),
+        exitRequest: null,
         lastError: null,
       });
       return true;
@@ -95,6 +109,7 @@ export function createQuestRuntime(
     sceneMounted() {
       const state = store.getState();
       const sceneMounts = state.sceneMounts + 1;
+      resetReturnHandoff();
       if (state.status === 'immersive') return set({ sceneMounts });
       clearTimer();
       // A late mount after the launch timeout still counts as that entry. A remount
@@ -115,17 +130,19 @@ export function createQuestRuntime(
     sceneUnmounted() {
       const state = store.getState();
       const sceneMounts = Math.max(0, state.sceneMounts - 1);
-      set(
-        sceneMounts === 0 && state.status === 'immersive'
-          ? { sceneMounts, status: 'returned' }
-          : { sceneMounts }
-      );
+      if (sceneMounts === 0 && state.status === 'immersive') {
+        resetReturnHandoff();
+        set({ sceneMounts, status: 'returned' });
+      } else {
+        set({ sceneMounts });
+      }
     },
     vrActivityStateChanged(nextState: QuestVRActivityState, finishing = false) {
       const state = store.getState();
       const effectiveState: QuestVRActivityState =
         finishing && nextState !== 'destroyed' ? 'finishing' : nextState;
       if (effectiveState === 'destroyed') {
+        if (state.status === 'immersive') resetReturnHandoff();
         set({
           vrActivityState: 'destroyed',
           sceneMounts: 0,
@@ -134,6 +151,7 @@ export function createQuestRuntime(
         return;
       }
       if (effectiveState === 'finishing') {
+        if (state.status === 'immersive') resetReturnHandoff();
         set(
           state.status === 'immersive'
             ? { vrActivityState: 'finishing', status: 'returned' }
@@ -144,13 +162,62 @@ export function createQuestRuntime(
       set({ vrActivityState: effectiveState });
     },
     appStateChanged(appActive: boolean) {
-      if (store.getState().appActive !== appActive) set({ appActive });
+      const state = store.getState();
+      if (appActive) {
+        if (state.status === 'returned') {
+          panelActiveSinceReturn = true;
+        }
+      } else {
+        if (state.status === 'returned' && panelActiveSinceReturn) {
+          reenterOnAppActive = true;
+        }
+        panelActiveSinceReturn = false;
+      }
+      if (state.appActive !== appActive) set({ appActive });
+    },
+    /**
+     * Decides whether returning to active foreground represents re-opening the app from
+     * Quest Home (rather than returning from VR via Exit/Back).
+     */
+    consumeAutoReenter(): QuestAutoReentryAction {
+      const state = store.getState();
+      if (state.status === 'idle') {
+        return 'enter';
+      }
+      if (state.status === 'returned' && reenterOnAppActive) {
+        reenterOnAppActive = false;
+        return 'enter';
+      }
+      if (
+        state.status === 'immersive' &&
+        state.vrActivityState === 'stopped' &&
+        state.exitRequest === null
+      ) {
+        return 'launch-live';
+      }
+      return null;
+    },
+    /** Resolves an explicit Android LAUNCHER reopen intent (e.g. clicking app icon from Quest Home). */
+    resolveLauncherReopen(): QuestAutoReentryAction {
+      const state = store.getState();
+      reenterOnAppActive = false;
+      if (state.status === 'launching') return null;
+      if (state.status === 'immersive') {
+        if (state.vrActivityState === 'resumed') return null;
+        if (state.vrActivityState === 'finishing' || state.vrActivityState === 'destroyed') {
+          return 'enter';
+        }
+        return 'launch-live';
+      }
+      return 'enter';
     },
     exitRequested(source: string) {
+      resetReturnHandoff();
       if (store.getState().exitRequest === null) set({ exitRequest: source });
     },
     fail(error: unknown) {
       clearTimer();
+      resetReturnHandoff();
       set({
         status: 'error',
         lastError: error instanceof Error ? error.message : String(error),

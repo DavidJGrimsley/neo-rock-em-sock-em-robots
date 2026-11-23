@@ -20,6 +20,9 @@ export function isQuestBuild(env: Record<string, string | undefined> = process.e
   return env.QUEST_BUILD === '1';
 }
 
+export const QUEST_SPLASH_IMAGE = './assets/arena/ui/quest-lettering/quest-splash-title.png';
+export const QUEST_SPLASH_IMAGE_WIDTH = 176;
+
 export default ({ config }: ConfigContext): ExpoConfig => {
   const apiKey = process.env.RV_API_KEY?.trim();
   const projectId = process.env.RV_PROJECT_ID?.trim();
@@ -55,8 +58,22 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         'expo-audio',
         { microphonePermission, recordAudioAndroid: false, enableBackgroundPlayback: false },
       ],
-      ...(config.plugins ?? []).map((plugin) =>
-        Array.isArray(plugin) && plugin[0] === '@reactvision/react-viro'
+      ...(config.plugins ?? []).map((plugin) => {
+        if (quest && Array.isArray(plugin) && plugin[0] === 'expo-splash-screen') {
+          return [
+            'expo-splash-screen',
+            {
+              backgroundColor: '#000000',
+              image: QUEST_SPLASH_IMAGE,
+              dark: {
+                image: QUEST_SPLASH_IMAGE,
+                backgroundColor: '#000000',
+              },
+              imageWidth: QUEST_SPLASH_IMAGE_WIDTH,
+            },
+          ] as [string, Record<string, unknown>];
+        }
+        return Array.isArray(plugin) && plugin[0] === '@reactvision/react-viro'
           ? ([
               plugin[0],
               {
@@ -79,8 +96,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
                 ...(configured ? { rvApiKey: apiKey, rvProjectId: projectId } : {}),
               },
             ] as [string, Record<string, unknown>])
-          : plugin
-      ),
+          : plugin;
+      }),
       // Kept on Quest too: omitting it lets prebuild auto-apply expo-camera with audio recording.
       [
         'expo-camera',
@@ -98,6 +115,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ? {
           android: {
             ...config.android,
+            backgroundColor: '#000000',
             blockedPermissions: [
               ...(config.android?.blockedPermissions ?? []),
               ...QUEST_BLOCKED_PERMISSIONS,

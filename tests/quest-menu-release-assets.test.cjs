@@ -198,7 +198,19 @@ test('the release APK packages the compositor panel module, patched renderer, ti
   assert.ok(bundle.includes('QuestPanel'));
   assert.ok(bundle.includes('quest-lettering'));
   assert.ok(bundle.includes("Rock 'Em Sock 'Em"));
+  assert.ok(bundle.includes('questLauncherReopen'));
   assert.equal(bundle.includes('Menu texture failed'), false);
+  // Splash title resource must be registered in resources.arsc and match the non-Expo splash title.
+  assert.equal(
+    arsc.includes('assets_arena_ui_questlettering_questsplashtitle'),
+    true,
+    'quest-splash-title drawable must be packaged in APK'
+  );
+  assert.equal(
+    arsc.includes('splashscreen_logo'),
+    true,
+    'splashscreen_logo drawable must be registered in resources.arsc'
+  );
 });
 
 function readZipListing(apk) {

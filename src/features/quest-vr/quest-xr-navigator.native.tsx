@@ -6,6 +6,29 @@ import { questOnExitViro, questRuntime } from './quest-runtime-store';
 
 const vrInitialScene = { scene: QuestArenaScene };
 
+const defaultRendererConfig = {
+  hdrEnabled: true,
+  bloomEnabled: false,
+  passthroughEnabled: false,
+  handTrackingEnabled: false,
+  onExitViro: questOnExitViro,
+};
+
+let errorSubscription: (() => void) | null = null;
+
+/**
+ * Ensures the Quest error relay is attached and a default scene intent exists when
+ * Android restores VRActivity directly without MainActivity mounting first.
+ */
+export function registerQuestVRScene(): void {
+  if (!errorSubscription) {
+    errorSubscription = VRQuestNavigatorBridge.onQuestError((error) => questRuntime.fail(error));
+  }
+  if (!VRQuestNavigatorBridge.getIntent()) {
+    VRQuestNavigatorBridge.setIntent(vrInitialScene, defaultRendererConfig);
+  }
+}
+
 // Mounting launches VRActivity once. Later entries go through `enter` from renderQuestPanel.
 export default function QuestXRNavigator({
   renderQuestPanel,
@@ -13,7 +36,9 @@ export default function QuestXRNavigator({
   renderQuestPanel: (enter: () => void) => ReactNode;
 }) {
   // VRActivity is a separate React root, so scene crashes arrive only through the bridge.
-  useEffect(() => VRQuestNavigatorBridge.onQuestError((error) => questRuntime.fail(error)), []);
+  useEffect(() => {
+    registerQuestVRScene();
+  }, []);
 
   return (
     <ViroXRSceneNavigator
