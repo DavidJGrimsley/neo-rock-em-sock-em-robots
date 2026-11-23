@@ -316,7 +316,8 @@ const panelJni = [
 const missingPanelJni = pristine ? [] : panelJni.filter((symbol) => !candidate.exports.has(symbol));
 if (missingPanelJni.length)
   problems.push(`menu layer JNI methods are not exported: ${missingPanelJni.join(', ')}`);
-// 0003 adds the controller input sampler, render-thread markers and sky diagnostics layer.
+// 0003 adds the controller input sampler, render-thread markers and sky diagnostics layer;
+// 0004 adds render-thread rig & fighter transform synchronization.
 const inputJni = [
   'nativeVersion',
   'nativeSetMarkersEnabled',
@@ -327,6 +328,9 @@ const inputJni = [
   'nativeDiagPose',
   'nativeDiagDraw',
   'nativeDiagDrawRegion',
+  'nativeRigSyncVersion',
+  'nativePublishRigState',
+  'nativeClearRigState',
 ].map((name) => `Java_expo_modules_questinput_QuestInputModule_${name}`);
 const missingInputJni = pristine ? [] : inputJni.filter((symbol) => !candidate.exports.has(symbol));
 if (missingInputJni.length)

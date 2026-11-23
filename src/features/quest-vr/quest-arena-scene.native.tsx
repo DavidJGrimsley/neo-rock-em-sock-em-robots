@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from 'react';
 import { Asset } from 'expo-asset';
 import {
   Viro3DObject,
   ViroAmbientLight,
   ViroDirectionalLight,
+  ViroGameLoop,
+  ViroGameLoopUtils,
   ViroMaterials,
   ViroNode,
   ViroQuad,
@@ -13,22 +15,24 @@ import {
   exitVRScene,
 } from '@reactvision/react-viro';
 
-import { ARENA_LAYOUT, type FighterId } from '../arena-fighter/arena-controller.ts';
-
-import { questPanelAvailable, questPanelNative } from '../../../modules/quest-panel/src/index.ts';
 import {
-  createQuestArenaSession,
-  type QuestArenaSession,
-  type QuestArenaView,
-} from './quest-arena-session.ts';
+  ARENA_LAYOUT,
+  type FighterId,
+  type FighterTransform,
+} from '../arena-fighter/arena-controller.ts';
+
+import { questInputNative, questRigSyncAvailable } from '../../../modules/quest-input/src/index.ts';
+import { questPanelAvailable, questPanelNative } from '../../../modules/quest-panel/src/index.ts';
+import { createQuestArenaSession, type QuestArenaSession } from './quest-arena-session.ts';
 import {
   menuFrame,
-  questRigTransform,
+  questComposedRigTransform,
   stanceMarkerRingLocal,
+  wrap180,
   type Calibration,
   type RigAnchor,
 } from './quest-head-rig.ts';
-import { questHeadTracker, type QuestHeadTrackerSnapshot } from './quest-head-tracker.ts';
+import { questHeadTracker } from './quest-head-tracker.ts';
 import {
   createSceneQuestInputSource,
   QuestDiagnosticsPanel,
@@ -117,6 +121,21 @@ const stanceRingThickness = 0.004;
 const stanceRingHalf = (stanceRingSize - stanceRingThickness) / 2;
 const stanceRingLift = 0.0005;
 const idleAnimation = { name: 'IdleAggro', loop: true, run: true, interruptible: true };
+const LOOPING_CLIPS = new Set([
+  'Idle',
+  'IdleAggro',
+  'WalkForward',
+  'WalkBackward',
+  'StrafeLeft',
+  'StrafeRight',
+  'Run',
+  'RunFast',
+  'DefeatedLoop',
+  'BlockHold',
+  'BlockAdvance',
+  'BlockStrafeLeft',
+  'BlockStrafeRight',
+]);
 const systemRecenterHint = 'Hold Meta button to recenter view.';
 // Panel-local depths: the layer mask at 0, hover outline, then hit targets (0.012).
 const focusZ = 0.008;
@@ -195,48 +214,406 @@ function leave(session: QuestArenaSession) {
 
 const fmtVec = (v: readonly number[]) => `[${v.map((n) => n.toFixed(3)).join(',')}]`;
 
+type Vec3Tuple = [number, number, number];
+
+interface InitialRingPose {
+  key: string;
+  rigPosition: Vec3Tuple;
+  rigRotation: Vec3Tuple;
+  rigScale: Vec3Tuple;
+  stancePosition: Vec3Tuple;
+  stanceRotation: Vec3Tuple;
+  bluePosition: Vec3Tuple;
+  blueRotation: Vec3Tuple;
+  redPosition: Vec3Tuple;
+  redRotation: Vec3Tuple;
+}
+
+interface SyncedTransformCache {
+  rigOuterNode?: ViroNode | null;
+  rigPosition?: Vec3Tuple;
+  rigRotationY?: number;
+  lastRigJumpWarnAt?: number;
+  stanceRingNode?: ViroNode | null;
+  stancePosition?: Vec3Tuple;
+  stanceYaw?: number;
+  blueNode?: ViroNode | null;
+  blue?: FighterTransform;
+  redNode?: ViroNode | null;
+  red?: FighterTransform;
+}
+
+function sameVec3(a: readonly number[] | undefined, b: readonly number[]) {
+  return !!a && a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+}
+
+function setNativeNodeProps(node: unknown, props: Record<string, unknown>) {
+  (
+    node as { setNativeProps?: (nextProps: Record<string, unknown>) => void } | null
+  )?.setNativeProps?.(props);
+}
+
+/** Dispatches transform commands without triggering Fabric shadow-tree commits or VRT3DObject reloads. */
+function pushNodeTransform(
+  nodeRef: RefObject<ViroNode | null>,
+  position: Vec3Tuple | null,
+  rotation: Vec3Tuple | null
+) {
+  const node = nodeRef.current;
+  if (!node) return;
+  if (
+    typeof ViroGameLoopUtils?.setPosition === 'function' &&
+    typeof ViroGameLoopUtils?.setRotation === 'function'
+  ) {
+    if (position) ViroGameLoopUtils.setPosition(nodeRef, position);
+    if (rotation) ViroGameLoopUtils.setRotation(nodeRef, rotation);
+    return;
+  }
+  setNativeNodeProps(node, {
+    ...(position ? { position } : {}),
+    ...(rotation ? { rotation } : {}),
+  });
+}
+
+function writeFighterAnimation(
+  model: Viro3DObject | null,
+  animation: { name: string; loop: boolean; run: boolean; interruptible: boolean }
+) {
+  setNativeNodeProps(model, { animation });
+}
+
+interface RingNodeRefs {
+  rigOuter: RefObject<ViroNode | null>;
+  stanceRing: RefObject<ViroNode | null>;
+  blueNode: RefObject<ViroNode | null>;
+  redNode: RefObject<ViroNode | null>;
+}
+
+const QUEST_RIG_MAX_STEP_EXTRAP_M = 0.25;
+const QUEST_RIG_MAX_YAW_STEP_EXTRAP_DEG = 30;
+
+function publishQuestRigState(
+  session: QuestArenaSession,
+  cache: SyncedTransformCache,
+  dtSeconds: number,
+  allowExtrapolation: boolean
+) {
+  const live = session.getLiveTransforms();
+  if (!live) return;
+  const cal =
+    questHeadTracker.getLiveHeadState?.().calibration ?? questHeadTracker.getSnapshot().calibration;
+  const anchor: RigAnchor = { x: live.blue.x, z: live.blue.z, yaw: live.blue.yaw };
+  const rig = questComposedRigTransform(cal, anchor);
+  const stanceCenter = stanceMarkerRingLocal(anchor);
+  const stancePosition: Vec3Tuple = [
+    stanceCenter[0],
+    stanceCenter[1] + stanceRingLift,
+    stanceCenter[2],
+  ];
+
+  const snap = session.getSnapshot();
+  const canDifferentiate =
+    allowExtrapolation &&
+    snap.stage === 'fighting' &&
+    dtSeconds > 1e-4 &&
+    dtSeconds <= 0.1 &&
+    cache.rigPosition !== undefined &&
+    cache.rigRotationY !== undefined &&
+    cache.stancePosition !== undefined &&
+    cache.stanceYaw !== undefined &&
+    cache.red !== undefined &&
+    cache.blue !== undefined;
+
+  let rigVx = 0;
+  let rigVy = 0;
+  let rigVz = 0;
+  let rigYawRate = 0;
+  let stanceVx = 0;
+  let stanceVy = 0;
+  let stanceVz = 0;
+  let stanceYawRate = 0;
+  let redVx = 0;
+  let redVy = 0;
+  let redVz = 0;
+  let redYawRate = 0;
+  let blueVx = 0;
+  let blueVy = 0;
+  let blueVz = 0;
+  let blueYawRate = 0;
+
+  if (canDifferentiate) {
+    const prevRig = cache.rigPosition!;
+    const prevStance = cache.stancePosition!;
+    const prevRed = cache.red!;
+    const prevBlue = cache.blue!;
+
+    const rigDx = rig.position[0] - prevRig[0];
+    const rigDy = rig.position[1] - prevRig[1];
+    const rigDz = rig.position[2] - prevRig[2];
+    const rigDyaw = wrap180(rig.rotationY - cache.rigRotationY!);
+
+    const stanceDx = stancePosition[0] - prevStance[0];
+    const stanceDy = stancePosition[1] - prevStance[1];
+    const stanceDz = stancePosition[2] - prevStance[2];
+    const stanceDyaw = wrap180(anchor.yaw - cache.stanceYaw!);
+
+    const redDx = live.red.x - prevRed.x;
+    const redDy = live.red.lift - prevRed.lift;
+    const redDz = live.red.z - prevRed.z;
+    const redDyaw = wrap180(live.red.yaw - prevRed.yaw);
+
+    const blueDx = live.blue.x - prevBlue.x;
+    const blueDy = live.blue.lift - prevBlue.lift;
+    const blueDz = live.blue.z - prevBlue.z;
+    const blueDyaw = wrap180(live.blue.yaw - prevBlue.yaw);
+
+    const continuous =
+      Math.hypot(rigDx, rigDy, rigDz) <= QUEST_RIG_MAX_STEP_EXTRAP_M &&
+      Math.hypot(redDx, redDy, redDz) <= QUEST_RIG_MAX_STEP_EXTRAP_M &&
+      Math.hypot(blueDx, blueDy, blueDz) <= QUEST_RIG_MAX_STEP_EXTRAP_M &&
+      Math.abs(rigDyaw) <= QUEST_RIG_MAX_YAW_STEP_EXTRAP_DEG &&
+      Math.abs(redDyaw) <= QUEST_RIG_MAX_YAW_STEP_EXTRAP_DEG &&
+      Math.abs(blueDyaw) <= QUEST_RIG_MAX_YAW_STEP_EXTRAP_DEG;
+
+    if (continuous) {
+      const invDt = 1 / dtSeconds;
+      rigVx = rigDx * invDt;
+      rigVy = rigDy * invDt;
+      rigVz = rigDz * invDt;
+      rigYawRate = rigDyaw * invDt;
+      stanceVx = stanceDx * invDt;
+      stanceVy = stanceDy * invDt;
+      stanceVz = stanceDz * invDt;
+      stanceYawRate = stanceDyaw * invDt;
+      redVx = redDx * invDt;
+      redVy = redDy * invDt;
+      redVz = redDz * invDt;
+      redYawRate = redDyaw * invDt;
+      blueVx = blueDx * invDt;
+      blueVy = blueDy * invDt;
+      blueVz = blueDz * invDt;
+      blueYawRate = blueDyaw * invDt;
+    }
+  }
+
+  questInputNative?.publishRigState?.(true, [
+    rig.position[0],
+    rig.position[1],
+    rig.position[2],
+    rigVx,
+    rigVy,
+    rigVz,
+    rig.rotationY,
+    rigYawRate,
+    stancePosition[0],
+    stancePosition[1],
+    stancePosition[2],
+    stanceVx,
+    stanceVy,
+    stanceVz,
+    anchor.yaw,
+    stanceYawRate,
+    live.red.x,
+    fighterY + live.red.lift,
+    live.red.z,
+    redVx,
+    redVy,
+    redVz,
+    live.red.yaw,
+    redYawRate,
+    live.blue.x,
+    fighterY + live.blue.lift,
+    live.blue.z,
+    blueVx,
+    blueVy,
+    blueVz,
+    live.blue.yaw,
+    blueYawRate,
+  ]);
+
+  cache.rigPosition = [...rig.position];
+  cache.rigRotationY = rig.rotationY;
+  cache.stancePosition = stancePosition;
+  cache.stanceYaw = anchor.yaw;
+  cache.red = { ...live.red };
+  cache.blue = { ...live.blue };
+}
+
+function syncQuestRingTransforms(
+  session: QuestArenaSession,
+  nodes: RingNodeRefs,
+  cache: SyncedTransformCache,
+  rigSyncActive = false,
+  dtSeconds = 0,
+  allowExtrapolation = false
+) {
+  if (rigSyncActive) {
+    publishQuestRigState(session, cache, dtSeconds, allowExtrapolation);
+    return;
+  }
+  const live = session.getLiveTransforms();
+  if (!live) return;
+  const cal =
+    questHeadTracker.getLiveHeadState?.().calibration ?? questHeadTracker.getSnapshot().calibration;
+  const anchor: RigAnchor = { x: live.blue.x, z: live.blue.z, yaw: live.blue.yaw };
+  const rig = questComposedRigTransform(cal, anchor);
+  const stanceCenter = stanceMarkerRingLocal(anchor);
+  const stancePosition: Vec3Tuple = [
+    stanceCenter[0],
+    stanceCenter[1] + stanceRingLift,
+    stanceCenter[2],
+  ];
+
+  const rigOuterNode = nodes.rigOuter.current;
+  if (rigOuterNode) {
+    const sameNode = cache.rigOuterNode === rigOuterNode;
+    const rigPosChanged = !sameNode || !sameVec3(cache.rigPosition, rig.position);
+    const rigRotChanged = !sameNode || cache.rigRotationY !== rig.rotationY;
+    if (rigPosChanged || rigRotChanged) {
+      if (sameNode && cache.rigPosition) {
+        const stepDist = Math.hypot(
+          rig.position[0] - cache.rigPosition[0],
+          rig.position[1] - cache.rigPosition[1],
+          rig.position[2] - cache.rigPosition[2]
+        );
+        const yawStep =
+          cache.rigRotationY === undefined
+            ? 0
+            : Math.abs(wrap180(rig.rotationY - cache.rigRotationY));
+        if (stepDist > 0.25 || yawStep > 5) {
+          const nowMs = Date.now();
+          if (!cache.lastRigJumpWarnAt || nowMs - cache.lastRigJumpWarnAt >= 1000) {
+            cache.lastRigJumpWarnAt = nowMs;
+            console.warn(
+              `[QuestRing] rigStep dist=${stepDist.toFixed(3)}m yaw=${yawStep.toFixed(1)}deg rot=${rig.rotationY.toFixed(1)} anchor=${anchor.x.toFixed(4)},${anchor.z.toFixed(4)}`
+            );
+          }
+        }
+      }
+      pushNodeTransform(
+        nodes.rigOuter,
+        rigPosChanged ? [...rig.position] : null,
+        rigRotChanged ? [0, rig.rotationY, 0] : null
+      );
+      cache.rigOuterNode = rigOuterNode;
+      cache.rigPosition = [...rig.position];
+      cache.rigRotationY = rig.rotationY;
+    }
+  }
+
+  const stanceRingNode = nodes.stanceRing.current;
+  if (stanceRingNode) {
+    const posChanged =
+      cache.stanceRingNode !== stanceRingNode || !sameVec3(cache.stancePosition, stancePosition);
+    const yawChanged = cache.stanceRingNode !== stanceRingNode || cache.stanceYaw !== anchor.yaw;
+    if (posChanged || yawChanged) {
+      pushNodeTransform(
+        nodes.stanceRing,
+        posChanged ? stancePosition : null,
+        yawChanged ? [0, anchor.yaw, 0] : null
+      );
+      cache.stanceRingNode = stanceRingNode;
+      cache.stancePosition = stancePosition;
+      cache.stanceYaw = anchor.yaw;
+    }
+  }
+
+  const syncFighter = (
+    id: FighterId,
+    nodeRef: RefObject<ViroNode | null>,
+    nodeKey: 'blueNode' | 'redNode'
+  ) => {
+    const node = nodeRef.current;
+    if (!node) return;
+    const cur = live[id];
+    const prev = cache[id];
+    const sameNode = cache[nodeKey] === node;
+    const posChanged =
+      !sameNode || !prev || prev.x !== cur.x || prev.z !== cur.z || prev.lift !== cur.lift;
+    const yawChanged = !sameNode || !prev || prev.yaw !== cur.yaw;
+    if (posChanged || yawChanged) {
+      pushNodeTransform(
+        nodeRef,
+        posChanged ? [cur.x, fighterY + cur.lift, cur.z] : null,
+        yawChanged ? [0, cur.yaw, 0] : null
+      );
+      cache[nodeKey] = node;
+      cache[id] = { ...cur };
+    }
+  };
+  syncFighter('blue', nodes.blueNode, 'blueNode');
+  syncFighter('red', nodes.redNode, 'redNode');
+}
+
 function QuestFighter({
   id,
-  view,
+  lease,
+  token,
+  placementVersion,
   session,
+  nodeRef,
+  modelRef,
+  viroTag,
+  initialPosition,
+  initialRotation,
   visible = true,
 }: {
   id: FighterId;
-  view: QuestArenaView;
+  lease: number;
+  token: number | null;
+  placementVersion: number | null;
   session: QuestArenaSession;
+  nodeRef: RefObject<ViroNode | null>;
+  modelRef: RefObject<Viro3DObject | null>;
+  viroTag: string;
+  initialPosition: Vec3Tuple;
+  initialRotation: Vec3Tuple;
   visible?: boolean;
 }) {
-  const transform = view.transforms?.[id];
-  if (!transform || view.token === null || view.placementVersion === null) return null;
-  const token = view.token;
-  const version = view.placementVersion;
-  const callbackLease = view.lease;
+  if (token === null || placementVersion === null) return null;
   return (
-    <Viro3DObject
-      source={sources[id]}
-      type="GLB"
-      position={[transform.x, fighterY + transform.lift, transform.z]}
-      rotation={[0, transform.yaw, 0]}
-      scale={fighterScale}
-      animation={idleAnimation}
-      visible={visible}
-      // Viro picks the nearest bounding box, so scenery never takes a menu ray.
-      ignoreEventHandling
-      onLoadEnd={() => session.assetLoaded(callbackLease, token, version, id)}
-      onError={() => session.assetFailed(callbackLease, token, version, id)}
-    />
+    <ViroNode
+      ref={nodeRef}
+      viroTag={viroTag}
+      position={initialPosition}
+      rotation={initialRotation}
+      visible={visible}>
+      <Viro3DObject
+        ref={modelRef}
+        source={sources[id]}
+        type="GLB"
+        scale={fighterScale}
+        animation={idleAnimation}
+        visible={visible}
+        // Viro picks the nearest bounding box, so scenery never takes a menu ray.
+        ignoreEventHandling
+        onLoadEnd={() => session.assetLoaded(lease, token, placementVersion, id)}
+        onError={() => session.assetFailed(lease, token, placementVersion, id)}
+      />
+    </ViroNode>
   );
 }
 
 // Centered under the robot eyes, which the rig places on the calibrated head.
 // The fighter and arena are not moved.
-function StanceFloorRing({ anchor, outOfBounds }: { anchor: RigAnchor; outOfBounds: boolean }) {
+function StanceFloorRing({
+  stanceRef,
+  initialPosition,
+  initialRotation,
+  outOfBounds,
+}: {
+  stanceRef: RefObject<ViroNode | null>;
+  initialPosition: Vec3Tuple;
+  initialRotation: Vec3Tuple;
+  outOfBounds: boolean;
+}) {
   const materials = [outOfBounds ? 'questStanceRingOutOfBounds' : 'questStanceRing'];
-  const center = stanceMarkerRingLocal(anchor);
   return (
     <ViroNode
-      position={[center[0], center[1] + stanceRingLift, center[2]]}
-      rotation={[0, anchor.yaw, 0]}>
+      ref={stanceRef}
+      viroTag="quest-stance-ring"
+      position={initialPosition}
+      rotation={initialRotation}>
       <ViroQuad
         position={[0, 0, stanceRingHalf]}
         rotation={[-90, 0, 0]}
@@ -274,49 +651,89 @@ function StanceFloorRing({ anchor, outOfBounds }: { anchor: RigAnchor; outOfBoun
 }
 
 function QuestRing({
-  view,
+  lease,
+  token,
+  placementVersion,
   session,
-  tracker,
+  outOfBounds,
+  initialPose,
+  rigOuterRef,
+  stanceRingRef,
+  blueNodeRef,
+  redNodeRef,
+  blueModelRef,
+  redModelRef,
 }: {
-  view: QuestArenaView;
+  lease: number;
+  token: number | null;
+  placementVersion: number | null;
   session: QuestArenaSession;
-  tracker: QuestHeadTrackerSnapshot;
+  outOfBounds: boolean;
+  initialPose: InitialRingPose;
+  rigOuterRef: RefObject<ViroNode | null>;
+  stanceRingRef: RefObject<ViroNode | null>;
+  blueNodeRef: RefObject<ViroNode | null>;
+  redNodeRef: RefObject<ViroNode | null>;
+  blueModelRef: RefObject<Viro3DObject | null>;
+  redModelRef: RefObject<Viro3DObject | null>;
 }) {
-  if (view.token === null || view.placementVersion === null || !view.transforms) return null;
-  const token = view.token;
-  const version = view.placementVersion;
-  const callbackLease = view.lease;
-  const anchor: RigAnchor = tracker.anchor ?? view.transforms.blue;
-  const rig = questRigTransform(tracker.calibration, anchor);
+  if (token === null || placementVersion === null) return null;
   return (
     <ViroNode
-      key={`${callbackLease}:${token}:${version}`}
-      position={[...rig.position]}
-      rotation={[0, rig.rotationY, 0]}>
-      <ViroNode scale={[rig.scale, rig.scale, rig.scale]}>
-        <ViroNode position={[...rig.contentOffset]}>
-          <ViroQuad
-            rotation={[-90, 0, 0]}
-            width={1.4}
-            height={1.4}
-            position={[0, 0.001, 0]}
-            materials={['questRingFloor']}
-            ignoreEventHandling
-          />
-          <StanceFloorRing anchor={anchor} outOfBounds={tracker.outOfBounds} />
-          <Viro3DObject
-            source={sources.arena}
-            type="GLB"
-            scale={arenaScale}
-            position={[0, ARENA_LAYOUT.arenaBaseOffset, 0]}
-            ignoreEventHandling
-            onLoadEnd={() => session.assetLoaded(callbackLease, token, version, 'arena')}
-            onError={() => session.assetFailed(callbackLease, token, version, 'arena')}
-          />
-          <QuestFighter id="blue" view={view} session={session} visible={false} />
-          <QuestFighter id="red" view={view} session={session} />
-        </ViroNode>
-      </ViroNode>
+      key={initialPose.key}
+      ref={rigOuterRef}
+      viroTag="quest-rig-outer"
+      position={initialPose.rigPosition}
+      rotation={initialPose.rigRotation}
+      scale={initialPose.rigScale}>
+      <ViroQuad
+        rotation={[-90, 0, 0]}
+        width={1.4}
+        height={1.4}
+        position={[0, 0.001, 0]}
+        materials={['questRingFloor']}
+        ignoreEventHandling
+      />
+      <StanceFloorRing
+        stanceRef={stanceRingRef}
+        initialPosition={initialPose.stancePosition}
+        initialRotation={initialPose.stanceRotation}
+        outOfBounds={outOfBounds}
+      />
+      <Viro3DObject
+        source={sources.arena}
+        type="GLB"
+        scale={arenaScale}
+        position={[0, ARENA_LAYOUT.arenaBaseOffset, 0]}
+        ignoreEventHandling
+        onLoadEnd={() => session.assetLoaded(lease, token, placementVersion, 'arena')}
+        onError={() => session.assetFailed(lease, token, placementVersion, 'arena')}
+      />
+      <QuestFighter
+        id="blue"
+        lease={lease}
+        token={token}
+        placementVersion={placementVersion}
+        session={session}
+        nodeRef={blueNodeRef}
+        modelRef={blueModelRef}
+        viroTag="quest-blue-node"
+        initialPosition={initialPose.bluePosition}
+        initialRotation={initialPose.blueRotation}
+        visible={false}
+      />
+      <QuestFighter
+        id="red"
+        lease={lease}
+        token={token}
+        placementVersion={placementVersion}
+        session={session}
+        nodeRef={redNodeRef}
+        modelRef={redModelRef}
+        viroTag="quest-red-node"
+        initialPosition={initialPose.redPosition}
+        initialRotation={initialPose.redRotation}
+      />
     </ViroNode>
   );
 }
@@ -538,7 +955,7 @@ function QuestMenu({
 }
 
 export default function QuestArenaScene() {
-  const [session] = useState(createQuestArenaSession);
+  const [session] = useState(() => createQuestArenaSession(undefined, questHeadTracker));
   const view = useSyncExternalStore(session.subscribe, session.getSnapshot);
   const tracker = useSyncExternalStore(questHeadTracker.subscribe, questHeadTracker.getSnapshot);
   const [compositor] = useState(() =>
@@ -550,6 +967,7 @@ export default function QuestArenaScene() {
           return questPanelNative.open();
         },
         draw: (owner, spec) => questPanelNative?.draw(owner, spec),
+        invalidate: (owner) => questPanelNative?.invalidate?.(owner),
         status: (owner) => questPanelNative?.status(owner) ?? -1,
         hide: (owner) => questPanelNative?.hide(owner),
         log: logMenu,
@@ -573,6 +991,7 @@ export default function QuestArenaScene() {
           return questPanelNative.openTitle();
         },
         draw: (owner, spec) => questPanelNative?.drawTitle?.(owner, spec),
+        invalidate: (owner) => questPanelNative?.invalidateTitle?.(owner),
         status: (owner) => questPanelNative?.statusTitle?.(owner) ?? -1,
         hide: (owner) => questPanelNative?.hideTitle?.(owner),
         log: (level, message) => logMenu(level, `title ${message}`),
@@ -598,9 +1017,72 @@ export default function QuestArenaScene() {
   const [hover, setHover] = useState<QuestMenuAction | null>(null);
   const press = useRef<QuestPressState>({ down: new Set() });
   const hoverSources = useRef(new Map<QuestMenuAction, Set<number>>());
+  const rigOuterRef = useRef<ViroNode | null>(null);
+  const stanceRingRef = useRef<ViroNode | null>(null);
+  const blueNodeRef = useRef<ViroNode | null>(null);
+  const redNodeRef = useRef<ViroNode | null>(null);
+  const blueModelRef = useRef<Viro3DObject | null>(null);
+  const redModelRef = useRef<Viro3DObject | null>(null);
+  const syncedTransformsRef = useRef<SyncedTransformCache>({});
+  const rigSyncActive = useMemo(() => questRigSyncAvailable(), []);
+  const appActiveRef = useRef(true);
+  const appliedAnimationsRef = useRef<
+    Record<FighterId, { id: number; name: string; loop: boolean }>
+  >({
+    blue: { id: Number.NaN, name: 'IdleAggro', loop: true },
+    red: { id: Number.NaN, name: 'IdleAggro', loop: true },
+  });
   const lastLogAt = useRef(0);
   const posture = tracker.calibration.posture;
   const calibration = tracker.calibration;
+
+  const initialRingPose = useMemo<InitialRingPose | null>(() => {
+    if (
+      view.page !== 'ring' ||
+      view.token === null ||
+      view.placementVersion === null ||
+      !view.transforms
+    ) {
+      return null;
+    }
+    const anchor: RigAnchor = tracker.anchor ?? view.transforms.blue;
+    const rig = questComposedRigTransform(calibration, anchor);
+    const stanceCenter = stanceMarkerRingLocal(anchor);
+    return {
+      key: `${view.lease}:${view.token}:${view.placementVersion}`,
+      rigPosition: [...rig.position],
+      rigRotation: [0, rig.rotationY, 0],
+      rigScale: [rig.scale, rig.scale, rig.scale],
+      stancePosition: [stanceCenter[0], stanceCenter[1] + stanceRingLift, stanceCenter[2]],
+      stanceRotation: [0, anchor.yaw, 0],
+      bluePosition: [
+        view.transforms.blue.x,
+        fighterY + view.transforms.blue.lift,
+        view.transforms.blue.z,
+      ],
+      blueRotation: [0, view.transforms.blue.yaw, 0],
+      redPosition: [
+        view.transforms.red.x,
+        fighterY + view.transforms.red.lift,
+        view.transforms.red.z,
+      ],
+      redRotation: [0, view.transforms.red.yaw, 0],
+    };
+    // Initial JSX mount props stay frozen per round/placement so React re-renders
+    // (200ms tracker updates, calibration changes) never overwrite setNativeProps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view.lease, view.page, view.placementVersion, view.token, view.transforms]);
+
+  const updateMenuFocus = () => {
+    let hovered = false;
+    for (const sourcesForButton of hoverSources.current.values()) {
+      if (sourcesForButton.size > 0) {
+        hovered = true;
+        break;
+      }
+    }
+    session.setMenuFocus(hovered || press.current.down.size > 0);
+  };
 
   const failureMessage =
     view.message && /failed|could not|error|unavailable|timeout/i.test(view.message)
@@ -613,6 +1095,9 @@ export default function QuestArenaScene() {
     if (tracker.status === 'no-samples' && tracker.message) lines.push(tracker.message);
     if (failureMessage) lines.push(failureMessage);
     if (tracker.outOfBounds) lines.push('Outside bounds: return toward the stance ring center.');
+    if (view.page === 'ring' && view.stage === 'paused') {
+      lines.push('Match paused. Select Ready to resume.');
+    }
     return lines;
   }, [
     failureMessage,
@@ -621,6 +1106,8 @@ export default function QuestArenaScene() {
     tracker.status,
     view.leaving,
     view.lines,
+    view.page,
+    view.stage,
   ]);
 
   const developerLines = useMemo(() => {
@@ -654,18 +1141,168 @@ export default function QuestArenaScene() {
   const panelLabel = `${view.page} ack=${view.acknowledged} ${posture}`;
 
   useEffect(() => {
+    const hasMenuHover = () => {
+      for (const s of hoverSources.current.values()) {
+        if (s.size > 0) return true;
+      }
+      return false;
+    };
+    const stopInput = input.onSample((sample, status, batch) =>
+      session.setInputState(sample, status, batch)
+    );
+    const stopFrames = session.onFrame((dtSeconds) =>
+      syncQuestRingTransforms(
+        session,
+        {
+          rigOuter: rigOuterRef,
+          stanceRing: stanceRingRef,
+          blueNode: blueNodeRef,
+          redNode: redNodeRef,
+        },
+        syncedTransformsRef.current,
+        rigSyncActive,
+        dtSeconds,
+        appActiveRef.current && !hasMenuHover()
+      )
+    );
+    const isSceneActive = (rt: {
+      status?: string;
+      appActive?: boolean;
+      vrActivityState?: string;
+    }) =>
+      (rt.status === undefined || rt.status === 'immersive') &&
+      rt.appActive !== false &&
+      rt.vrActivityState !== 'paused' &&
+      rt.vrActivityState !== 'stopped' &&
+      rt.vrActivityState !== 'finishing' &&
+      rt.vrActivityState !== 'destroyed';
+    let wasActive = isSceneActive(
+      questRuntime.getSnapshot() as {
+        status?: string;
+        appActive?: boolean;
+        vrActivityState?: string;
+      }
+    );
+    const syncRuntimeActive = () => {
+      const rt = questRuntime.getSnapshot() as {
+        status?: string;
+        appActive?: boolean;
+        vrActivityState?: string;
+      };
+      const active = isSceneActive(rt);
+      appActiveRef.current = active;
+      session.setAppActive(active);
+      if (!wasActive && active) {
+        compositor.replay();
+        titleCompositor.replay();
+      }
+      wasActive = active;
+    };
+    syncRuntimeActive();
+    const stopRuntime = (
+      questRuntime as { subscribe?: (listener: () => void) => () => void }
+    ).subscribe?.(syncRuntimeActive);
+    return () => {
+      stopRuntime?.();
+      stopFrames();
+      stopInput();
+    };
+  }, [compositor, input, rigSyncActive, session, titleCompositor]);
+
+  useEffect(() => {
     questHeadTracker.setRefSpaceEpochSource(() => questPanelNative?.refSpaceEpoch?.() ?? 0);
     questRuntime.sceneMounted();
     input.start();
     return () => {
       input.stop();
+      if (rigSyncActive) questInputNative?.clearRigState?.();
       questHeadTracker.dispose();
       session.dispose();
       compositor.dispose();
       titleCompositor.dispose();
       questRuntime.sceneUnmounted();
     };
-  }, [compositor, input, session, titleCompositor]);
+  }, [compositor, input, rigSyncActive, session, titleCompositor]);
+
+  useEffect(() => {
+    if (view.page !== 'ring') {
+      if (rigSyncActive) questInputNative?.clearRigState?.();
+      syncedTransformsRef.current = {};
+      appliedAnimationsRef.current = {
+        blue: { id: Number.NaN, name: 'IdleAggro', loop: true },
+        red: { id: Number.NaN, name: 'IdleAggro', loop: true },
+      };
+      return;
+    }
+    syncQuestRingTransforms(
+      session,
+      {
+        rigOuter: rigOuterRef,
+        stanceRing: stanceRingRef,
+        blueNode: blueNodeRef,
+        redNode: redNodeRef,
+      },
+      syncedTransformsRef.current,
+      rigSyncActive,
+      0,
+      false
+    );
+  }, [
+    calibration,
+    rigSyncActive,
+    session,
+    view.lease,
+    view.page,
+    view.placementVersion,
+    view.token,
+  ]);
+
+  useEffect(() => {
+    if (view.page !== 'ring' || !view.fighters) return;
+    const fighters = view.fighters;
+    const run = view.animationsRunning;
+    const pendingFrames: unknown[] = [];
+    const schedule =
+      typeof globalThis.requestAnimationFrame === 'function'
+        ? (cb: () => void) => globalThis.requestAnimationFrame(cb)
+        : (cb: () => void) => setTimeout(cb, 16);
+    const cancel =
+      typeof globalThis.cancelAnimationFrame === 'function'
+        ? (handle: unknown) => globalThis.cancelAnimationFrame(handle as number)
+        : (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>);
+
+    for (const [id, modelRef] of [
+      ['blue', blueModelRef],
+      ['red', redModelRef],
+    ] as const) {
+      const model = modelRef.current;
+      if (!model) continue;
+      const applied = appliedAnimationsRef.current[id];
+      const { clip, animationId } = fighters[id];
+      const loop = LOOPING_CLIPS.has(clip);
+      if (!run) {
+        writeFighterAnimation(model, {
+          name: applied.name,
+          loop: applied.loop,
+          run: false,
+          interruptible: false,
+        });
+        continue;
+      }
+      // Viro 3.0.3 resumes the old executable when paused; resume first, then apply clip change.
+      writeFighterAnimation(model, { name: clip, loop, run: true, interruptible: false });
+      if (applied.id === animationId) continue;
+      const handle = schedule(() => {
+        writeFighterAnimation(model, { name: clip, loop, run: true, interruptible: true });
+        appliedAnimationsRef.current[id] = { id: animationId, name: clip, loop };
+        session.animationApplied(id, animationId);
+      });
+      pendingFrames.push(handle);
+    }
+    return () => {
+      for (const handle of pendingFrames) cancel(handle);
+    };
+  }, [session, view.animationsRunning, view.fighters, view.lease, view.page]);
 
   // Dev builds serve TTFs/PNGs over Metro HTTP until downloaded to a local file;
   // release builds resolve packaged resource names synchronously above.
@@ -733,7 +1370,8 @@ export default function QuestArenaScene() {
     press.current.down.clear();
     hoverSources.current.clear();
     setHover(null);
-  }, [inputKey]);
+    session.setMenuFocus(false);
+  }, [inputKey, session]);
 
   useEffect(() => {
     compositor.present({
@@ -773,12 +1411,51 @@ export default function QuestArenaScene() {
     else leave(session);
   };
 
+  const ringOutOfBounds = tracker.outOfBounds;
+  const ringElement = useMemo(() => {
+    if (
+      view.page !== 'ring' ||
+      view.token === null ||
+      view.placementVersion === null ||
+      !initialRingPose
+    ) {
+      return null;
+    }
+    return (
+      <QuestRing
+        lease={view.lease}
+        token={view.token}
+        placementVersion={view.placementVersion}
+        session={session}
+        outOfBounds={ringOutOfBounds}
+        initialPose={initialRingPose}
+        rigOuterRef={rigOuterRef}
+        stanceRingRef={stanceRingRef}
+        blueNodeRef={blueNodeRef}
+        redNodeRef={redNodeRef}
+        blueModelRef={blueModelRef}
+        redModelRef={redModelRef}
+      />
+    );
+  }, [
+    initialRingPose,
+    ringOutOfBounds,
+    session,
+    view.lease,
+    view.page,
+    view.placementVersion,
+    view.token,
+  ]);
+
   return (
     <ViroScene onCameraTransformUpdate={questHeadTracker.onCameraTransform}>
+      {!rigSyncActive ? (
+        <ViroGameLoop onUpdate={({ dt }) => session.stepExternalFrame(dt)} />
+      ) : null}
       <ViroSkyBox color="#000000" />
       <ViroAmbientLight color="#ffffff" intensity={700} />
       <ViroDirectionalLight color="#ffffff" intensity={900} direction={[-0.4, -1, -0.3]} />
-      {view.page === 'ring' ? <QuestRing view={view} session={session} tracker={tracker} /> : null}
+      {ringElement}
       <QuestInputMarkers source={input} onPipelineChange={setMarkerPipeline} />
       <QuestDiagnosticsPanel
         source={input}
@@ -809,6 +1486,7 @@ export default function QuestArenaScene() {
             return;
           }
           const result = questTriggerPress(press.current, clickState, source);
+          updateMenuFocus();
           logMenu('info', `click ${action} state ${clickState} source ${String(source)} ${result}`);
           if (result === 'activate') onAction(action);
         }}
@@ -820,6 +1498,7 @@ export default function QuestArenaScene() {
             hoverSources.current.set(action, sourcesForButton);
           }
           const active = questPointerHover(sourcesForButton, hovering, source);
+          updateMenuFocus();
           logMenu('info', `hover ${action} ${hovering} source ${String(source)}`);
           setHover((current) => {
             if (active) return action;

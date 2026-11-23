@@ -192,6 +192,7 @@ export interface QuestPanelBackend {
   available(): boolean;
   open(): number;
   draw(owner: number, specJson: string): void;
+  invalidate?(owner: number): void;
   status(owner: number): number;
   hide(owner: number): void;
   log(level: 'info' | 'error', message: string): void;
@@ -222,6 +223,7 @@ export function createQuestMenuCompositor(
   const listeners = new Set<() => void>();
   let owner: number | null = null;
   let lastSpec: string | null = null;
+  let lastFrame: QuestMenuPanelFrame | null = null;
   let firstDrawAt: number | null = null;
   let timer: unknown = null;
   let disposed = false;
@@ -300,6 +302,34 @@ export function createQuestMenuCompositor(
     timer = clock.schedule(poll, snapshot.mode === 'shown' ? IDLE_POLL_MS : PENDING_POLL_MS);
   };
 
+  const present = (frame: QuestMenuPanelFrame) => {
+    if (disposed) return;
+    if (snapshot.mode !== 'pending' && snapshot.mode !== 'shown' && snapshot.mode !== 'slow') {
+      return;
+    }
+    const spec = questMenuPanelSpec(frame);
+    if (spec === lastSpec) return;
+    if (owner === null) {
+      try {
+        owner = backend.open();
+      } catch (error) {
+        fail(`open ${describe(error)}`);
+        return;
+      }
+    }
+    lastSpec = spec;
+    try {
+      backend.draw(owner, spec);
+    } catch (error) {
+      fail(`draw ${describe(error)}`);
+      return;
+    }
+    lastFrame = frame;
+    if (firstDrawAt === null) firstDrawAt = clock.now();
+    backend.log('info', `layer draw ${frame.label}`);
+    schedule();
+  };
+
   return {
     subscribe(listener: () => void) {
       listeners.add(listener);
@@ -310,34 +340,29 @@ export function createQuestMenuCompositor(
     getSnapshot: () => snapshot,
     getOwner: () => owner,
     /** Sends the panel when it differs from the last one sent. */
-    present(frame: QuestMenuPanelFrame) {
-      if (disposed) return;
-      if (snapshot.mode !== 'pending' && snapshot.mode !== 'shown' && snapshot.mode !== 'slow')
+    present,
+    /** Forces a re-upload of the last drawn panel on the current owner (e.g. after XR resume). */
+    replay() {
+      if (disposed || !lastFrame) return;
+      if (snapshot.mode !== 'pending' && snapshot.mode !== 'shown' && snapshot.mode !== 'slow') {
         return;
-      const spec = questMenuPanelSpec(frame);
-      if (spec === lastSpec) return;
-      if (owner === null) {
+      }
+      if (owner !== null) {
         try {
-          owner = backend.open();
+          backend.invalidate?.(owner);
         } catch (error) {
-          fail(`open ${describe(error)}`);
+          fail(`invalidate ${describe(error)}`);
           return;
         }
       }
-      lastSpec = spec;
-      try {
-        backend.draw(owner, spec);
-      } catch (error) {
-        fail(`draw ${describe(error)}`);
-        return;
-      }
-      if (firstDrawAt === null) firstDrawAt = clock.now();
-      backend.log('info', `layer draw ${frame.label}`);
-      schedule();
+      lastSpec = null;
+      present(lastFrame);
     },
     dispose() {
       if (disposed) return;
       disposed = true;
+      lastFrame = null;
+      lastSpec = null;
       release();
       listeners.clear();
     },

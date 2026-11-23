@@ -151,6 +151,12 @@ export interface RigTransform {
   contentOffset: Vec3;
 }
 
+export interface ComposedRigTransform {
+  position: Vec3;
+  rotationY: number;
+  scale: number;
+}
+
 export function questRigTransform(
   cal: Calibration,
   anchor: RigAnchor,
@@ -162,6 +168,34 @@ export function questRigTransform(
     rotationY: wrap180(cal.yaw - anchor.yaw),
     scale,
     contentOffset: [-eye[0], -eye[1], -eye[2]],
+  };
+}
+
+/**
+ * Single composed rigid transform mapping ring-local coordinates directly to OpenXR world:
+ * world(p) = position + R_y(rotationY) * (scale * p).
+ * Keeping translation and rotation on one ViroNode prevents split-node native bridge tearing.
+ */
+export function questComposedRigTransform(
+  cal: Calibration,
+  anchor: RigAnchor,
+  scale = QUEST_WORLD_SCALE
+): ComposedRigTransform {
+  const rig = questRigTransform(cal, anchor, scale);
+  const r = (rig.rotationY * Math.PI) / 180;
+  const cos = Math.cos(r);
+  const sin = Math.sin(r);
+  const sx = scale * rig.contentOffset[0];
+  const sy = scale * rig.contentOffset[1];
+  const sz = scale * rig.contentOffset[2];
+  return {
+    position: [
+      cleanZero(rig.position[0] + sx * cos + sz * sin),
+      cleanZero(rig.position[1] + sy),
+      cleanZero(rig.position[2] - sx * sin + sz * cos),
+    ],
+    rotationY: rig.rotationY,
+    scale,
   };
 }
 

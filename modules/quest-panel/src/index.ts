@@ -9,11 +9,13 @@ export interface QuestPanelNative {
   /** 1 submitted, 0 not yet drawn or hidden, -1 failed or a stale owner. */
   status(owner: number): number;
   draw(owner: number, specJson: string): void;
+  invalidate?(owner: number): void;
   hide(owner: number): void;
   /** Floating transparent branded title overlay slot. */
   openTitle?(): number;
   statusTitle?(owner: number): number;
   drawTitle?(owner: number, specJson: string): void;
+  invalidateTitle?(owner: number): void;
   hideTitle?(owner: number): void;
   /** Monotonic count of Horizon LOCAL reference-space resets observed by OpenXR. */
   refSpaceEpoch?(): number;

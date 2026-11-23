@@ -34,7 +34,10 @@ const {
   questTriggerPress,
 } = require('../src/features/quest-vr/quest-menu-input.ts');
 const compositorModule = require('../src/features/quest-vr/quest-menu-compositor.ts');
-const { QUEST_DIAG_POSE, QUEST_DIAG_SIZE } = require('../src/features/quest-vr/quest-diagnostics-layout.ts');
+const {
+  QUEST_DIAG_POSE,
+  QUEST_DIAG_SIZE,
+} = require('../src/features/quest-vr/quest-diagnostics-layout.ts');
 const { questMenuLayer } = require('../src/features/quest-vr/quest-menu-layer.ts');
 const { questMenuPanelPose, questMenuTitlePose } = compositorModule;
 
@@ -173,7 +176,10 @@ test('ring-page menu rectangle placed through menuFrame(DEFAULT) clears the oppo
       false,
       `Menu rectangle occluded opponent ray to ${JSON.stringify(corner)}`
     );
-    const diagCenter = addVec(frame.position, rotateYDeg(QUEST_DIAG_POSE.position, frame.rotationY));
+    const diagCenter = addVec(
+      frame.position,
+      rotateYDeg(QUEST_DIAG_POSE.position, frame.rotationY)
+    );
     const rotateDiag = (vec) =>
       rotateYDeg(rotateEulerDeg(vec, QUEST_DIAG_POSE.rotation), frame.rotationY);
     assert.equal(
@@ -204,7 +210,6 @@ test('Quest VR sources enforce tracking/rig safety guards and real blue asset le
   const forbidden = [
     /\bViroCamera\b/,
     /\brecenterTracking\b/,
-    /\bViroGameLoop(?:Utils)?\b/,
     /\bViroARScene\b/,
     /\bsetTracking\b/,
     /\bsetPlacement\b/,
@@ -220,6 +225,8 @@ test('Quest VR sources enforce tracking/rig safety guards and real blue asset le
   const scene = source('src/features/quest-vr/quest-arena-scene.native.tsx');
   const navigator = source('src/features/quest-vr/quest-xr-navigator.native.tsx');
   assert.match(scene, /onCameraTransformUpdate=\{questHeadTracker\.onCameraTransform\}/);
+  assert.match(scene, /\bViroGameLoop\b/);
+  assert.match(scene, /\bViroGameLoopUtils\b/);
   assert.match(scene, /visible=\{false\}/);
   assert.match(scene, /onLoadEnd=\{/);
   assert.match(scene, /questMenuButtonFrame/);
@@ -516,6 +523,10 @@ function createSceneHarness({ panelAvailable = true } = {}) {
       buildQuestMenuTitle,
     },
     './quest-runtime-store.ts': { questRuntime: mockRuntime },
+    '../../../modules/quest-input/src/index.ts': {
+      questRigSyncAvailable: () => false,
+      questInputNative: null,
+    },
     './quest-diagnostics-layout.ts': {
       questDiagLayerMaterials: () => ({
         questDiagLayerMask: {
@@ -676,7 +687,10 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
   assert.equal(panel.latest().ops[0].op, 'roundRect');
   assert.equal(panel.latest().ops[0].color, '#0f172a');
   assert.equal(panel.latest().ops[0].radius, QUEST_MENU_CARD_RADIUS_PX);
-  assert.equal(panel.latestTitle().ops.some((op) => op.op === 'roundRect'), false);
+  assert.equal(
+    panel.latestTitle().ops.some((op) => op.op === 'roundRect'),
+    false
+  );
   const textOps = panel.latest().ops.filter((op) => op.op === 'text');
   assert.ok(textOps.some((op) => op.font === 'file:///sans-semibold.ttf'));
   // Normal menu stays free of developer prose (moved to QuestDiagnosticsPanel).
@@ -768,8 +782,15 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
   assert.ok(Math.abs(markerNode.props.position[2] - marker[2]) < 1e-12);
   assert.ok(Math.abs(markerNode.props.position[1] - (marker[1] + 0.0005)) < 1e-12);
   assert.notEqual(markerNode.props.position[0], calls.calibratedWith.x);
-  assert.equal(blueModel.props.position[0], calls.calibratedWith.x);
-  assert.equal(blueModel.props.position[2], calls.calibratedWith.z);
+  const blueFighterNode = inRing.all.find(
+    (n) =>
+      n.type === 'ViroNode' &&
+      collectNodes(n.props.children).includes(blueModel) &&
+      !collectNodes(n.props.children).some((child) => child.props?.source === 'red.glb')
+  );
+  assert.ok(blueFighterNode);
+  assert.equal(blueFighterNode.props.position[0], calls.calibratedWith.x);
+  assert.equal(blueFighterNode.props.position[2], calls.calibratedWith.z);
 
   assert.ok(harness.builtMenus.some((entry) => entry.options?.posture === 'seated'));
   assert.ok(harness.buttonLookups.some((entry) => entry.arg?.posture === 'seated'));

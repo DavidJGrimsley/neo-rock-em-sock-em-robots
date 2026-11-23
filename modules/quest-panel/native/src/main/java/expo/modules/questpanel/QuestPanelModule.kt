@@ -117,6 +117,14 @@ class QuestPanelModule : Module() {
 
     fun status(id: Int): Int = if (id == owner && !drawFailed) nativeStatusFn() else -1
 
+    fun invalidate(id: Int) {
+      synchronized(drawLock) {
+        if (id == owner) {
+          drawnPixelsKey = null
+        }
+      }
+    }
+
     fun hide(id: Int) {
       synchronized(drawLock) {
         if (id == owner) {
@@ -466,11 +474,13 @@ class QuestPanelModule : Module() {
     Function("open") { menuSlot.open() }
     Function("status") { id: Int -> menuSlot.status(id) }
     Function("draw") { id: Int, json: String -> menuSlot.enqueueDraw(id, json) }
+    Function("invalidate") { id: Int -> menuSlot.invalidate(id) }
     Function("hide") { id: Int -> menuSlot.hide(id) }
 
     Function("openTitle") { titleSlot.open() }
     Function("statusTitle") { id: Int -> titleSlot.status(id) }
     Function("drawTitle") { id: Int, json: String -> titleSlot.enqueueDraw(id, json) }
+    Function("invalidateTitle") { id: Int -> titleSlot.invalidate(id) }
     Function("hideTitle") { id: Int -> titleSlot.hide(id) }
 
     OnDestroy {

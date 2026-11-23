@@ -541,3 +541,79 @@ test('a jump before any calibration, or calibrated after the jump, is not double
     assert.ok(logs.some((line) => /action=none reason=calibrated-after-jump/.test(line)));
   }
 });
+
+test('getLiveHeadState and subscribeLive deliver unthrottled samples, lastValidYaw, recentering, and dispose reset', () => {
+  let epoch = 5;
+  const clock = makeClock(1000);
+  const tracker = createQuestHeadTracker({
+    now: clock.now,
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+    entries: () => 1,
+    refSpaceEpoch: () => epoch,
+  });
+
+  const events = [];
+  const unsub = tracker.subscribeLive((event) => events.push(event));
+
+  // Initial state before samples.
+  assert.equal(tracker.getLiveHeadState().sample, null);
+  assert.equal(tracker.getLiveHeadState().lastValidYaw, null);
+  assert.equal(tracker.getLiveHeadState().recentering, false);
+
+  // Feed stable samples at 180 deg and calibrate Solo.
+  feed(tracker, clock, [0, 1.5, 0], 180, 10);
+  tracker.calibrateForSolo(blueAnchor);
+  assert.ok(events.includes('calibrate'));
+
+  // Advance just 14ms after a 90 deg head turn: UI snapshot is still throttled (200ms),
+  // but getLiveHeadState() updates immediately with zero snapshot lag.
+  clock.advance(250); // Flush any pending 5 Hz publish first.
+  const snapBeforeTurn = tracker.getSnapshot();
+  assert.ok(Math.abs(snapBeforeTurn.raw.yaw - -180) < 1e-6);
+
+  tracker.onCameraTransform(viroPose([0, 1.5, 0], 90));
+  assert.equal(tracker.getSnapshot(), snapBeforeTurn, 'UI snapshot remains throttled');
+  const liveAfterTurn = tracker.getLiveHeadState();
+  assert.ok(liveAfterTurn.sample !== null);
+  assert.ok(Math.abs(liveAfterTurn.lastValidYaw - 90) < 1e-6);
+  assert.equal(liveAfterTurn.refEpoch, 5);
+  assert.equal(events.at(-1), 'sample');
+
+  // Degenerate vertical gaze preserves lastValidYaw without corrupting it.
+  clock.advance(14);
+  tracker.onCameraTransform({ position: [0, 1.5, 0], forward: [0, -1, 0], up: [0, 0, 1] });
+  assert.ok(Math.abs(tracker.getLiveHeadState().lastValidYaw - 90) < 1e-6);
+
+  // Restore a valid horizontal sample before testing a sample-jump discontinuity.
+  clock.advance(14);
+  tracker.onCameraTransform(viroPose([0, 1.5, 0], 90));
+
+  // Sample jump triggers recentering=true during pendingJump, then 'recenter' on confirmation.
+  clock.advance(14);
+  tracker.onCameraTransform(viroPose([1.2, 1.5, -0.8], -45));
+  assert.equal(tracker.getLiveHeadState().recentering, true);
+  assert.equal(events.at(-1), 'jump-pending');
+  for (let i = 0; i < 6; i += 1) {
+    clock.advance(14);
+    tracker.onCameraTransform(viroPose([1.2, 1.5, -0.8], -45));
+  }
+  assert.equal(tracker.getLiveHeadState().recentering, false);
+  assert.equal(tracker.getLiveHeadState().referenceResets, 1);
+  assert.equal(events.at(-1), 'recenter');
+
+  // OpenXR refSpaceEpoch recenter emits 'recenter' immediately.
+  clock.advance(14);
+  epoch = 6;
+  tracker.onCameraTransform(viroPose([0.1, 1.5, 0.1], 0));
+  assert.equal(tracker.getLiveHeadState().refEpoch, 6);
+  assert.equal(tracker.getLiveHeadState().referenceResets, 2);
+  assert.equal(events.at(-1), 'recenter');
+
+  tracker.dispose();
+  assert.equal(events.at(-1), 'dispose');
+  assert.equal(tracker.getLiveHeadState().sample, null);
+  assert.equal(tracker.getLiveHeadState().lastValidYaw, null);
+  assert.equal(tracker.getLiveHeadState().recentering, false);
+  unsub();
+});

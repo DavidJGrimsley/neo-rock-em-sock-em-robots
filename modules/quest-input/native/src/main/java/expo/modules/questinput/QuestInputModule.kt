@@ -34,6 +34,10 @@ private const val LONGS_PER_SAMPLE = 3
 private const val INTS_PER_SAMPLE = 15
 private const val FLOATS_PER_SAMPLE = 34
 
+// QuestRigSync.h in tools/quest/viro-renderer/0004-openxr-quest-rig-sync.patch.
+private const val RIG_SYNC_VERSION = 1
+private const val RIG_SYNC_FLOATS = 32
+
 // A double holds every integer up to 2^53 exactly; Expo converts Long to Double.
 private const val MAX_EXACT = 9007199254740991L
 
@@ -70,12 +74,25 @@ class QuestInputModule : Module() {
     dw: Int,
     dh: Int
   ): Boolean
+  private external fun nativeRigSyncVersion(): Int
+  private external fun nativePublishRigState(active: Boolean, values: FloatArray?): Boolean
+  private external fun nativeClearRigState()
 
   // Phone builds and renderers without patch 0003 have no QuestInputSampler symbols.
   private val available: Boolean by lazy {
     try {
       System.loadLibrary("viro_renderer")
       nativeVersion() == NATIVE_VERSION
+    } catch (_: LinkageError) {
+      false
+    }
+  }
+
+  // Renderers without patch 0004 have no QuestRigSync symbols.
+  private val rigSyncReady: Boolean by lazy {
+    try {
+      System.loadLibrary("viro_renderer")
+      nativeRigSyncVersion() == RIG_SYNC_VERSION
     } catch (_: LinkageError) {
       false
     }
@@ -535,8 +552,27 @@ class QuestInputModule : Module() {
       }
     }
 
+    Function("rigSyncVersion") { if (rigSyncReady) RIG_SYNC_VERSION else 0 }
+
+    Function("publishRigState") { active: Boolean, values: FloatArray ->
+      if (!rigSyncReady) return@Function false
+      if (!active) {
+        nativeClearRigState()
+        return@Function true
+      }
+      if (values.size != RIG_SYNC_FLOATS) return@Function false
+      nativePublishRigState(true, values)
+    }
+
+    Function("clearRigState") {
+      if (!rigSyncReady) return@Function false
+      nativeClearRigState()
+      true
+    }
+
     OnDestroy {
       if (available) nativeSetMarkersEnabled(false)
+      if (rigSyncReady) nativeClearRigState()
       synchronized(diagDrawLock) {
         ++diagOwner
         if (available) nativeDiagHide()

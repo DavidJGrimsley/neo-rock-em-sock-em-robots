@@ -19,6 +19,7 @@ const {
   headStep,
   isReferenceDiscontinuity,
   menuFrame,
+  questComposedRigTransform,
   questRigTransform,
   stanceMarkerRingLocal,
   wrap180,
@@ -215,6 +216,43 @@ test('questRigTransform and applyRig align eye anchor, forward direction, defaul
     position: [1, 0.2, -0.5],
     rotationY: -90,
   });
+
+  // Single-node questComposedRigTransform matches two-node applyRig(questRigTransform(...), p) identically
+  // and keeps rotationY constant while anchor translates under stable facing.
+  for (let i = 0; i < 64; i += 1) {
+    const anchor = {
+      x: (rand() * 2 - 1) * 0.205,
+      z: (rand() * 2 - 1) * 0.205,
+      yaw: (rand() * 2 - 1) * 180,
+    };
+    const cal = {
+      origin: [(rand() * 2 - 1) * 4, (rand() * 2 - 1) * 2, (rand() * 2 - 1) * 4],
+      yaw: (rand() * 2 - 1) * 180,
+      posture: i % 2 === 0 ? 'standing' : 'seated',
+      source: 'solo',
+      entry: 1,
+    };
+    const composed = questComposedRigTransform(cal, anchor);
+    const split = questRigTransform(cal, anchor);
+    assert.equal(composed.rotationY, split.rotationY);
+    assert.equal(composed.scale, split.scale);
+    const p = [rand() * 0.4 - 0.2, rand() * 0.2, rand() * 0.4 - 0.2];
+    const r = (composed.rotationY * Math.PI) / 180;
+    const cos = Math.cos(r);
+    const sin = Math.sin(r);
+    const sx = composed.scale * p[0];
+    const sy = composed.scale * p[1];
+    const sz = composed.scale * p[2];
+    const singleWorld = [
+      composed.position[0] + sx * cos + sz * sin,
+      composed.position[1] + sy,
+      composed.position[2] - sx * sin + sz * cos,
+    ];
+    const splitWorld = applyRig(split, p);
+    for (let k = 0; k < 3; k += 1) {
+      assert.ok(Math.abs(singleWorld[k] - splitWorld[k]) < 1e-9);
+    }
+  }
 });
 
 test('wrap180 and yawFromForward handle cardinal directions, pitch/roll invariance, vertical gaze, and +/-180', () => {

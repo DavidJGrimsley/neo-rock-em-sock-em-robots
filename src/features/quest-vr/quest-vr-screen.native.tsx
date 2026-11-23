@@ -148,9 +148,13 @@ export default function QuestVRScreen() {
       }
     );
     let previousAppState = AppState?.currentState;
+    questRuntime.appStateChanged?.(
+      previousAppState !== 'background' && previousAppState !== 'inactive'
+    );
     const appStateSubscription = AppState?.addEventListener?.('change', (nextState) => {
       const returnedToActive = previousAppState !== 'active' && nextState === 'active';
       previousAppState = nextState;
+      questRuntime.appStateChanged?.(nextState === 'active');
       if (returnedToActive) {
         setPanelMountKey((value) => value + 1);
       }

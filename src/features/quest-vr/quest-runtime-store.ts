@@ -9,6 +9,8 @@ export interface QuestRuntimeSnapshot {
   status: QuestRuntimeStatus;
   // Latest native VRActivity lifecycle state emitted by VRActivity.kt.
   vrActivityState: QuestVRActivityState;
+  // False while the app is backgrounded/inactive.
+  appActive: boolean;
   // Successful scene entries, including re-entries.
   entries: number;
   // Explicit Enter presses after the first launch.
@@ -35,6 +37,7 @@ export const QUEST_LAUNCH_TIMEOUT_MS = 10_000;
 const initial: QuestRuntimeSnapshot = {
   status: 'idle',
   vrActivityState: 'unknown',
+  appActive: true,
   entries: 0,
   reentryCount: 0,
   sceneMounts: 0,
@@ -139,6 +142,9 @@ export function createQuestRuntime(
         return;
       }
       set({ vrActivityState: effectiveState });
+    },
+    appStateChanged(appActive: boolean) {
+      if (store.getState().appActive !== appActive) set({ appActive });
     },
     exitRequested(source: string) {
       if (store.getState().exitRequest === null) set({ exitRequest: source });

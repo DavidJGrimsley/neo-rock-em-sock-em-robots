@@ -1,9 +1,11 @@
 import {
   ArenaController,
   ARENA_RULES,
+  sanitizeAnalogMovement,
   type ArenaSnapshot,
   type FighterId,
   type Movement,
+  type AnalogMovement,
   type AttackKind,
   type CombatCommand,
   type FighterTransform,
@@ -116,6 +118,7 @@ export class ArenaMatch {
   private pending: ArenaCommand[] = [];
   private localCommands: ArenaCommand[] = [];
   private held = { advance: false, strafeLeft: false, strafeRight: false };
+  private analog: AnalogMovement | null = null;
   private listeners = new Set<() => void>();
   private snapshot!: MatchSnapshot;
   private key = '';
@@ -244,13 +247,19 @@ export class ArenaMatch {
   setLandscape = (value: boolean) => {
     if (this.landscape === value) return;
     this.landscape = value;
-    this.orientationRecovering = true;
+    this.orientationRecovering = !(value && this.round.isVirtualReady());
     this.held = { advance: false, strafeLeft: false, strafeRight: false };
+    this.analog = null;
     this.round.clearHeldMovement();
     this.clearGestures();
     this.prediction.clear();
     this.round.setLandscape(value);
-    if (value && this.getSessionToken() !== null && !this.round.hasNormalTracking())
+    if (
+      value &&
+      this.getSessionToken() !== null &&
+      !this.round.hasNormalTracking() &&
+      !this.round.isVirtualReady()
+    )
       this.interrupt();
     this.checkReadiness();
     this.publish();
@@ -281,6 +290,15 @@ export class ArenaMatch {
     this.round.setPlacement(token, placed);
     if (!placed) this.interrupt();
     this.checkReadiness();
+  };
+  setVirtualReady = (token: number, ready: boolean) => {
+    if (!this.isCurrent(token)) return;
+    if (!ready) this.clearGestures();
+    this.round.setVirtualReady(token, ready);
+    if (ready && this.landscape) this.orientationRecovering = false;
+    if (this.isCurrent(token) && !ready && this.landscape) this.interrupt();
+    this.checkReadiness();
+    this.publish();
   };
   attachSession = (id: number) => {
     this.clearGestures();
@@ -509,10 +527,33 @@ export class ArenaMatch {
     this.held[movement] =
       held && this.snapshot.phase === 'fighting' && this.snapshot.animationsRunning;
   };
+  setAnalogMovement = (input: AnalogMovement | null, roundId = this.snapshot.roundId) => {
+    if (roundId !== this.snapshot.roundId) return;
+    if (input === null) {
+      this.analog = null;
+      return;
+    }
+    const active = this.snapshot.phase === 'fighting' && this.snapshot.animationsRunning;
+    this.analog = active ? sanitizeAnalogMovement(input) : { advance: 0, strafe: 0 };
+  };
   attack = (kind: AttackKind, roundId = this.snapshot.roundId) => this.command(kind, roundId);
   block = (held: boolean, roundId = this.snapshot.roundId) =>
     this.command(held ? 'block-down' : 'block-up', roundId);
   jumpBack = (roundId = this.snapshot.roundId) => this.command('jump-back', roundId);
+  dash = (direction: AnalogMovement, roundId = this.snapshot.roundId) => {
+    if (
+      this.mode !== 'solo' ||
+      roundId !== this.snapshot.roundId ||
+      this.stage !== 'fighting' ||
+      !this.snapshot.animationsRunning ||
+      !this.capable() ||
+      this.orientationPause()
+    ) {
+      return false;
+    }
+    return this.round.dash(direction, roundId, this.localFighter);
+  };
+  cancelDash = () => this.round.cancelDash(this.localFighter);
   private command(kind: CombatCommand, roundId: number) {
     if (
       roundId !== this.snapshot.roundId ||
@@ -574,8 +615,10 @@ export class ArenaMatch {
     this.prediction.clear(true);
     this.movementAck = { seq: 0, time: 0 };
     this.held = { advance: false, strafeLeft: false, strafeRight: false };
+    this.analog = null;
     this.pending = [];
     this.localCommands = [];
+    this.round.cancelDash(this.localFighter);
   }
   private active() {
     return ['countdown', 'fighting', 'presenting', 'intermission'].includes(this.stage);
@@ -674,6 +717,7 @@ export class ArenaMatch {
             'red'
           );
       }
+      this.round.setAnalogMovement(this.analog, undefined, 'blue');
       for (const command of this.localCommands.splice(0)) this.acceptCommand(command, 'blue');
       for (const command of [...(this.peer?.commands ?? [])].sort((a, b) => a.seq - b.seq)) {
         if (command.seq <= this.ack) continue;
@@ -698,7 +742,10 @@ export class ArenaMatch {
     }
     if (this.landscape && this.orientationRecovering && this.round.isReady())
       this.orientationRecovering = false;
-    if (this.orientationPause()) this.round.clearHeldMovement();
+    if (this.orientationPause()) {
+      this.analog = null;
+      this.round.clearHeldMovement();
+    }
     if (this.mode !== 'guest' && simulate) this.advanceMatch(dt);
     if (
       this.presentation &&
@@ -897,6 +944,7 @@ export class ArenaMatch {
       this.peerAudioDoneAt ??= this.announcement.elapsed;
     if (input.orientationPaused) {
       this.held = { advance: false, strafeLeft: false, strafeRight: false };
+      this.analog = null;
       this.round.clearHeldMovement();
     }
     this.lastPeerAt = this.now();
@@ -946,8 +994,10 @@ export class ArenaMatch {
       this.placement = packet.placement;
       this.arenaTransform = { ...packet.arenaTransform };
     }
-    if (packet.orientationPaused)
+    if (packet.orientationPaused) {
       this.held = { advance: false, strafeLeft: false, strafeRight: false };
+      this.analog = null;
+    }
     if (packet.stage === 'abandoned' && !this.networkMessage)
       this.networkMessage = 'Match ended. No winner awarded.';
     // The guest cannot overrule a local interruption with an older host packet.
@@ -1071,7 +1121,7 @@ export class ArenaMatch {
     const message =
       this.stage === 'abandoned'
         ? this.networkMessage
-        : !local.placed || !this.round.isReady()
+        : (!local.placed && !this.round.isVirtualReady()) || !this.round.isReady()
           ? local.message
           : this.stage === 'paused'
             ? this.mode === 'solo'

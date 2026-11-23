@@ -14,7 +14,7 @@ import {
   type ArenaPoint,
 } from './arena-combat-motion.ts';
 import { sweptContact, type ContactPose } from './arena-contact.ts';
-import { arenaMovement } from './arena-movement.ts';
+import { arenaLinearMovement, arenaMovement } from './arena-movement.ts';
 
 // The manifest is the exported motion contract, not executable Unreal montage logic.
 interface AnimationManifest {
@@ -29,6 +29,18 @@ const manifest: AnimationManifest = {
 export type FighterId = 'blue' | 'red';
 export type AttackKind = 'punch' | 'uppercut';
 export type Movement = 'advance' | 'strafeLeft' | 'strafeRight';
+export interface AnalogMovement {
+  advance: number;
+  strafe: number;
+}
+/**
+ * Hook for future general dash stamina (Stage 06+).
+ * Stage 05 keeps `dashStaminaCost = 0`; `guardStamina` belongs exclusively to blocking and is never charged here.
+ */
+export interface DashStaminaHook {
+  canAfford?: (fighter: FighterId, cost: number) => boolean;
+  spend?: (fighter: FighterId, cost: number) => void;
+}
 export type CombatCommand = AttackKind | 'block-down' | 'block-up' | 'jump-back';
 export type GuardState = 'off' | 'raising' | 'holding' | 'lowering' | 'exhausted';
 export type ArenaPhase = 'setup' | 'fighting' | 'paused' | 'ending' | 'ended';
@@ -91,6 +103,12 @@ export const ARENA_RULES = {
   hopFlight: 8 / 30,
   hopDuration: 0.4,
   hopRecovery: 0.25,
+  dashEnabled: false,
+  dashTravel: 0.06,
+  dashMinimum: 0.01,
+  dashDuration: 0.24,
+  dashRecovery: 0.25,
+  dashStaminaCost: 0,
   settleDuration: 0.1,
   cpuGuardReaction: 0.15,
   spawn: 0.095,
@@ -110,6 +128,7 @@ export const ARENA_RULES = {
   launchHeight: 0.18,
   victoryRepeats: 2,
   cpuEnabled: true,
+  stableFacing: false,
 };
 
 // GLB already rotates its source mesh into Y-up. Its base is at Y=-0.14273847.
@@ -189,6 +208,14 @@ interface Fighter {
   guardRegenAt: number;
   hopReadyAt: number;
   hop: { start: ArenaPoint; direction: ArenaPoint; travel: number } | null;
+  dashReadyAt: number;
+  dash: {
+    direction: ArenaPoint;
+    travel: number;
+    moved: number;
+    elapsed: number;
+    clip: string;
+  } | null;
   motionInitialLift: number;
 }
 
@@ -248,6 +275,14 @@ export interface FighterTransform {
   yaw: number;
 }
 
+export function sanitizeAnalogMovement(input: AnalogMovement): AnalogMovement {
+  const advance = Number.isFinite(input.advance) ? input.advance : 0;
+  const strafe = Number.isFinite(input.strafe) ? input.strafe : 0;
+  const mag = Math.hypot(advance, strafe);
+  if (mag <= 1) return { advance: advance === 0 ? 0 : advance, strafe: strafe === 0 ? 0 : strafe };
+  return { advance: advance / mag, strafe: strafe / mag };
+}
+
 /** Owns every gameplay event. Native callbacks only supply readiness, never damage. */
 export class ArenaController {
   private rules: typeof ARENA_RULES;
@@ -268,6 +303,7 @@ export class ArenaController {
   private tracking = false;
   private stableTime = 0;
   private placed = false;
+  private virtualReady = false;
   private placementVersion = 0;
   private assets = new Set<ArenaAsset>();
   private phase: ArenaPhase = 'setup';
@@ -279,6 +315,8 @@ export class ArenaController {
     blue: { advance: false, strafeLeft: false, strafeRight: false },
     red: { advance: false, strafeLeft: false, strafeRight: false },
   };
+  private analog: Record<FighterId, AnalogMovement | null> = { blue: null, red: null };
+  private dashStaminaHook?: DashStaminaHook;
   private blueStartsLeft = true;
   private arenaYaw = 0;
   private cpuAttackAt: number | null = null;
@@ -307,6 +345,11 @@ export class ArenaController {
   getSnapshot = () => this.snapshot;
   isReady = () => this.prerequisites();
   hasNormalTracking = () => this.tracking;
+  isVirtualReady = () => this.virtualReady;
+  isDashing = (id: FighterId = 'blue') => this.fighters[id].dash !== null;
+  setDashStaminaHook = (hook?: DashStaminaHook) => {
+    this.dashStaminaHook = hook;
+  };
   setVictoryCelebration = (matchVictory: boolean) => {
     if (this.phase === 'ending' && this.victoryPlays === 0) this.fullVictory = matchVictory;
   };
@@ -333,6 +376,7 @@ export class ArenaController {
     this.tracking = false;
     this.stableTime = 0;
     this.placed = false;
+    this.virtualReady = false;
     this.placementVersion++;
     this.assets.clear();
     this.error = null;
@@ -349,6 +393,7 @@ export class ArenaController {
     this.attached = false;
     this.token++;
     this.placed = false;
+    this.virtualReady = false;
     this.tracking = false;
     this.stableTime = 0;
     this.assets.clear();
@@ -391,6 +436,13 @@ export class ArenaController {
       this.placementVersion++;
       this.assets.clear();
     }
+    this.publish();
+  };
+
+  setVirtualReady = (token: number, ready: boolean) => {
+    if (!this.isCurrent(token) || this.virtualReady === ready) return;
+    this.virtualReady = ready;
+    if (!ready && this.landscape) this.pause();
     this.publish();
   };
 
@@ -486,6 +538,24 @@ export class ArenaController {
       canFighterBeHit(this.fighters[id].mode);
   };
 
+  setAnalogMovement = (
+    input: AnalogMovement | null,
+    roundId = this.roundId,
+    id: FighterId = 'blue'
+  ) => {
+    if (roundId !== this.roundId) return;
+    if (input === null) {
+      this.analog[id] = null;
+      return;
+    }
+    const eligible =
+      this.phase === 'fighting' &&
+      this.prerequisites() &&
+      !['hop', 'settling', 'launch', 'landing', 'guard-break'].includes(this.fighters[id].mode) &&
+      canFighterBeHit(this.fighters[id].mode);
+    this.analog[id] = eligible ? sanitizeAnalogMovement(input) : { advance: 0, strafe: 0 };
+  };
+
   attack = (kind: AttackKind, id: FighterId = 'blue', roundId = this.roundId) =>
     roundId === this.roundId && this.requestAttack(id, kind);
 
@@ -575,11 +645,129 @@ export class ArenaController {
       f.yaw = (Math.atan2(-direction.x, -direction.z) * 180) / Math.PI;
       f.hopReadyAt = this.clock + this.rules.hopDuration + this.rules.hopRecovery;
       this.held[id] = { advance: false, strafeLeft: false, strafeRight: false };
+      this.analog[id] = null;
       this.setAnimation(f, 'hop', 'JumpBack', true);
     }
     this.publish();
     return true;
   }
+
+  private maxLinearSubstep() {
+    return Math.max(1e-4, Math.min(this.rules.separation * 0.25, 0.005));
+  }
+
+  private stepLinearMovement(
+    before: Record<FighterId, ArenaPoint>,
+    velocity: Record<FighterId, { vx: number; vz: number }>,
+    dt: number
+  ): Record<FighterId, ArenaPoint> {
+    if (dt <= 0) return before;
+    const maxStep = Math.max(
+      Math.hypot(velocity.blue.vx, velocity.blue.vz) * dt,
+      Math.hypot(velocity.red.vx, velocity.red.vz) * dt
+    );
+    const substeps = Math.max(1, Math.ceil(maxStep / this.maxLinearSubstep()));
+    const subDt = dt / substeps;
+    let current = before;
+    for (let i = 0; i < substeps; i++) {
+      current = arenaLinearMovement(current, velocity, subDt, this.rules);
+    }
+    return current;
+  }
+
+  /**
+   * Quest-only local directional dash along current movement intent.
+   * Uses `dashStaminaCost` / `dashStaminaHook` for future general stamina (Stage 06+);
+   * never reads or modifies `guardStamina`.
+   */
+  dash = (direction: AnalogMovement, roundId = this.roundId, id: FighterId = 'blue') => {
+    if (
+      !this.rules.dashEnabled ||
+      roundId !== this.roundId ||
+      this.phase !== 'fighting' ||
+      !this.prerequisites()
+    ) {
+      return false;
+    }
+    const f = this.fighters[id];
+    if (
+      !['idle', 'walk'].includes(f.mode) ||
+      f.guardHeld ||
+      f.dash ||
+      f.attack ||
+      f.buffered ||
+      this.clock + epsilon < f.dashReadyAt
+    ) {
+      return false;
+    }
+    if (
+      this.rules.dashStaminaCost > 0 &&
+      this.dashStaminaHook?.canAfford &&
+      !this.dashStaminaHook.canAfford(id, this.rules.dashStaminaCost)
+    ) {
+      return false;
+    }
+    const advance = Number.isFinite(direction.advance) ? direction.advance : 0;
+    const strafe = Number.isFinite(direction.strafe) ? direction.strafe : 0;
+    const mag = Math.hypot(advance, strafe);
+    if (mag <= epsilon) return false;
+    const na = advance / mag;
+    const ns = strafe / mag;
+    const fwd = forward(f.yaw);
+    const left = { x: fwd.z, z: -fwd.x };
+    const ringDir = {
+      x: fwd.x * na + left.x * ns,
+      z: fwd.z * na + left.z * ns,
+    };
+    const simulated = this.stepLinearMovement(
+      {
+        blue: { x: this.fighters.blue.x, z: this.fighters.blue.z },
+        red: { x: this.fighters.red.x, z: this.fighters.red.z },
+      },
+      id === 'blue'
+        ? {
+            blue: { vx: ringDir.x * this.rules.dashTravel, vz: ringDir.z * this.rules.dashTravel },
+            red: { vx: 0, vz: 0 },
+          }
+        : {
+            blue: { vx: 0, vz: 0 },
+            red: { vx: ringDir.x * this.rules.dashTravel, vz: ringDir.z * this.rules.dashTravel },
+          },
+      1
+    );
+    if (distance(f, simulated[id]) + epsilon < this.rules.dashMinimum) return false;
+    if (this.rules.dashStaminaCost > 0) {
+      this.dashStaminaHook?.spend?.(id, this.rules.dashStaminaCost);
+    }
+    const clip =
+      Math.abs(ns) > Math.abs(na)
+        ? ns > 0
+          ? 'StrafeLeft'
+          : 'StrafeRight'
+        : na > 0
+          ? 'WalkForward'
+          : 'WalkBackward';
+    f.dash = {
+      direction: ringDir,
+      travel: this.rules.dashTravel,
+      moved: 0,
+      elapsed: 0,
+      clip,
+    };
+    f.dashReadyAt = this.clock + this.rules.dashDuration + this.rules.dashRecovery;
+    this.setAnimation(f, 'walk', clip, true);
+    this.publish();
+    return true;
+  };
+
+  cancelDash = (id: FighterId = 'blue') => {
+    const f = this.fighters[id];
+    if (!f.dash) return false;
+    f.dash = null;
+    if (f.mode === 'walk') this.setAnimation(f, 'idle', 'IdleAggro');
+    this.publish();
+    return true;
+  };
 
   previewClip = (fighter: FighterId, clip: string) => {
     if (this.phase !== 'setup' || !this.prerequisites() || !ARENA_CLIPS.includes(clip))
@@ -799,6 +987,7 @@ export class ArenaController {
         (fighter.mode === 'hop' || fighter.mode === 'settling') &&
         fighter.lift > epsilon;
       fighter.hop = null;
+      fighter.dash = null;
       if (settling) {
         fighter.mode = 'settling';
         fighter.elapsed = 0;
@@ -812,6 +1001,7 @@ export class ArenaController {
           true
         );
       this.held[hit.defender] = { advance: false, strafeLeft: false, strafeRight: false };
+      this.analog[hit.defender] = null;
       if (hit.defender === 'red') this.cpuAttackAt = null;
     }
     // Grant openings after all hits resolve, so a simultaneous counter cannot create a stale cue.
@@ -896,6 +1086,8 @@ export class ArenaController {
       guardRegenAt: 0,
       hopReadyAt: 0,
       hop: null,
+      dashReadyAt: 0,
+      dash: null,
       motionInitialLift: 0,
     };
   }
@@ -907,9 +1099,8 @@ export class ArenaController {
     return (
       this.attached &&
       this.landscape &&
-      this.tracking &&
-      this.stableTime + epsilon >= this.rules.stableTracking &&
-      this.placed &&
+      (this.virtualReady ||
+        (this.tracking && this.stableTime + epsilon >= this.rules.stableTracking && this.placed)) &&
       this.assets.size === 3 &&
       !this.error
     );
@@ -938,6 +1129,7 @@ export class ArenaController {
       blue: { advance: false, strafeLeft: false, strafeRight: false },
       red: { advance: false, strafeLeft: false, strafeRight: false },
     };
+    this.analog = { blue: null, red: null };
     for (const f of Object.values(this.fighters)) f.guardHeld = false;
   };
   private clearInput() {
@@ -945,6 +1137,7 @@ export class ArenaController {
     ids.forEach((id) => {
       this.fighters[id].buffered = null;
       this.fighters[id].counterpunchBuffered = false;
+      this.fighters[id].dash = null;
       if (this.fighters[id].mode !== 'hop') this.fighters[id].hop = null;
     });
   }
@@ -1123,11 +1316,37 @@ export class ArenaController {
     const red = this.fighters.red;
     const before = { blue: { x: blue.x, z: blue.z }, red: { x: red.x, z: red.z } };
     const velocity = {} as Record<FighterId, { advance: number; strafe: number }>;
+    const dashWorldVel: Partial<Record<FighterId, { vx: number; vz: number }>> = {};
     for (const id of ids) {
       const f = this.fighters[id];
+      if (f.dash) {
+        const nextElapsed = Math.min(this.rules.dashDuration, f.dash.elapsed + dt);
+        const progress =
+          this.rules.dashDuration > epsilon
+            ? Math.max(0, Math.min(1, nextElapsed / this.rules.dashDuration))
+            : 1;
+        const ease = 1 - (1 - progress) * (1 - progress);
+        const targetMoved = f.dash.travel * ease;
+        const stepDist = Math.max(0, targetMoved - f.dash.moved);
+        f.dash.elapsed = nextElapsed;
+        f.dash.moved = targetMoved;
+        dashWorldVel[id] = {
+          vx: dt > epsilon ? f.dash.direction.x * (stepDist / dt) : 0,
+          vz: dt > epsilon ? f.dash.direction.z * (stepDist / dt) : 0,
+        };
+        velocity[id] = { advance: 0, strafe: 0 };
+        continue;
+      }
       const free = ['idle', 'walk', 'guard', 'guard-exit'].includes(f.mode);
       const cpu = id === 'red' && this.rules.cpuEnabled;
-      const advance = free ? (cpu ? this.cpuMovement() : Number(this.held[id].advance)) : 0;
+      const analog = this.analog[id];
+      const advance = free
+        ? cpu
+          ? this.cpuMovement()
+          : analog !== null
+            ? analog.advance
+            : Number(this.held[id].advance)
+        : 0;
       const strafe = free
         ? cpu
           ? this.clock < this.cpuRecoveryUntil
@@ -1135,20 +1354,69 @@ export class ArenaController {
               ? 1
               : -1
             : 0
-          : Number(this.held[id].strafeLeft) - Number(this.held[id].strafeRight)
+          : analog !== null
+            ? analog.strafe
+            : Number(this.held[id].strafeLeft) - Number(this.held[id].strafeRight)
         : 0;
       const scale =
         (this.rules.speed * (f.mode === 'guard' ? this.rules.guardSpeed : 1)) /
         Math.max(1, Math.hypot(advance, strafe));
       velocity[id] = { advance: advance * scale, strafe: strafe * scale };
     }
-    const positions = arenaMovement(before, velocity, dt, this.rules);
+    const useLinear = this.rules.stableFacing || !!dashWorldVel.blue || !!dashWorldVel.red;
+    const positions = useLinear
+      ? this.stepLinearMovement(
+          before,
+          {
+            blue:
+              dashWorldVel.blue ??
+              (() => {
+                const fwd = forward(blue.yaw);
+                const left = { x: fwd.z, z: -fwd.x };
+                return {
+                  vx: fwd.x * velocity.blue.advance + left.x * velocity.blue.strafe,
+                  vz: fwd.z * velocity.blue.advance + left.z * velocity.blue.strafe,
+                };
+              })(),
+            red:
+              dashWorldVel.red ??
+              (() => {
+                const fwd = forward(facing(red, blue));
+                const left = { x: fwd.z, z: -fwd.x };
+                return {
+                  vx: fwd.x * velocity.red.advance + left.x * velocity.red.strafe,
+                  vz: fwd.z * velocity.red.advance + left.z * velocity.red.strafe,
+                };
+              })(),
+          },
+          dt
+        )
+      : arenaMovement(before, velocity, dt, this.rules);
     for (const id of ids) Object.assign(this.fighters[id], positions[id]);
     for (const id of ids) {
       const f = this.fighters[id],
         v = velocity[id];
       if (!['idle', 'walk', 'guard', 'guard-exit'].includes(f.mode)) continue;
-      f.yaw = facing(f, this.fighters[id === 'blue' ? 'red' : 'blue']);
+      if (!(this.rules.stableFacing && id === 'blue')) {
+        f.yaw = facing(f, this.fighters[id === 'blue' ? 'red' : 'blue']);
+      }
+      if (f.dash) {
+        if (f.dash.elapsed + epsilon >= this.rules.dashDuration) {
+          f.dash = null;
+          const analog = this.analog[id];
+          const hasWalkIntent =
+            Math.hypot(
+              analog !== null ? analog.advance : Number(this.held[id].advance),
+              analog !== null
+                ? analog.strafe
+                : Number(this.held[id].strafeLeft) - Number(this.held[id].strafeRight)
+            ) > epsilon;
+          if (!hasWalkIntent) this.setAnimation(f, 'idle', 'IdleAggro');
+        } else {
+          this.setAnimation(f, 'walk', f.dash.clip);
+        }
+        continue;
+      }
       if (f.mode === 'guard-exit') continue;
       const moving = distance(f, before[id]) > epsilon;
       if (f.mode === 'guard') {
@@ -1455,9 +1723,10 @@ export class ArenaController {
         ? 'Rotate to landscape to place the arena.'
         : !this.attached
           ? 'AR paused. Return to place the arena again.'
-          : !this.tracking || this.stableTime + epsilon < this.rules.stableTracking
+          : !this.virtualReady &&
+              (!this.tracking || this.stableTime + epsilon < this.rules.stableTracking)
             ? 'Move slowly in a well-lit space until tracking is stable.'
-            : !this.placed
+            : !this.virtualReady && !this.placed
               ? 'Tap a highlighted table or floor to place the arena.'
               : this.assets.size < 3
                 ? `Loading arena and fighters (${this.assets.size}/3).`

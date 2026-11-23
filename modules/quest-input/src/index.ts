@@ -42,6 +42,9 @@ export interface QuestInputNative {
   drawDiagnostics?(owner: number, specJson: string): void;
   patchDiagnostics?(owner: number, patchJson: string): void;
   hideDiagnostics?(owner: number): void;
+  rigSyncVersion?(): number;
+  publishRigState?(active: boolean, values: number[]): boolean;
+  clearRigState?(): boolean;
 }
 
 const native = requireOptionalNativeModule<QuestInputNative>('QuestInput');
@@ -53,6 +56,15 @@ export const questInputNative: QuestInputNative | null = native;
 export function questInputAvailable(): boolean {
   try {
     return native?.isAvailable() ?? false;
+  } catch {
+    return false;
+  }
+}
+
+/** True only with the patched renderer that carries render-thread rig transform sync (0004). */
+export function questRigSyncAvailable(): boolean {
+  try {
+    return (native?.rigSyncVersion?.() ?? 0) === 1;
   } catch {
     return false;
   }
