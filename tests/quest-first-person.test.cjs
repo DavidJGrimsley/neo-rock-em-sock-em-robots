@@ -313,7 +313,12 @@ function fakePanel() {
     drawTitle: (owner, json) => panel.titleDraws.push({ owner, spec: JSON.parse(json) }),
     statusTitle: (owner) => (owner === panel.titleOwner ? panel.titleStatus : -1),
     hideTitle: (owner) => panel.titleHidden.push(owner),
+    exitApp: () => {
+      panel.exited += 1;
+      return true;
+    },
   };
+  panel.exited = 0;
   panel.latest = () => panel.draws.at(-1)?.spec ?? null;
   panel.latestTitle = () => panel.titleDraws.at(-1)?.spec ?? null;
   panel.texts = (spec = panel.latest()) =>
@@ -817,7 +822,7 @@ test('controller trigger hits flip the Posture label and Exit leaves; gaze never
   clickAction(frame.all, 'posture', 12);
   clickAction(frame.all, 'exit', 12);
   assert.equal(calls.posture, 0);
-  assert.equal(calls.exitVRScene, 0);
+  assert.equal(panel.exited, 0);
 
   // Left trigger (1) flips the label in the very next panel image.
   const before = panel.draws.length;
@@ -828,9 +833,10 @@ test('controller trigger hits flip the Posture label and Exit leaves; gaze never
   assert.ok(panel.texts().includes('Seated'));
   assert.ok(!panel.texts().includes('Standing'));
 
-  // Right trigger (4) on Exit leaves VR.
+  // Right trigger (4) on Exit closes the Quest app cleanly without Viro launchPanelThroughHome.
   clickAction(frame.all, 'exit', 4);
-  assert.equal(calls.exitVRScene, 1);
+  assert.equal(panel.exited, 1);
+  assert.equal(calls.exitVRScene, 0);
   assert.deepEqual(calls.exitRequested, ['scene-exit']);
   assert.ok(harness.logs.some((line) => /QuestMenu action exit on menu/.test(line)));
   assert.ok(
@@ -887,7 +893,7 @@ test('page changes move the layer, panel and targets together with no loading bl
 
   // A press on a target from the previous screen is dropped and logged once.
   clickAction(staleMenu, 'exit', 1);
-  assert.equal(harness.calls.exitVRScene, 0);
+  assert.equal(harness.panel.exited, 0);
   const blocked = harness.logs.filter((line) => /QuestMenu click exit blocked/.test(line));
   assert.equal(blocked.length, 1);
   assert.match(blocked[0], /source 1$/);
@@ -919,7 +925,8 @@ test('page changes move the layer, panel and targets together with no loading bl
   }
   assert.equal(panel.opened, 1, 'one owner for the whole scene');
   clickAction(frame.all, 'exit', 1);
-  assert.equal(harness.calls.exitVRScene, 1);
+  assert.equal(harness.panel.exited, 1);
+  assert.equal(harness.calls.exitVRScene, 0);
   harness.unmount();
 });
 
@@ -994,7 +1001,8 @@ test('a failed or missing layer falls back to Viro buttons that still work', asy
     frame.all.some((n) => n.type === 'ViroText' && /no headset menu layer/.test(n.props.text))
   );
   clickAction(frame.all, 'exit', 4);
-  assert.equal(missing.calls.exitVRScene, 1);
+  assert.equal(missing.panel.exited, 1);
+  assert.equal(missing.calls.exitVRScene, 0);
   missing.unmount();
 
   // The launcher choice applies to the next scene.

@@ -16,6 +16,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppTheme } from '@/theme/provider';
 import { GameStatusPanel } from '@/ui/game-status-panel';
 
+import { questPanelNative } from '../../../modules/quest-panel/src/index';
 import { isQuestDevice } from './quest-platform';
 import {
   questRuntime,
@@ -64,6 +65,7 @@ export function questPanelModel(
       title: 'Quest only',
       message: 'The VR runtime opens on Meta Quest. Phones use the AR arena from Home.',
       canEnter: false,
+      canClose: false,
     };
   if (!launcher)
     return {
@@ -71,51 +73,24 @@ export function questPanelModel(
       message:
         'VRLauncher is missing from this build. Rebuild with QUEST_BUILD=1 and a clean Android prebuild.',
       canEnter: false,
+      canClose: false,
     };
-  const entered = snapshot.entries > 0 ? ` Entered ${snapshot.entries}×.` : '';
-  const reentryLabel =
-    snapshot.entries > 0 || snapshot.reentryCount > 0 ? 'Re-enter VR' : 'Enter VR';
-  switch (snapshot.status) {
-    case 'idle':
-    case 'launching':
-      return {
-        title: "Neo Rock 'Em Sock 'Em Robots",
-        message: '',
-        canEnter: false,
-        titleOnly: true,
-      };
-    // The panel is in front while VRActivity survives (e.g. paused/stopped when Horizon OS
-    // brings the panel forward). Relaunching brings the singleTask VRActivity back without a new OpenXR session.
-    case 'immersive':
-      if (snapshot.vrActivityState === 'paused' || snapshot.vrActivityState === 'stopped') {
-        return {
-          title: 'VR is paused',
-          message: `The VR scene is paused while this panel is open. Select Re-enter VR to resume.${entered}`,
-          canEnter: true,
-          label: 'Re-enter VR',
-        };
-      }
-      return {
-        title: 'VR session active',
-        message: `The VR scene is still open. Select Re-enter VR to return to it.${entered}`,
-        canEnter: true,
-        label: 'Re-enter VR',
-      };
-    case 'returned':
-      return {
-        title: 'Back on the panel',
-        message: `Select Re-enter VR to return to the scene.${entered}`,
-        canEnter: true,
-        label: 'Re-enter VR',
-      };
-    case 'error':
-      return {
-        title: 'VR needs another try',
-        message: `${snapshot.lastError ?? 'The VR scene stopped.'}${entered}`,
-        canEnter: true,
-        label: reentryLabel,
-      };
+  if (snapshot.status === 'error') {
+    return {
+      title: 'VR failed to launch',
+      message: snapshot.lastError ?? 'The VR scene could not start.',
+      canEnter: false,
+      canClose: true,
+      label: 'Close',
+    };
   }
+  return {
+    title: "Neo Rock 'Em Sock 'Em Robots",
+    message: '',
+    canEnter: false,
+    canClose: false,
+    titleOnly: true,
+  };
 }
 
 function QuestFloatingTitleView({
@@ -162,13 +137,18 @@ export default function QuestVRScreen() {
   const quest = isQuestDevice(Platform);
   const launcher = typeof NativeModules.VRLauncher?.launchVRScene === 'function';
   const initiallyActive = AppState?.currentState === 'active';
-  // Cold launch on Quest starts at attempt 1 when active so QuestXRNavigator mounts immediately; bumped on retry/re-entry.
+  // Only used if MainActivity is ever reached as a fallback route; VRActivity is the primary launcher.
   const [attempt, setAttempt] = useState(() =>
     quest && launcher && initiallyActive && questRuntime.getSnapshot().status === 'idle' ? 1 : 0
   );
-  // Remounts native Compose HostViews when returning to MainActivity so buttons never retain a destroyed VRActivity lifecycle.
   const [panelMountKey, setPanelMountKey] = useState(0);
   const model = questPanelModel(snapshot, { quest, launcher });
+
+  const closeApp = () => {
+    if (!questPanelNative?.exitApp?.()) {
+      BackHandler?.exitApp?.();
+    }
+  };
 
   const invokeLaunch = (launch?: () => void) => {
     const fn = launch ?? NativeModules.VRLauncher?.launchVRScene;
@@ -183,27 +163,7 @@ export default function QuestVRScreen() {
     }
   };
 
-  const enter = (launch?: () => void) => {
-    const current = questRuntime.getSnapshot();
-    if (!quest || !launcher) return;
-    if (
-      current.status === 'immersive' &&
-      current.vrActivityState !== 'finishing' &&
-      current.vrActivityState !== 'destroyed'
-    ) {
-      invokeLaunch(launch);
-      return;
-    }
-    if (current.status === 'launching') return;
-    const shouldRemountNavigator =
-      !launch || current.status === 'error' || current.status === 'idle';
-    if (!questRuntime.requestEnter()) return;
-    if (shouldRemountNavigator) setAttempt((value) => value + 1);
-    else invokeLaunch(launch);
-  };
-
   useEffect(() => {
-    // Arm the launch timer once on active cold launch (StrictMode-safe because requestEnter is idempotent while launching).
     if (
       quest &&
       launcher &&
@@ -271,7 +231,7 @@ export default function QuestVRScreen() {
     return () => subscription.remove();
   }, [snapshot.status]);
 
-  const panel = (launch?: () => void) => {
+  const panel = () => {
     if (model.titleOnly) {
       return <QuestFloatingTitleView backgroundColor="#000000" insets={insets} />;
     }
@@ -291,9 +251,7 @@ export default function QuestVRScreen() {
             title={model.title}
             message={model.message}
             actions={[
-              ...(model.canEnter
-                ? [{ label: model.label ?? 'Re-enter VR', onPress: () => enter(launch) }]
-                : []),
+              ...(model.canClose ? [{ label: model.label ?? 'Close', onPress: closeApp }] : []),
               ...(!quest || !launcher
                 ? [{ label: 'Home', onPress: () => router.dismissTo('/') }]
                 : []),

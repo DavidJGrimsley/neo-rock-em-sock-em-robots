@@ -19,6 +19,8 @@ export interface QuestPanelNative {
   hideTitle?(owner: number): void;
   /** Monotonic count of Horizon LOCAL reference-space resets observed by OpenXR. */
   refSpaceEpoch?(): number;
+  /** Finishes all app tasks and closes the Quest runtime without opening a 2D panel. */
+  exitApp?(): boolean;
 }
 
 const native = requireOptionalNativeModule<QuestPanelNative>('QuestPanel');

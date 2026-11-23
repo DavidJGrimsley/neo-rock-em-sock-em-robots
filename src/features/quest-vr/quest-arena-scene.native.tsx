@@ -12,7 +12,6 @@ import {
   ViroScene,
   ViroSkyBox,
   ViroText,
-  exitVRScene,
 } from '@reactvision/react-viro';
 
 import {
@@ -209,7 +208,7 @@ function logMenu(level: 'info' | 'error', message: string) {
 function leave(session: QuestArenaSession) {
   session.exit();
   questRuntime.exitRequested('scene-exit');
-  exitVRScene();
+  questPanelNative?.exitApp?.();
 }
 
 const fmtVec = (v: readonly number[]) => `[${v.map((n) => n.toFixed(3)).join(',')}]`;

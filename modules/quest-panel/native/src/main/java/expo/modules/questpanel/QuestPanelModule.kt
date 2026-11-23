@@ -1,6 +1,7 @@
 package expo.modules.questpanel
 
 import android.annotation.SuppressLint
+import android.app.ActivityManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -11,6 +12,8 @@ import android.graphics.PorterDuff
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.text.TextPaint
 import android.text.TextUtils
 import android.util.Log
@@ -482,6 +485,25 @@ class QuestPanelModule : Module() {
     Function("drawTitle") { id: Int, json: String -> titleSlot.enqueueDraw(id, json) }
     Function("invalidateTitle") { id: Int -> titleSlot.invalidate(id) }
     Function("hideTitle") { id: Int -> titleSlot.hide(id) }
+
+    Function("exitApp") {
+      val reactContext = appContext.reactContext ?: return@Function false
+      Handler(Looper.getMainLooper()).post {
+        try {
+          appContext.currentActivity?.finishAndRemoveTask()
+          val am = reactContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+          am?.appTasks?.forEach { task ->
+            try {
+              task.finishAndRemoveTask()
+            } catch (_: Throwable) {
+            }
+          }
+        } catch (error: Throwable) {
+          Log.w(TAG, "exitApp failed", error)
+        }
+      }
+      true
+    }
 
     OnDestroy {
       menuSlot.destroy()

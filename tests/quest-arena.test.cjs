@@ -552,7 +552,8 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
   assert.match(scene, /resolveQuestMenuAssetFile/);
   assert.doesNotMatch(source('src/features/quest-vr/quest-menu-layout.ts'), /menu-background/);
   assert.match(scene, /session\.exit\(\)/);
-  assert.match(scene, /exitVRScene\(\)/);
+  assert.match(scene, /questPanelNative\?\.exitApp\?\.\(\)/);
+  assert.doesNotMatch(scene, /exitVRScene\(\)/);
   assert.doesNotMatch(scene, /onClick=\{/);
   assert.doesNotMatch(scene, /exitRequest !== null/);
   assert.doesNotMatch(

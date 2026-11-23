@@ -56,9 +56,8 @@ export function createQuestRuntime(
 ) {
   const store = createStore<QuestRuntimeSnapshot>(() => initial);
   let launchTimer: unknown = null;
-  // Tracks whether MainActivity was actually foreground-active while returned before
-  // going to background (Quest Home), distinguishing a Quest Home reopen from the
-  // transient onPause/onResume AppState flicker during VRActivity -> MainActivity exit.
+  // Tracks whether a fallback 2D panel was actually foreground-active while returned before
+  // going to background, distinguishing an intentional reopen from transient pause/resume flicker.
   let panelActiveSinceReturn = false;
   let reenterOnAppActive = false;
 
@@ -112,9 +111,14 @@ export function createQuestRuntime(
       resetReturnHandoff();
       if (state.status === 'immersive') return set({ sceneMounts });
       clearTimer();
-      // A late mount after the launch timeout still counts as that entry. A remount
-      // without a launch (StrictMode's probe, a restored VRActivity) does not.
-      const launched = state.status === 'launching' || state.status === 'error';
+      // Count direct cold launches ('idle'), explicit launches ('launching'/'error'), and
+      // warm re-launches after VRActivity destroyed ('destroyed'). StrictMode remounts within
+      // a single living VRActivity keep the same entry count.
+      const launched =
+        state.status === 'idle' ||
+        state.status === 'launching' ||
+        state.status === 'error' ||
+        state.vrActivityState === 'destroyed';
       set({
         status: 'immersive',
         vrActivityState:
@@ -164,11 +168,11 @@ export function createQuestRuntime(
     appStateChanged(appActive: boolean) {
       const state = store.getState();
       if (appActive) {
-        if (state.status === 'returned') {
+        if (state.status === 'returned' && state.exitRequest === null) {
           panelActiveSinceReturn = true;
         }
       } else {
-        if (state.status === 'returned' && panelActiveSinceReturn) {
+        if (state.status === 'returned' && panelActiveSinceReturn && state.exitRequest === null) {
           reenterOnAppActive = true;
         }
         panelActiveSinceReturn = false;
@@ -176,11 +180,19 @@ export function createQuestRuntime(
       if (state.appActive !== appActive) set({ appActive });
     },
     /**
-     * Decides whether returning to active foreground represents re-opening the app from
-     * Quest Home (rather than returning from VR via Exit/Back).
+     * Never auto-relaunches during terminal exit transitions or while an explicit exit
+     * request is pending; only resumes a non-finishing paused/stopped VRActivity when needed.
      */
     consumeAutoReenter(): QuestAutoReentryAction {
       const state = store.getState();
+      if (
+        state.exitRequest !== null ||
+        state.vrActivityState === 'finishing' ||
+        state.vrActivityState === 'destroyed'
+      ) {
+        reenterOnAppActive = false;
+        return null;
+      }
       if (state.status === 'idle') {
         return 'enter';
       }
@@ -188,23 +200,21 @@ export function createQuestRuntime(
         reenterOnAppActive = false;
         return 'enter';
       }
-      if (
-        state.status === 'immersive' &&
-        state.vrActivityState === 'stopped' &&
-        state.exitRequest === null
-      ) {
+      if (state.status === 'immersive' && state.vrActivityState === 'stopped') {
         return 'launch-live';
       }
       return null;
     },
-    /** Resolves an explicit Android LAUNCHER reopen intent (e.g. clicking app icon from Quest Home). */
+    /** Resolves an explicit Android LAUNCHER reopen intent when MainActivity receives it. */
     resolveLauncherReopen(): QuestAutoReentryAction {
       const state = store.getState();
       reenterOnAppActive = false;
+      if (state.exitRequest !== null || state.vrActivityState === 'finishing') return null;
       if (state.status === 'launching') return null;
+      if (state.status === 'error') return null;
       if (state.status === 'immersive') {
         if (state.vrActivityState === 'resumed') return null;
-        if (state.vrActivityState === 'finishing' || state.vrActivityState === 'destroyed') {
+        if (state.vrActivityState === 'destroyed') {
           return 'enter';
         }
         return 'launch-live';

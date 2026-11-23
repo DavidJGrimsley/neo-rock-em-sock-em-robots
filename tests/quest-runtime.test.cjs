@@ -13,10 +13,7 @@ const {
 
 const source = (file) => fs.readFileSync(require.resolve('../' + file), 'utf8');
 
-const {
-  QUEST_SPLASH_IMAGE,
-  QUEST_SPLASH_IMAGE_WIDTH,
-} = (() => {
+const { QUEST_SPLASH_IMAGE, QUEST_SPLASH_IMAGE_WIDTH } = (() => {
   const mod = { exports: {} };
   vm.runInNewContext(
     ts.transpileModule(source('app.config.ts'), {
@@ -190,7 +187,10 @@ test('Quest splash title PNG is a faithful transparent RGBA composite from quest
   // Fits comfortably inside Android 12+ 192dp circular splash mask at QUEST_SPLASH_IMAGE_WIDTH.
   const renderedHeightDp = (QUEST_SPLASH_IMAGE_WIDTH * height) / width;
   const cornerRadiusDp = Math.hypot(QUEST_SPLASH_IMAGE_WIDTH / 2, renderedHeightDp / 2);
-  assert.ok(cornerRadiusDp < 96, `splash corner radius ${cornerRadiusDp.toFixed(1)}dp exceeds 96dp`);
+  assert.ok(
+    cornerRadiusDp < 96,
+    `splash corner radius ${cornerRadiusDp.toFixed(1)}dp exceeds 96dp`
+  );
   // Decode IDAT scanlines to verify top-left corner pixel has alpha === 0 (no backdrop/box).
   const idatChunks = [];
   let offset = 8;
@@ -237,6 +237,32 @@ test('Quest detection reads Android build branding and tolerates missing Platfor
   assert.equal(isQuestDevice({ OS: 'android', constants: { Manufacturer: 7 } }), false);
   assert.equal(isQuestDevice(undefined), false);
   assert.equal(isQuestDevice(null), false);
+});
+
+test('direct VRActivity cold launch, warm reopen after destroy, StrictMode, and explicit exit lifecycle work cleanly', () => {
+  const clock = fakeClock();
+  const runtime = createQuestRuntime(clock, 10_000);
+  assert.equal(runtime.getSnapshot().status, 'idle');
+
+  // Direct VRActivity cold launch mounts scene directly from idle -> immersive (entries = 1).
+  runtime.sceneMounted();
+  assert.equal(runtime.getSnapshot().status, 'immersive');
+  assert.equal(runtime.getSnapshot().entries, 1);
+
+  // Explicit exit (scene-exit / hardware-back / onExitViro) + destroy never auto-reenters.
+  runtime.exitRequested('scene-exit');
+  runtime.vrActivityStateChanged('paused', true);
+  runtime.sceneUnmounted();
+  runtime.vrActivityStateChanged('destroyed');
+  assert.equal(runtime.getSnapshot().status, 'returned');
+  assert.equal(runtime.getSnapshot().vrActivityState, 'destroyed');
+  assert.equal(runtime.consumeAutoReenter(), null);
+
+  // Intentional warm reopen from Quest Library starts a fresh VRActivity and increments entries.
+  runtime.sceneMounted();
+  assert.equal(runtime.getSnapshot().status, 'immersive');
+  assert.equal(runtime.getSnapshot().entries, 2);
+  assert.equal(runtime.getSnapshot().exitRequest, null);
 });
 
 test('explicit enter, exit, and repeated re-entry follow the scene lifecycle', () => {
@@ -392,8 +418,11 @@ test('routes and phone entry points never load @reactvision/react-viro staticall
   assert.match(navigator, /export function registerQuestVRScene/);
   const scene = source('src/features/quest-vr/quest-arena-scene.native.tsx');
   assert.match(scene, /<ViroScene[\s>]/);
-  assert.doesNotMatch(scene, /ViroARScene|ViroXRSceneNavigator|setTracking|setPlacement/);
-  assert.match(scene, /exitVRScene\(\)/);
+  assert.doesNotMatch(
+    scene,
+    /ViroARScene|ViroXRSceneNavigator|setTracking|setPlacement|exitVRScene/
+  );
+  assert.match(scene, /questPanelNative\?\.exitApp\?\.\(\)/);
   assert.match(navigator, /quest-arena-scene\.native/);
   assert.doesNotMatch(navigator, /quest-smoke-scene/);
   assert.match(
@@ -402,8 +431,11 @@ test('routes and phone entry points never load @reactvision/react-viro staticall
   );
   assert.doesNotMatch(
     source('src/features/quest-vr/quest-vr-screen.native.tsx'),
-    /Enter VR for the headset menu|Quest VR runtime|Opening VR/
+    /Back on the panel|Re-enter VR|Enter VR for the headset menu|Quest VR runtime|Opening VR/
   );
+  const pkg = JSON.parse(source('package.json'));
+  assert.equal(pkg.main, 'index.ts');
+  assert.match(source('index.ts'), /quest-vr-autoregister[\s\S]*expo-router\/entry/);
 });
 
 function screenHarness({
@@ -427,6 +459,7 @@ function screenHarness({
   let launched = 0;
   let nativeLaunches = 0;
   let navigatorMounts = 0;
+  let exitedApp = 0;
   const load = () =>
     component('src/features/quest-vr/quest-vr-screen.native.tsx', {
       'react/jsx-runtime': jsxRuntime,
@@ -516,6 +549,14 @@ function screenHarness({
       },
       '@/theme/provider': { useAppTheme: () => ({ activeColors: { background: '#000' } }) },
       '@/ui/game-status-panel': { GameStatusPanel: 'StatusPanel' },
+      '../../../modules/quest-panel/src/index': {
+        questPanelNative: {
+          exitApp: () => {
+            exitedApp++;
+            return true;
+          },
+        },
+      },
       './quest-platform': { isQuestDevice },
       './quest-runtime-store': { questRuntime: runtime },
       '../../../assets/arena/ui/quest-lettering/quest-splash-title.png': 42,
@@ -573,6 +614,7 @@ function screenHarness({
     launch: () => launched++,
     launched: () => launched,
     nativeLaunches: () => nativeLaunches,
+    exitedApp: () => exitedApp,
     navigatorMounts: () => navigatorMounts,
   };
 }
@@ -586,7 +628,9 @@ test('Quest auto-enters VR once on cold launch (StrictMode-safe), shows floating
   assert.equal(h.clock.pending.size, 1, 'exactly one launch timeout scheduled under StrictMode');
   const navigator = nodes(root).find((node) => node.type === 'QuestXRNavigator');
   assert.ok(navigator, 'navigator mounts automatically on cold Quest launch');
-  const attemptOf = (tree) => nodes(tree).find((node) => node.type === 'Suspense')?.key ?? nodes(tree).find((node) => node.props?.fallback)?.key;
+  const attemptOf = (tree) =>
+    nodes(tree).find((node) => node.type === 'Suspense')?.key ??
+    nodes(tree).find((node) => node.props?.fallback)?.key;
   const initialAttempt = attemptOf(root);
   // Back is consumed while launching; the panel renders ONLY the transparent floating title, no StatusPanel card.
   assert.equal(h.backs.at(-1)(), true);
@@ -603,7 +647,7 @@ test('Quest auto-enters VR once on cold launch (StrictMode-safe), shows floating
   const initialPanelKey = h.panelKey(navigator.props.renderQuestPanel(h.launch)) ?? 0;
 
   // Explicit exit (scene-exit / onExitViro) + transient VRActivity.onPause -> MainActivity.onResume AppState flicker
-  // must respect exit intent and NOT auto-relaunch.
+  // must respect exit intent, NOT auto-relaunch, and NEVER show "Back on the panel" or "Re-enter VR".
   h.runtime.exitRequested('scene-exit');
   h.emitVRActivityState('paused', true);
   h.emitAppState('background');
@@ -612,38 +656,25 @@ test('Quest auto-enters VR once on cold launch (StrictMode-safe), shows floating
   h.emitVRActivityState('destroyed');
   assert.equal(h.runtime.getSnapshot().status, 'returned');
   assert.equal(h.launched(), 0);
+  assert.equal(h.runtime.consumeAutoReenter(), null);
+  h.emitLauncherReopen();
+  assert.equal(h.launched(), 0);
+  assert.equal(h.nativeLaunches(), 0);
   const returnedPanel = nodes(h.render())
     .find((node) => node.type === 'QuestXRNavigator')
     .props.renderQuestPanel(h.launch);
-  assert.equal(h.panelOf(returnedPanel).props.title, 'Back on the panel');
-  assert.equal(h.action(returnedPanel, 'Home'), undefined, 'no redundant Home button on Quest');
-  assert.ok(h.action(returnedPanel, 'Re-enter VR'));
+  assert.equal(h.panelOf(returnedPanel), undefined);
+  assert.ok(h.titleSplashOf(returnedPanel));
 
-  // Explicit Re-enter VR works across repeated rounds.
-  for (let round = 1; round <= 3; round++) {
-    const panel = nodes(h.render())
-      .find((node) => node.type === 'QuestXRNavigator')
-      .props.renderQuestPanel(h.launch);
-    h.action(panel, 'Re-enter VR').onPress();
-    assert.equal(h.launched(), round);
-    h.runtime.sceneMounted();
-    h.runtime.exitRequested('onExitViro');
-    h.runtime.sceneUnmounted();
-  }
-  assert.equal(h.runtime.getSnapshot().reentryCount, 3);
-
-  // Leaving the returned panel to Quest Home (background) and re-opening (active) automatically re-enters VR.
-  h.emitAppState('active'); // ensure panel marked active after return
+  // Background -> active after explicit exit does NOT auto-reopen in a loop.
   h.emitAppState('background');
   h.emitAppState('active');
-  assert.equal(h.runtime.getSnapshot().status, 'launching');
-  assert.ok(
-    Number(attemptOf(h.render())) > Number(initialAttempt),
-    'auto re-entry bumps attempt to remount navigator cleanly'
-  );
-  h.runtime.sceneMounted();
+  assert.equal(h.runtime.getSnapshot().status, 'returned');
+  assert.equal(h.launched(), 0);
 
   // Pressing Meta Home in VR (paused -> stopped, no exitRequest) and re-opening from Quest Home resumes VRActivity natively.
+  h.runtime.requestEnter();
+  h.runtime.sceneMounted();
   h.emitVRActivityState('paused');
   h.emitVRActivityState('stopped');
   h.emitAppState('background');
@@ -658,50 +689,18 @@ test('Quest auto-enters VR once on cold launch (StrictMode-safe), shows floating
   h.emitAppState('active');
   assert.equal(h.nativeLaunches(), 1);
 
-  // Returning to panel while VRActivity survives shows paused copy and bumps panelMountKey.
-  h.emitVRActivityState('paused');
-  root = h.render();
-  const paused = nodes(root)
-    .find((node) => node.type === 'QuestXRNavigator')
-    .props.renderQuestPanel(h.launch);
-  assert.equal(h.panelOf(paused).props.title, 'VR is paused');
-  assert.ok(h.panelKey(paused) > initialPanelKey, 'returning from VRActivity remounts panel wrapper');
-  h.action(paused, 'Re-enter VR').onPress();
-  assert.equal(h.launched(), 4);
-
-  // When VRActivity destroys, the panel stops claiming the VR session is live and re-enters cleanly.
-  h.emitVRActivityState('destroyed');
-  const afterDestroy = nodes(h.render())
-    .find((node) => node.type === 'QuestXRNavigator')
-    .props.renderQuestPanel(h.launch);
-  assert.equal(h.panelOf(afterDestroy).props.title, 'Back on the panel');
-  h.action(afterDestroy, 'Re-enter VR').onPress();
-  assert.equal(h.launched(), 5);
-  assert.equal(h.runtime.getSnapshot().status, 'launching');
-  h.runtime.sceneMounted();
-
-  // Launch errors surface a usable recovery UI (not a blank screen) and remount navigator on retry.
+  // Launch errors surface a truthful failure UI with Close (calling exitApp) instead of "Re-enter VR" or looping.
   h.runtime.fail(new Error('scene crashed'));
   const errored = nodes(h.render())
     .find((node) => node.type === 'QuestXRNavigator')
     .props.renderQuestPanel(h.launch);
-  assert.equal(h.panelOf(errored).props.title, 'VR needs another try');
-  h.action(errored, 'Re-enter VR').onPress();
-  assert.equal(h.launched(), 5, 'error recovery remounts navigator rather than calling stale launch');
-  assert.equal(h.runtime.getSnapshot().status, 'launching');
-  h.runtime.sceneMounted();
-
-  // A remounted screen without a navigator (e.g. after process restoration) relaunches live VRActivity natively.
-  const remounted = screenHarness();
-  remounted.runtime.requestEnter();
-  remounted.runtime.sceneMounted();
-  assert.equal(remounted.panelOf(remounted.render()).props.title, 'VR session active');
-  remounted.action(remounted.render(), 'Re-enter VR').onPress();
-  assert.equal(remounted.nativeLaunches(), 1);
-  assert.ok(!nodes(remounted.render()).some((node) => node.type === 'QuestXRNavigator'));
+  assert.equal(h.panelOf(errored).props.title, 'VR failed to launch');
+  assert.equal(h.action(errored, 'Re-enter VR'), undefined);
+  h.action(errored, 'Close').onPress();
+  assert.equal(h.exitedApp(), 1);
 });
 
-test('launch timeout and synchronous launch errors show recovery UI instead of blank screen or relaunch loop', () => {
+test('launch timeout and synchronous launch errors show truthful Close failure UI without relaunch loop', () => {
   const clock = fakeClock();
   const h = screenHarness({ clock });
   h.render();
@@ -711,30 +710,14 @@ test('launch timeout and synchronous launch errors show recovery UI instead of b
   const timedOutPanel = nodes(h.render())
     .find((node) => node.type === 'QuestXRNavigator')
     .props.renderQuestPanel(h.launch);
-  assert.equal(h.panelOf(timedOutPanel).props.title, 'VR needs another try');
+  assert.equal(h.panelOf(timedOutPanel).props.title, 'VR failed to launch');
   assert.match(h.panelOf(timedOutPanel).props.message, /did not start within 10 s/);
   // Leaving to background and back on error panel does NOT auto-loop launch errors.
   h.emitAppState('background');
   h.emitAppState('active');
   assert.equal(h.runtime.getSnapshot().status, 'error');
-
-  // Synchronous throw inside launch() transitions to error with recovery button.
-  const broken = screenHarness({ launcher: new Error('VRActivity missing') });
-  broken.render();
-  const nav = nodes(broken.render()).find((node) => node.type === 'QuestXRNavigator');
-  nav.props.renderQuestPanel(() => {
-    throw new Error('VRActivity missing');
-  });
-  broken.runtime.sceneMounted();
-  broken.runtime.sceneUnmounted();
-  const panel = nodes(broken.render())
-    .find((node) => node.type === 'QuestXRNavigator')
-    .props.renderQuestPanel(() => {
-      throw new Error('VRActivity missing');
-    });
-  broken.action(panel, 'Re-enter VR').onPress();
-  assert.equal(broken.runtime.getSnapshot().status, 'error');
-  assert.match(broken.runtime.getSnapshot().lastError, /VRActivity missing/);
+  h.action(timedOutPanel, 'Close').onPress();
+  assert.equal(h.exitedApp(), 1);
 });
 
 test('cold launch while headset is asleep defers launch until active foreground without premature timeout', () => {
@@ -802,20 +785,77 @@ test('Quest bootstrap registers VRQuestScene and seeds default intent on Quest o
   assert.equal(registered, 1, 'Quest registers VRQuestScene once');
 });
 
-test('registerQuestVRScene seeds default QuestArenaScene intent for process restoration', () => {
+test('registerQuestVRScene registers custom VRQuestScene root, wires BackHandler exitApp, attaches lifecycle, and exposes QuestFailureScene', () => {
   let intent = null;
   let errorCb = null;
-  const { registerQuestVRScene } = component('src/features/quest-vr/quest-xr-navigator.native.tsx', {
+  let registeredName = null;
+  let registeredFactory = null;
+  let exitAppCalls = 0;
+  const backHandlers = [];
+  const vrStateListeners = new Set();
+  const appStateListeners = new Set();
+  const effects = [];
+  const runtime = createQuestRuntime(fakeClock());
+  const mod = component('src/features/quest-vr/quest-xr-navigator.native.tsx', {
     'react/jsx-runtime': jsxRuntime,
-    react: { useEffect: () => {} },
+    react: {
+      Component: class {},
+      useEffect: (fn) => {
+        const cleanup = fn();
+        if (cleanup) effects.push(cleanup);
+      },
+      useRef: (v) => ({ current: v }),
+      useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+    },
+    'react-native': {
+      AppRegistry: {
+        registerComponent: (name, factory) => {
+          registeredName = name;
+          registeredFactory = factory;
+        },
+      },
+      AppState: {
+        currentState: 'active',
+        addEventListener: (_e, fn) => {
+          appStateListeners.add(fn);
+          return { remove: () => appStateListeners.delete(fn) };
+        },
+      },
+      BackHandler: {
+        addEventListener: (_e, fn) => {
+          backHandlers.push(fn);
+          return { remove: () => {} };
+        },
+        exitApp: () => {},
+      },
+      DeviceEventEmitter: {
+        addListener: (event, fn) => {
+          if (event === 'questVRActivityState') vrStateListeners.add(fn);
+          return { remove: () => vrStateListeners.delete(fn) };
+        },
+      },
+      StyleSheet: { absoluteFill: { flex: 1 } },
+      findNodeHandle: () => 7,
+    },
     '@reactvision/react-viro': {
       ViroXRSceneNavigator: 'ViroXRSceneNavigator',
+      ViroVRSceneNavigator: 'ViroVRSceneNavigator',
+      ViroScene: 'ViroScene',
+      ViroSkyBox: 'ViroSkyBox',
+      ViroAmbientLight: 'ViroAmbientLight',
+      ViroText: 'ViroText',
+      ViroBox: 'ViroBox',
+      ViroMaterials: { createMaterials: () => {} },
       VRQuestNavigatorBridge: {
         getIntent: () => intent,
         setIntent: (initialScene, rendererConfig) => {
           intent = { initialScene, rendererConfig };
           return 'vr-default';
         },
+        onIntent: () => () => {},
+        subscribeOps: () => () => {},
+        setVRActive: () => {},
+        setViewTag: () => {},
         onQuestError: (cb) => {
           errorCb = cb;
           return () => {
@@ -824,14 +864,48 @@ test('registerQuestVRScene seeds default QuestArenaScene intent for process rest
         },
       },
     },
+    '../../../modules/quest-panel/src/index': {
+      questPanelNative: {
+        exitApp: () => {
+          exitAppCalls += 1;
+          return true;
+        },
+      },
+    },
     './quest-arena-scene.native': { __esModule: true, default: 'QuestArenaScene' },
-    './quest-runtime-store': { questOnExitViro, questRuntime: createQuestRuntime(fakeClock()) },
+    './quest-runtime-store': { questOnExitViro, questRuntime: runtime },
   });
-  registerQuestVRScene();
+  mod.registerQuestVRScene();
+  assert.equal(registeredName, 'VRQuestScene');
+  assert.equal(registeredFactory(), mod.QuestVRSceneRoot);
   assert.equal(intent.initialScene.scene, 'QuestArenaScene');
   assert.equal(intent.rendererConfig.onExitViro, questOnExitViro);
   assert.equal(intent.rendererConfig.passthroughEnabled, false);
   assert.ok(typeof errorCb === 'function');
+
+  // Rendering QuestVRSceneRoot mounts ViroVRSceneNavigator directly, connects lifecycle listeners,
+  // and intercepts hardware Back to close the app cleanly without Viro launchPanelThroughHome.
+  const rootTree = mod.QuestVRSceneRoot();
+  const nav = nodes(rootTree).find((n) => n.type === 'ViroVRSceneNavigator');
+  assert.ok(nav);
+  assert.equal(nav.props.initialScene.scene, 'QuestArenaScene');
+  for (const listener of vrStateListeners) listener({ state: 'paused', finishing: false });
+  assert.equal(runtime.getSnapshot().vrActivityState, 'paused');
+  for (const listener of appStateListeners) listener('background');
+  assert.equal(runtime.getSnapshot().appActive, false);
+  assert.equal(backHandlers.at(-1)(), true);
+  assert.equal(exitAppCalls, 1);
+  assert.equal(runtime.getSnapshot().exitRequest, 'hardware-back');
+
+  // Truthful failure scene exposes Exit box calling exitApp without relaunching.
+  const failTree = mod.QuestFailureScene({ errorMessage: 'Renderer failed' });
+  const failBox = nodes(failTree).find((n) => n.type === 'ViroBox');
+  failBox.props.onClickState(1);
+  assert.equal(exitAppCalls, 2);
+  assert.ok(
+    nodes(failTree).some((n) => n.type === 'ViroText' && /Renderer failed/.test(n.props.text))
+  );
+  for (const cleanup of effects) cleanup();
 });
 
 test('Home offers the Quest runtime on a Quest and the AR arena elsewhere', () => {
@@ -894,7 +968,7 @@ test('root layout registers the Quest route without the portrait default and boo
   assert.match(rootLayout, /headerShown: !isQuestDevice\(Platform\)/);
 });
 
-test('Quest VRActivity prebuild plugin patches Viro Meta/Home resume race and stays idempotent', async () => {
+test('Quest VRActivity prebuild plugin configures VR launcher manifest, system splash, and lifecycle/task cleanup idempotently', async () => {
   const os = require('node:os');
   const path = require('node:path');
   const { compileModsAsync, withDangerousMod, withStaticPlugin } = require('@expo/config-plugins');
@@ -912,7 +986,12 @@ test('Quest VRActivity prebuild plugin patches Viro Meta/Home resume race and st
         '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.djleg.neorobots">',
         '  <uses-permission android:name="android.permission.INTERNET"/>',
         '  <application android:name=".MainApplication">',
-        '    <activity android:name=".MainActivity"/>',
+        '    <activity android:name=".MainActivity" android:exported="true">',
+        '      <intent-filter>',
+        '        <action android:name="android.intent.action.MAIN"/>',
+        '        <category android:name="android.intent.category.LAUNCHER"/>',
+        '      </intent-filter>',
+        '    </activity>',
         '  </application>',
         '</manifest>',
         '',
@@ -953,6 +1032,16 @@ test('Quest VRActivity prebuild plugin patches Viro Meta/Home resume race and st
     );
     assert.ok(questActivityPlugin, 'expected Quest config to include with-quest-vr-activity.cjs');
     const repoRoot = path.resolve(__dirname, '..');
+    const tmpSplash = path.join(
+      tmpRoot,
+      'assets',
+      'arena',
+      'ui',
+      'quest-lettering',
+      'quest-splash-title.png'
+    );
+    fs.mkdirSync(path.dirname(tmpSplash), { recursive: true });
+    fs.copyFileSync(path.join(repoRoot, QUEST_SPLASH_IMAGE), tmpSplash);
     let modConfig = withStaticPlugin(
       { ...questConfig, plugins: [viroEntry], _internal: { projectRoot: repoRoot } },
       { plugin: viroEntry, projectRoot: repoRoot }
@@ -964,6 +1053,38 @@ test('Quest VRActivity prebuild plugin patches Viro Meta/Home resume race and st
 
     await compileModsAsync(modConfig, { projectRoot: tmpRoot, platforms: ['android'] });
 
+    const manifestText = fs.readFileSync(path.join(appMain, 'AndroidManifest.xml'), 'utf8');
+    assert.match(manifestText, /android:name="com\.oculus\.ossplash" android:value="true"/);
+    assert.match(manifestText, /android:name="com\.oculus\.ossplash\.type" android:value="alpha"/);
+    assert.match(
+      manifestText,
+      /android:name="com\.oculus\.ossplash\.background" android:value="passthrough-contextual"/
+    );
+    const mainMatch = manifestText.match(
+      /<activity[^>]*android:name="\.MainActivity"[\s\S]*?(?:\/>|<\/activity>)/
+    );
+    assert.ok(mainMatch, 'MainActivity present');
+    assert.doesNotMatch(mainMatch[0], /CATEGORY_LAUNCHER|category\.LAUNCHER/);
+    assert.match(mainMatch[0], /android:exported="false"/);
+    const vrMatch = manifestText.match(
+      /<activity[^>]*android:name="\.VRActivity"[\s\S]*?<\/activity>/
+    );
+    assert.ok(vrMatch, 'VRActivity present');
+    assert.match(vrMatch[0], /android:exported="true"/);
+    assert.match(vrMatch[0], /android:excludeFromRecents="true"/);
+    assert.match(vrMatch[0], /android:launchMode="singleTask"/);
+    assert.match(vrMatch[0], /android:theme="@style\/AppTheme"/);
+    assert.match(vrMatch[0], /android\.intent\.category\.LAUNCHER/);
+    assert.match(vrMatch[0], /com\.oculus\.intent\.category\.VR/);
+    assert.match(vrMatch[0], /com\.oculus\.vr\.focusaware/);
+
+    const vrSplashDest = path.join(appMain, 'assets', 'vr_splash.png');
+    assert.ok(fs.existsSync(vrSplashDest), 'vr_splash.png must be copied to android assets');
+    assert.deepEqual(
+      fs.readFileSync(vrSplashDest),
+      fs.readFileSync(path.join(repoRoot, QUEST_SPLASH_IMAGE))
+    );
+
     const vrActivityPath = path.join(pkgDir, 'VRActivity.kt');
     assert.ok(fs.existsSync(vrActivityPath), 'expected Viro plugin to generate VRActivity.kt');
     const patched = fs.readFileSync(vrActivityPath, 'utf8');
@@ -974,9 +1095,14 @@ test('Quest VRActivity prebuild plugin patches Viro Meta/Home resume race and st
       patched,
       /object : DefaultReactActivityDelegate\(this, mainComponentName, fabricEnabled\) \{\s*override fun onPause\(\) \{[\s\S]*?val currentActivity = reactHost\?\.currentReactContext\?\.currentActivity[\s\S]*?supersededByOtherActivity \|\|\s*\(currentActivity != null && currentActivity !== this@VRActivity\)\s*\)\s*\{\s*return\s*\}\s*super\.onPause\(\)\s*\}/
     );
-    // VRActivity.onResume resets the flag and emits state; onPause clears expectingForeignPause and emits paused/finishing; onStop emits stopped/finishing; onDestroy emits destroyed.
+    // VRActivity handles singleTask onNewIntent, avoids restoring stale Fragments, tracks instances,
+    // emits lifecycle states, and finishes remaining app tasks on terminal destroy.
     assert.match(patched, /import com\.facebook\.react\.bridge\.Arguments/);
     assert.match(patched, /import com\.facebook\.react\.modules\.core\.DeviceEventManagerModule/);
+    assert.match(patched, /override fun onNewIntent\(intent: Intent\)/);
+    assert.match(patched, /super\.onCreate\(null\)/);
+    assert.match(patched, /questAppTaskCleanup\.add\(this\)/);
+    assert.match(patched, /finishAndRemoveTask\(\)/);
     assert.match(
       patched,
       /override fun onResume\(\) \{\s*supersededByOtherActivity = false\s*emitVRActivityState\("resumed"\)\s*super\.onResume\(\)/
@@ -989,10 +1115,7 @@ test('Quest VRActivity prebuild plugin patches Viro Meta/Home resume race and st
       patched,
       /override fun onStop\(\) \{\s*emitVRActivityState\(if \(isFinishing \|\| isDestroyed\) "finishing" else "stopped"\)\s*super\.onStop\(\)\s*\}/
     );
-    assert.match(
-      patched,
-      /mainHandler\.removeCallbacksAndMessages\(null\)\s*emitVRActivityState\("destroyed"\)\s*super\.onDestroy\(\)/
-    );
+    assert.match(patched, /emitVRActivityState\("destroyed"\)[\s\S]*?super\.onDestroy\(\)/);
     // Resuming another Activity (MainActivity) supersedes VRActivity, syncs ReactContext.currentActivity, and avoids force-finishing VRActivity.
     assert.match(
       patched,
@@ -1015,6 +1138,7 @@ test('Quest VRActivity prebuild plugin patches Viro Meta/Home resume race and st
     await compileModsAsync(secondConfig, { projectRoot: tmpRoot, platforms: ['android'] });
     assert.equal(fs.readFileSync(vrActivityPath, 'utf8'), patched);
     assert.equal(fs.readFileSync(mainActivityPath, 'utf8'), patchedMain);
+    assert.equal(fs.readFileSync(path.join(appMain, 'AndroidManifest.xml'), 'utf8'), manifestText);
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
