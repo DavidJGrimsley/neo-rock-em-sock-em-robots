@@ -21,6 +21,11 @@ const {
   createQuestArenaSession,
 } = require('../src/features/quest-vr/quest-arena-session.ts');
 const {
+  QUEST_FIRST_PERSON_ARM_SCALE,
+  QUEST_HAND_PALM_CENTER_MODEL,
+  placeQuestFirstPersonArms,
+} = require('../src/features/quest-vr/quest-first-person-arms.ts');
+const {
   DEFAULT_CALIBRATION,
   QUEST_HEAD_BOUNDS,
   QUEST_WORLD_SCALE,
@@ -755,6 +760,7 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
 
   const mocks = {
     react: {
+      memo: (component) => component,
       useState: (initial) => {
         const idx = stateIndex++;
         if (!(idx in states)) states[idx] = typeof initial === 'function' ? initial() : initial;
@@ -832,6 +838,14 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
     '../../../assets/arena/Fight_Arena.glb': 'arena.glb',
     '../../../assets/arena/Mike_Player1_Blue_Combat_AR.glb': 'blue.glb',
     '../../../assets/arena/Mike_Player2_RedOrange_Combat_AR.glb': 'red.glb',
+    '../../../assets/arena/quest/quest-blue-body.glb': 'quest-body.glb',
+    '../../../assets/arena/quest/quest-blue-upper-left.glb': 'quest-upper-left.glb',
+    '../../../assets/arena/quest/quest-blue-upper-right.glb': 'quest-upper-right.glb',
+    '../../../assets/arena/quest/quest-blue-forearm-left.glb': 'quest-forearm-left.glb',
+    '../../../assets/arena/quest/quest-blue-forearm-right.glb': 'quest-forearm-right.glb',
+    '../../../assets/arena/quest/quest-blue-hand-left.glb': 'quest-hand-left.glb',
+    '../../../assets/arena/quest/quest-blue-hand-right.glb': 'quest-hand-right.glb',
+    './quest-first-person-arms.ts': require('../src/features/quest-vr/quest-first-person-arms.ts'),
     '../../../assets/arena/ui/ArenaNotoSans.ttf': 'sans.ttf',
     '../../../assets/arena/ui/ArenaNotoSansSemibold.ttf': 'sans-semibold.ttf',
     '../../../assets/arena/ui/quest-lettering/neo.png': 'neo.png',
@@ -882,6 +896,7 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
           subscribe: () => () => {},
           getSnapshot: () => ({ mode: 'shown', reason: null }),
           present: () => {},
+          hide: () => {},
           replay: () => {
             replayCounts[slot] += 1;
           },
@@ -978,7 +993,7 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
   const models = all.filter((n) => n.type === 'Viro3DObject');
   for (const m of models) {
     tagNode(m, m.props.source);
-    m.props.onLoadEnd();
+    if (typeof m.props.onLoadEnd === 'function') m.props.onLoadEnd();
   }
   const rigOuterNode = all.find(
     (n) =>
@@ -1456,17 +1471,98 @@ test('Quest boundary fits inside Fight_Arena.glb ropes and Quest separation pres
     'Quest boundary recovers edge space'
   );
 
-  // Verify Quest separation maintains positive eye-to-opponent-head clearance under max physical forward lean.
+  // Verify Quest separation keeps positive eye/body/foot clearance under max forward lean while allowing realistic standing fist reach.
   const collision = JSON.parse(source('assets/arena/combat-collision-data.json'));
-  const idleHead = collision.clips.IdleAggro.frames[0][collision.groups.indexOf('head_01')];
-  const idleHeadFrontSim = idleHead[2] + idleHead[5];
+  const extractMeta = JSON.parse(source('assets/arena/quest/quest-first-person-extract.json'));
+  const boxFrontZ = (box) => {
+    const [, , cz, hx, hy, hz, x, y, z, w] = box;
+    const axZ = 2 * (x * z - y * w);
+    const ayZ = 2 * (y * z + x * w);
+    const azZ = 1 - 2 * (x * x + y * y);
+    return cz + Math.abs(axZ) * hx + Math.abs(ayZ) * hy + Math.abs(azZ) * hz;
+  };
+  const idleFrames = collision.clips.IdleAggro.frames[0];
+  const idleHead = idleFrames[collision.groups.indexOf('head_01')];
+  const idleHeadFrontSim = boxFrontZ(idleHead);
+  const idleHeadCenterSim = idleHead[2];
+  const idleChestFrontSim = boxFrontZ(idleFrames[collision.groups.indexOf('spine_03')]);
+  const idleFootFrontSim = boxFrontZ(idleFrames[collision.groups.indexOf('foot_l')]);
+  const idleGloveFrontSim = boxFrontZ(idleFrames[collision.groups.indexOf('glove_l')]);
   const maxForwardLeanSim = QUEST_HEAD_BOUNDS.standing.forward / QUEST_WORLD_SCALE;
+  const neutralEyeToHeadFrontM =
+    (QUEST_ARENA_RULES.separation - eyeForward - idleHeadFrontSim) * QUEST_WORLD_SCALE;
   const minLeanClearanceM =
     (QUEST_ARENA_RULES.separation - eyeForward - idleHeadFrontSim - maxForwardLeanSim) *
     QUEST_WORLD_SCALE;
-  assert.ok(minLeanClearanceM >= 0.4, `minLeanClearanceM=${minLeanClearanceM}`);
+  assert.ok(neutralEyeToHeadFrontM >= 0.3, `neutralEyeToHeadFrontM=${neutralEyeToHeadFrontM}`);
+  assert.ok(minLeanClearanceM >= 0.12, `minLeanClearanceM=${minLeanClearanceM}`);
 
-  // Verify punches still connect at Quest separation (and Stage 06 AI reach >= separation).
+  // Verify no body, glove, or foot overlap between shifted Quest blue body and opponent at minimum separation.
+  const blueIdleBodyMaxZSim = extractMeta.body.bounds.max[2] * ARENA_LAYOUT.fighterScale;
+  const chestClearanceM =
+    (QUEST_ARENA_RULES.separation - blueIdleBodyMaxZSim - idleChestFrontSim) * QUEST_WORLD_SCALE;
+  const gloveClearanceM =
+    (QUEST_ARENA_RULES.separation - blueIdleBodyMaxZSim - idleGloveFrontSim) * QUEST_WORLD_SCALE;
+  const toeClearanceM =
+    (QUEST_ARENA_RULES.separation - blueIdleBodyMaxZSim - idleFootFrontSim) * QUEST_WORLD_SCALE;
+  assert.ok(chestClearanceM > 0.3, `chestClearanceM=${chestClearanceM}`);
+  assert.ok(gloveClearanceM > 0, `gloveClearanceM=${gloveClearanceM}`);
+  assert.ok(toeClearanceM > 0.35, `toeClearanceM=${toeClearanceM}`);
+
+  // Verify realistic standing left jab (controller grip 0.50 m ahead of calibrated eyes) reaches Red's face & Stage 06 targets.
+  const gripReachSample = makeSample({ seq: 99, timestampNs: 1_000_000 });
+  gripReachSample.t = 100;
+  gripReachSample.capturedNs = 1_000_000;
+  gripReachSample.left.grip = {
+    tracking: 'tracked',
+    position: [0.15, -0.25, -0.5],
+    orientation: [0, 0, 0, 1],
+  };
+  gripReachSample.right.grip = {
+    tracking: 'tracked',
+    position: [-0.15, -0.25, -0.25],
+    orientation: [0, 0, 0, 1],
+  };
+  const armsFrame = placeQuestFirstPersonArms({
+    sample: gripReachSample,
+    headRefEpoch: null,
+    body: { calibration: DEFAULT_CALIBRATION, lift: 0 },
+    poseSource: 'grip',
+    nowNs: 1_000_000,
+  });
+  assert.equal(armsFrame.left.visible, true);
+  assert.ok(
+    armsFrame.left.upper && armsFrame.left.forearm,
+    'extended jab keeps arm segments attached'
+  );
+  const palmToFistTipM =
+    (-extractMeta.arms.left.fistBounds.min[2] - -QUEST_HAND_PALM_CENTER_MODEL.left[2]) *
+    QUEST_FIRST_PERSON_ARM_SCALE;
+  const extendedFistFrontM = 0.5 + palmToFistTipM;
+  const eyeToRedHeadCenterM =
+    (QUEST_ARENA_RULES.separation - eyeForward - idleHeadCenterSim) * QUEST_WORLD_SCALE;
+  const eyeToRedChestFrontM =
+    (QUEST_ARENA_RULES.separation - eyeForward - idleChestFrontSim) * QUEST_WORLD_SCALE;
+  assert.ok(
+    extendedFistFrontM > neutralEyeToHeadFrontM && extendedFistFrontM >= eyeToRedHeadCenterM,
+    `extendedFistFrontM=${extendedFistFrontM} must reach face [${neutralEyeToHeadFrontM}, ${eyeToRedHeadCenterM}]`
+  );
+  assert.ok(
+    extendedFistFrontM > eyeToRedChestFrontM,
+    `extendedFistFrontM=${extendedFistFrontM} must reach Stage 06 chest target ${eyeToRedChestFrontM}`
+  );
+
+  // Verify Phone AR & shared combat defaults stay untouched and Quest AI/punch rules stay valid.
+  assert.equal(ARENA_RULES.separation, 0.055);
+  near(ARENA_RULES.boundary, 0.175, 1e-12, 'ARENA_RULES.boundary');
+  assert.equal(ARENA_RULES.reach, 0.085);
+  assert.equal(ARENA_RULES.cpuPreferredRange, 0.07);
+  assert.equal(ARENA_RULES.cpuMinimumRange, 0.06);
+  assert.equal(ARENA_RULES.stableFacing, false);
+  assert.equal(ARENA_RULES.cpuEnabled, true);
+  assert.equal(ARENA_RULES.dashEnabled, false);
+  assert.ok(QUEST_ARENA_RULES.cpuMinimumRange > QUEST_ARENA_RULES.separation);
+  assert.ok(QUEST_ARENA_RULES.cpuPreferredRange >= QUEST_ARENA_RULES.cpuMinimumRange);
   assert.ok(QUEST_ARENA_RULES.reach >= QUEST_ARENA_RULES.separation);
   const c = new ArenaController(
     {
@@ -1610,6 +1706,7 @@ test('QuestRigSync path bypasses ViroGameLoop and ViroGameLoopUtils, tags rig/fi
 
   const mocks = {
     react: {
+      memo: (component) => component,
       useState: (init) => {
         const i = si++;
         if (!(i in states)) states[i] = typeof init === 'function' ? init() : init;
@@ -1664,6 +1761,14 @@ test('QuestRigSync path bypasses ViroGameLoop and ViroGameLoopUtils, tags rig/fi
     '../../../assets/arena/Fight_Arena.glb': 'arena.glb',
     '../../../assets/arena/Mike_Player1_Blue_Combat_AR.glb': 'blue.glb',
     '../../../assets/arena/Mike_Player2_RedOrange_Combat_AR.glb': 'red.glb',
+    '../../../assets/arena/quest/quest-blue-body.glb': 'quest-body.glb',
+    '../../../assets/arena/quest/quest-blue-upper-left.glb': 'quest-upper-left.glb',
+    '../../../assets/arena/quest/quest-blue-upper-right.glb': 'quest-upper-right.glb',
+    '../../../assets/arena/quest/quest-blue-forearm-left.glb': 'quest-forearm-left.glb',
+    '../../../assets/arena/quest/quest-blue-forearm-right.glb': 'quest-forearm-right.glb',
+    '../../../assets/arena/quest/quest-blue-hand-left.glb': 'quest-hand-left.glb',
+    '../../../assets/arena/quest/quest-blue-hand-right.glb': 'quest-hand-right.glb',
+    './quest-first-person-arms.ts': require('../src/features/quest-vr/quest-first-person-arms.ts'),
     '../../../assets/arena/ui/ArenaNotoSans.ttf': 'sans.ttf',
     '../../../assets/arena/ui/ArenaNotoSansSemibold.ttf': 'sans-semibold.ttf',
     '../../../assets/arena/ui/quest-lettering/neo.png': 'neo.png',
@@ -1727,6 +1832,7 @@ test('QuestRigSync path bypasses ViroGameLoop and ViroGameLoopUtils, tags rig/fi
         subscribe: () => () => {},
         getSnapshot: () => ({ mode: 'shown', reason: null }),
         present: () => {},
+        hide: () => {},
         replay: () => {},
         dispose: () => {},
       }),
@@ -1816,7 +1922,7 @@ test('QuestRigSync path bypasses ViroGameLoop and ViroGameLoopUtils, tags rig/fi
   }
   for (const m of all.filter((n) => n.type === 'Viro3DObject')) {
     if (m.props?.ref) m.props.ref.current = { setNativeProps: (p) => nativePropsLog.push(p) };
-    m.props.onLoadEnd();
+    if (typeof m.props.onLoadEnd === 'function') m.props.onLoadEnd();
   }
   findHit('ready').props.onClickState(1, [0, 0, 0], 1);
   findHit('ready').props.onClickState(2, [0, 0, 0], 1);

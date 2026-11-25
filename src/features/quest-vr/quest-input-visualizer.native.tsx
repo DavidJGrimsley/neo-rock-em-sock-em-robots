@@ -44,7 +44,7 @@ import type { QuestMenuFonts } from './quest-menu-layout.ts';
 // sky diagnostics OpenXR quad layer. On patched Quest renderers, markers move directly
 // on the OpenXR render thread inside renderFrame() with zero JS/bridge lag; phones
 // and unpatched renderers fall back to setNativeProps. Live stick/trigger/grip/button
-// indicators patch dirty sub-regions at ~30 Hz (immediate on button/tracking edges)
+// indicators patch dirty sub-regions at ~10 Hz (immediate on button/tracking edges)
 // outside React, while React state/telemetry updates stay at 5 Hz. Every geometry
 // ignores events so Viro's hit test passes through to the menu.
 
@@ -58,9 +58,10 @@ ViroMaterials.createMaterials({
 const MARKER_RADIUS = 0.012;
 const RAY_LENGTH = 0.15;
 const FALLBACK_TEXT_SCALE = 0.05;
-/** Cap analog Canvas patch cadence at ~30 Hz (33 ms); discrete button/tracking edges bypass down to 10 ms. */
-export const QUEST_DIAG_PATCH_ANALOG_MS = 33;
-export const QUEST_DIAG_PATCH_EDGE_MS = 10;
+/** Cap analog Canvas patch cadence (~10 Hz, 100 ms) so live controls stay readable without GPU glFlush pressure. */
+export const QUEST_DIAG_PATCH_ANALOG_MS = 100;
+export const QUEST_DIAG_PATCH_EDGE_MS = 16;
+const QUEST_DIAG_FULL_PRESENT_MIN_MS = 1000;
 
 const diagFallbackStyle = {
   fontFamily: 'ArenaNotoSans',
@@ -292,7 +293,7 @@ export function QuestDiagnosticsPanel({
   useEffect(() => () => compositor.dispose(), [compositor]);
 
   // Fast live indicator patch channel outside React: updates stick, trigger, grip,
-  // buttons and tracking badge via dirty-region Canvas draws at ~30 Hz (immediate on edges).
+  // buttons and tracking badge via dirty-region Canvas draws at ~10 Hz (immediate on edges).
   useEffect(() => {
     const canPatch =
       questMenuLayerVisible(diagLayer.mode) &&
@@ -359,7 +360,35 @@ export function QuestDiagnosticsPanel({
     [developerLines, diagLayer.mode, fonts, input, markerPipeline, menuLayer, tracker]
   );
 
+  const fullPresentRef = useRef<{ at: number; structuralKey: string }>({
+    at: 0,
+    structuralKey: '',
+  });
+
   useEffect(() => {
+    const structuralKey = JSON.stringify([
+      input.status,
+      input.message,
+      tracker.status,
+      tracker.calibration,
+      developerLines,
+      diagLayer.mode,
+      markerPipeline,
+      fonts,
+      menuLayer?.mode,
+      menuLayer?.reason,
+    ]);
+    const t = now();
+    const prev = fullPresentRef.current;
+    if (
+      prev.at > 0 &&
+      prev.structuralKey === structuralKey &&
+      t - prev.at < QUEST_DIAG_FULL_PRESENT_MIN_MS
+    ) {
+      return;
+    }
+    fullPresentRef.current = { at: t, structuralKey };
+
     const live = liveRef.current;
     const useLive = live && (!input.latest || (live.sample && live.sample.seq >= input.latest.seq));
     const sample = useLive ? live.sample : input.latest;

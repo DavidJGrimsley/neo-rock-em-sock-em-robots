@@ -157,11 +157,18 @@ function placeRow(
   items: { action: QuestMenuAction; label: string }[],
   y: number
 ): QuestMenuButton[] {
-  const total = items.length * buttonWidth + (items.length - 1) * buttonGap;
+  const gap = items.length >= 3 ? 28 : buttonGap;
+  const width =
+    items.length >= 3
+      ? Math.floor(
+          (QUEST_MENU_TEXTURE.widthPx - cardPaddingX * 2 - (items.length - 1) * gap) / items.length
+        )
+      : buttonWidth;
+  const total = items.length * width + (items.length - 1) * gap;
   let x = Math.round((QUEST_MENU_TEXTURE.widthPx - total) / 2);
   return items.map((item) => {
-    const button = { ...item, x, y, width: buttonWidth, height: buttonHeight };
-    x += buttonWidth + buttonGap;
+    const button = { ...item, x, y, width, height: buttonHeight };
+    x += width + gap;
     return button;
   });
 }
@@ -170,11 +177,23 @@ function resolveButtonArgs(
   arg:
     | boolean
     | QuestMenuPosture
-    | { acknowledged?: boolean; posture?: QuestMenuPosture; hasMessages?: boolean } = false,
+    | {
+        acknowledged?: boolean;
+        posture?: QuestMenuPosture;
+        hasMessages?: boolean;
+      } = false,
   postureArg?: QuestMenuPosture
-): { acknowledged: boolean; posture: QuestMenuPosture; hasMessages: boolean } {
+): {
+  acknowledged: boolean;
+  posture: QuestMenuPosture;
+  hasMessages: boolean;
+} {
   if (typeof arg === 'boolean') {
-    return { acknowledged: arg, posture: postureArg ?? 'standing', hasMessages: false };
+    return {
+      acknowledged: arg,
+      posture: postureArg ?? 'standing',
+      hasMessages: false,
+    };
   }
   if (arg === 'standing' || arg === 'seated') {
     return { acknowledged: false, posture: arg, hasMessages: false };
@@ -197,7 +216,11 @@ export function questMenuButtons(
   acknowledgedOrOptions:
     | boolean
     | QuestMenuPosture
-    | { acknowledged?: boolean; posture?: QuestMenuPosture; hasMessages?: boolean } = false,
+    | {
+        acknowledged?: boolean;
+        posture?: QuestMenuPosture;
+        hasMessages?: boolean;
+      } = false,
   postureArg?: QuestMenuPosture
 ): QuestMenuButton[] {
   const { acknowledged, posture, hasMessages } = resolveButtonArgs(
@@ -249,7 +272,11 @@ export function questMenuHit(
   acknowledgedOrOptions:
     | boolean
     | QuestMenuPosture
-    | { acknowledged?: boolean; posture?: QuestMenuPosture; hasMessages?: boolean } = false,
+    | {
+        acknowledged?: boolean;
+        posture?: QuestMenuPosture;
+        hasMessages?: boolean;
+      } = false,
   postureArg?: QuestMenuPosture
 ): QuestMenuAction | null {
   const resolved = resolveButtonArgs(acknowledgedOrOptions, postureArg);
@@ -286,7 +313,9 @@ export function wrapMenuLine(text: string, maxChars = 48): string[] {
 function buttonColors(action: QuestMenuAction, hovered: boolean, acknowledged: boolean) {
   if (action === 'exit') return { fill: hovered ? '#e6b2b2' : DANGER, text: INK };
   if (action === 'back') return { fill: hovered ? '#334155' : '#1e293b', text: PAPER };
-  if (action === 'posture') return { fill: hovered ? '#475569' : '#334155', text: PAPER };
+  if (action === 'posture') {
+    return { fill: hovered ? '#475569' : '#334155', text: PAPER };
+  }
   if (action === 'ready' && acknowledged) {
     return { fill: hovered ? '#0369a1' : SELECTED, text: PAPER };
   }

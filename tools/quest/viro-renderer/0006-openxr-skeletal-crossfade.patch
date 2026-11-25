@@ -1,0 +1,217 @@
+diff --git a/ViroRenderer/VROBone.cpp b/ViroRenderer/VROBone.cpp
+index c7589d3..a4377ed 100644
+--- a/ViroRenderer/VROBone.cpp
++++ b/ViroRenderer/VROBone.cpp
+@@ -30,4 +30,5 @@
+ void VROBone::setTransform(VROMatrix4f transform, VROBoneTransformType type) {
+     _transform = transform;
+     _transformType = type;
++    _hasPose = true;
+ }
+diff --git a/ViroRenderer/VROBone.h b/ViroRenderer/VROBone.h
+index 33042de..073fea6 100644
+--- a/ViroRenderer/VROBone.h
++++ b/ViroRenderer/VROBone.h
+@@ -95,6 +95,9 @@ public:
+      are injected by skeletal animations as they are run.
+      */
+     void setTransform(VROMatrix4f transform, VROBoneTransformType type = VROBoneTransformType::Legacy);
++    bool hasPose() const {
++        return _hasPose;
++    }
+ 
+     /*
+      Returns the index of this bone within the skeleton.
+@@ -194,6 +197,7 @@ private:
+      details. Defaults to Legacy.
+      */
+     VROBoneTransformType _transformType;
++    bool _hasPose = false;
+ 
+     /*
+      The binding transformation to use when moving from model space into bone local
+diff --git a/ViroRenderer/VROSkeletalAnimation.cpp b/ViroRenderer/VROSkeletalAnimation.cpp
+index b3a60a9..26b3b19 100644
+--- a/ViroRenderer/VROSkeletalAnimation.cpp
++++ b/ViroRenderer/VROSkeletalAnimation.cpp
+@@ -32,9 +32,110 @@
+ #include "VROShaderModifier.h"
+ #include "VROBone.h"
+ #include "VROSkinner.h"
++#include "VROQuaternion.h"
++#include "VROMath.h"
++#include <algorithm>
++#include <cmath>
+ #include <sstream>
+ #include <map>
+ 
++namespace {
++struct SkeletalPoseSample {
++    VROVector3f t;
++    VROQuaternion q;
++    VROVector3f s;
++    bool valid = false;
++};
++
++SkeletalPoseSample decomposeBoneMatrix(const VROMatrix4f &m) {
++    SkeletalPoseSample out;
++    out.s = m.extractScale();
++    if (out.s.x < 1e-6f || out.s.y < 1e-6f || out.s.z < 1e-6f) {
++        return out;
++    }
++    float c0x = m[0] / out.s.x, c0y = m[1] / out.s.x, c0z = m[2] / out.s.x;
++    float c1x = m[4] / out.s.y, c1y = m[5] / out.s.y, c1z = m[6] / out.s.y;
++    float c2x = m[8] / out.s.z, c2y = m[9] / out.s.z, c2z = m[10] / out.s.z;
++    float det = c0x * (c1y * c2z - c1z * c2y)
++              - c1x * (c0y * c2z - c0z * c2y)
++              + c2x * (c0y * c1z - c0z * c1y);
++    if (det <= 0.0f) {
++        return out;
++    }
++    out.t = m.extractTranslation();
++    out.q = m.extractRotation(out.s);
++    out.q.normalize();
++    out.valid = true;
++    return out;
++}
++
++VROMatrix4f composeBoneMatrix(const VROVector3f &t, const VROQuaternion &q, const VROVector3f &s) {
++    VROMatrix4f m = q.getMatrix();
++    m[0] *= s.x; m[1] *= s.x; m[2] *= s.x;
++    m[4] *= s.y; m[5] *= s.y; m[6] *= s.y;
++    m[8] *= s.z; m[9] *= s.z; m[10] *= s.z;
++    m[12] = t.x; m[13] = t.y; m[14] = t.z;
++    return m;
++}
++
++class VROSkeletalBoneAnimation : public VROAnimation {
++public:
++    VROSkeletalBoneAnimation(std::function<void(VROAnimatable *const, VROMatrix4f)> method,
++                           std::vector<float> keyTimes,
++                           std::vector<VROMatrix4f> keyValues,
++                           SkeletalPoseSample startPose,
++                           float blendFraction)
++        : VROAnimation(),
++          _keyTimes(std::move(keyTimes)),
++          _keyValues(std::move(keyValues)),
++          _method(std::move(method)),
++          _startPose(startPose),
++          _blendFraction(blendFraction) {}
++
++    void processAnimationFrame(float t) override {
++        VROMatrix4f value = VROMathInterpolateKeyFrameMatrix4f(t, _keyTimes, _keyValues);
++        if (_startPose.valid && _blendFraction > 0.0f && t < _blendFraction) {
++            float u = std::max(0.0f, std::min(1.0f, t / _blendFraction));
++            float w = u * u * (3.0f - 2.0f * u);
++            SkeletalPoseSample targetPose = decomposeBoneMatrix(value);
++            if (targetPose.valid) {
++                VROVector3f tBlend(
++                    _startPose.t.x + (targetPose.t.x - _startPose.t.x) * w,
++                    _startPose.t.y + (targetPose.t.y - _startPose.t.y) * w,
++                    _startPose.t.z + (targetPose.t.z - _startPose.t.z) * w
++                );
++                VROQuaternion qBlend = VROQuaternion::slerp(_startPose.q, targetPose.q, w);
++                qBlend.normalize();
++                VROVector3f sBlend(
++                    _startPose.s.x + (targetPose.s.x - _startPose.s.x) * w,
++                    _startPose.s.y + (targetPose.s.y - _startPose.s.y) * w,
++                    _startPose.s.z + (targetPose.s.z - _startPose.s.z) * w
++                );
++                value = composeBoneMatrix(tBlend, qBlend, sBlend);
++            }
++        }
++        std::shared_ptr<VROAnimatable> animatable = _animatable.lock();
++        if (animatable) {
++            _method(animatable.get(), value);
++        }
++    }
++
++    void finish() override {
++        std::shared_ptr<VROAnimatable> animatable = _animatable.lock();
++        if (animatable) {
++            _method(animatable.get(), _keyValues.back());
++        }
++    }
++
++private:
++    std::vector<float> _keyTimes;
++    std::vector<VROMatrix4f> _keyValues;
++    std::function<void(VROAnimatable *const, VROMatrix4f)> _method;
++    SkeletalPoseSample _startPose;
++    float _blendFraction;
++};
++}
++
+ std::shared_ptr<VROExecutableAnimation> VROSkeletalAnimation::copy() {
+     std::vector<std::unique_ptr<VROSkeletalAnimationFrame>> frames;
+     for (std::unique_ptr<VROSkeletalAnimationFrame> &origFrame : _frames) {
+@@ -94,6 +195,12 @@ void VROSkeletalAnimation::execute(std::shared_ptr<VRONode> node, std::function<
+         }
+     }
+ 
++    std::shared_ptr<VROSkeleton> skeleton = _skinner->getSkeleton();
++    const bool isClipSwitch = !skeleton->getActiveClipName().empty() && skeleton->getActiveClipName() != _name;
++    skeleton->setActiveClipName(_name);
++    const float blendDuration = isClipSwitch ? std::min(0.14f, _duration * 0.18f) : 0.0f;
++    const float blendFraction = (_duration > 1e-4f && blendDuration > 0.0f) ? (blendDuration / _duration) : 0.0f;
++
+     VROTransaction::begin();
+     VROTransaction::setAnimationDuration(_duration);
+     VROTransaction::setAnimationTimeOffset(_timeOffset);
+@@ -102,18 +209,27 @@ void VROSkeletalAnimation::execute(std::shared_ptr<VRONode> node, std::function<
+ 
+     for (auto kv : boneKeyTimes) {
+         int boneIndex = kv.first;
+-        std::shared_ptr<VROBone> bone = _skinner->getSkeleton()->getBone(boneIndex);
++        std::shared_ptr<VROBone> bone = skeleton->getBone(boneIndex);
++        SkeletalPoseSample startPose;
++        if (blendFraction > 0.0f && bone->hasPose() && bone->getTransformType() == VROBoneTransformType::Legacy) {
++            startPose = decomposeBoneMatrix(bone->getTransform());
++        }
+         
+         std::vector<float> &keyTimes = kv.second;
+         std::vector<VROMatrix4f> &keyValues = boneKeyValues[boneIndex];
+-        std::shared_ptr<VROAnimation> animation = std::make_shared<VROAnimationMatrix4f>([shared_w, boneIndex](VROAnimatable *const animatable, VROMatrix4f m) {
++        auto applyBone = [shared_w, boneIndex](VROAnimatable *const animatable, VROMatrix4f m) {
+             std::shared_ptr<VROSkeletalAnimation> shared = shared_w.lock();
+             if (!shared) {
+                 return;
+             }
+             VROBone *bone = ((VROBone *)animatable);
+             bone->setTransform(m, bone->getTransformType());
+-        }, keyTimes, keyValues);
++        };
++        std::shared_ptr<VROAnimation> animation = (startPose.valid && blendFraction > 0.0f)
++            ? std::static_pointer_cast<VROAnimation>(
++                std::make_shared<VROSkeletalBoneAnimation>(applyBone, keyTimes, keyValues, startPose, blendFraction))
++            : std::static_pointer_cast<VROAnimation>(
++                std::make_shared<VROAnimationMatrix4f>(applyBone, keyTimes, keyValues));
+         
+         bone->animate(animation);
+     }
+diff --git a/ViroRenderer/VROSkeleton.h b/ViroRenderer/VROSkeleton.h
+index a3eec8c..e5d233b 100644
+--- a/ViroRenderer/VROSkeleton.h
++++ b/ViroRenderer/VROSkeleton.h
+@@ -106,6 +106,13 @@ public:
+      */
+     void scaleBoneTransforms(int startParentBone, int endChildBone,
+                              float scaleFactor, VROVector3f scaleDirection);
++
++    const std::string &getActiveClipName() const {
++        return _activeClipName;
++    }
++    void setActiveClipName(const std::string &name) {
++        _activeClipName = name;
++    }
+ private:
+     /*
+      The bones representing the skeleton. Each represents a control point of
+@@ -129,6 +136,7 @@ private:
+      <boneIndex, <attachmentTransformKey, attachmentNode>>
+      */
+     std::map<int, std::map<std::string, std::shared_ptr<VRONode>>> _boneNodeAttachments;
++    std::string _activeClipName;
+ 
+     /*
+      Positions and scales the currentBone index with the given scaleFactor in the given

@@ -12,6 +12,8 @@ const {
   QUEST_WORLD_SCALE,
   applyRig,
   menuFrame,
+  questComposedRigTransform,
+  questIntroRig,
   questRigTransform,
   stanceMarkerRingLocal,
 } = require('../src/features/quest-vr/quest-head-rig.ts');
@@ -326,7 +328,10 @@ function fakePanel() {
   return panel;
 }
 
-function createSceneHarness({ panelAvailable = true } = {}) {
+function createSceneHarness(
+  t,
+  { panelAvailable = true, nativeHands = false, nativeMeshes = undefined } = {}
+) {
   const states = [];
   const effects = [];
   const refs = [];
@@ -343,6 +348,7 @@ function createSceneHarness({ panelAvailable = true } = {}) {
     exitRequested: [],
     inputStarted: 0,
     inputStopped: 0,
+    nativeHands: [],
   };
   const logs = [];
   const panel = fakePanel();
@@ -378,6 +384,11 @@ function createSceneHarness({ panelAvailable = true } = {}) {
     subscribe: () => () => {},
     getSnapshot: () => harness.trackerSnapshot,
     onCameraTransform,
+    getLiveHeadState: () => ({
+      calibration: harness.trackerSnapshot.calibration,
+      refEpoch: harness.trackerSnapshot.refEpoch ?? 0,
+      sample: null,
+    }),
     calibrateForSolo: (anchor) => {
       calls.calibratedWith = anchor;
       harness.trackerSnapshot = {
@@ -419,6 +430,7 @@ function createSceneHarness({ panelAvailable = true } = {}) {
 
   const mocks = {
     react: {
+      memo: (component) => component,
       useState: (initial) => {
         const index = stateIndex++;
         if (!(index in states)) {
@@ -486,6 +498,14 @@ function createSceneHarness({ panelAvailable = true } = {}) {
     '../../../assets/arena/Fight_Arena.glb': 'arena.glb',
     '../../../assets/arena/Mike_Player1_Blue_Combat_AR.glb': 'blue.glb',
     '../../../assets/arena/Mike_Player2_RedOrange_Combat_AR.glb': 'red.glb',
+    '../../../assets/arena/quest/quest-blue-body.glb': 'quest-body.glb',
+    '../../../assets/arena/quest/quest-blue-upper-left.glb': 'quest-upper-left.glb',
+    '../../../assets/arena/quest/quest-blue-upper-right.glb': 'quest-upper-right.glb',
+    '../../../assets/arena/quest/quest-blue-forearm-left.glb': 'quest-forearm-left.glb',
+    '../../../assets/arena/quest/quest-blue-forearm-right.glb': 'quest-forearm-right.glb',
+    '../../../assets/arena/quest/quest-blue-hand-left.glb': 'quest-hand-left.glb',
+    '../../../assets/arena/quest/quest-blue-hand-right.glb': 'quest-hand-right.glb',
+    './quest-first-person-arms.ts': require('../src/features/quest-vr/quest-first-person-arms.ts'),
     '../../../assets/arena/ui/ArenaNotoSans.ttf': 'sans.ttf',
     '../../../assets/arena/ui/ArenaNotoSansSemibold.ttf': 'sans-semibold.ttf',
     '../../../assets/arena/ui/quest-lettering/neo.png': 'neo.png',
@@ -530,7 +550,15 @@ function createSceneHarness({ panelAvailable = true } = {}) {
     './quest-runtime-store.ts': { questRuntime: mockRuntime },
     '../../../modules/quest-input/src/index.ts': {
       questRigSyncAvailable: () => false,
-      questInputNative: null,
+      questInputNative: nativeHands
+        ? {
+            handsVisualNodesReady: nativeMeshes === undefined ? undefined : () => nativeMeshes,
+            setHandsEnabled: (active) => {
+              calls.nativeHands.push(active);
+              return true;
+            },
+          }
+        : null,
     },
     './quest-diagnostics-layout.ts': {
       questDiagLayerMaterials: () => ({
@@ -563,13 +591,17 @@ function createSceneHarness({ panelAvailable = true } = {}) {
     },
   };
 
-  const output = ts.transpileModule(source('src/features/quest-vr/quest-arena-scene.native.tsx'), {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      jsx: ts.JsxEmit.ReactJSX,
-      target: ts.ScriptTarget.ES2022,
-    },
-  }).outputText;
+  const output = ts.transpileModule(
+    source('src/features/quest-vr/quest-arena-scene.native.tsx') +
+      '\nexport { QuestPreviewHands };',
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        jsx: ts.JsxEmit.ReactJSX,
+        target: ts.ScriptTarget.ES2022,
+      },
+    }
+  ).outputText;
 
   const capture = (...args) => logs.push(args.map(String).join(' '));
   const mod = { exports: {} };
@@ -578,8 +610,10 @@ function createSceneHarness({ panelAvailable = true } = {}) {
     exports: mod.exports,
     console: { ...console, warn: capture, error: capture, log: capture },
     Date,
-    setTimeout,
-    clearTimeout,
+    setTimeout: (callback, ms) => clock.schedule(callback, ms),
+    clearTimeout: (handle) => clock.cancel(handle),
+    requestAnimationFrame: (callback) => clock.schedule(callback, 16),
+    cancelAnimationFrame: (handle) => clock.cancel(handle),
     require: (name) => {
       if (!(name in mocks)) throw new Error('Missing mock: ' + name);
       return mocks[name];
@@ -587,6 +621,12 @@ function createSceneHarness({ panelAvailable = true } = {}) {
   });
 
   const Scene = mod.exports.default;
+  harness.renderComponent = (name, props) => {
+    stateIndex = 0;
+    effectIndex = 0;
+    refIndex = 0;
+    return collectNodes(mod.exports[name](props));
+  };
   harness.render = () => {
     stateIndex = 0;
     effectIndex = 0;
@@ -613,9 +653,15 @@ function createSceneHarness({ panelAvailable = true } = {}) {
     clock.advance(100);
     return harness.render();
   };
+  let unmounted = false;
   harness.unmount = () => {
+    if (unmounted) return;
+    unmounted = true;
     for (const entry of effects) entry?.cleanup?.();
   };
+  // Assertions can throw after Ready starts real session timers. Always release
+  // subscriptions and sessions, including when the test fails before unmount.
+  t.after(harness.unmount);
   return harness;
 }
 
@@ -677,9 +723,9 @@ function panelNode(all) {
 const MENU_LABELS = ['Solo', 'Standing', 'Exit'];
 const RING_LABELS = ['Ready', 'Back', 'Standing', 'Exit'];
 
-test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, packaged fonts, and visible={false} blue model', () => {
+test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, packaged fonts, and visible={false} blue model', (t) => {
   questMenuLayer.set('compositor');
-  const harness = createSceneHarness();
+  const harness = createSceneHarness(t);
   const { calls, panel } = harness;
 
   const initial = harness.render();
@@ -763,14 +809,14 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
   const blueModel = models.find((n) => n.props.source === 'blue.glb');
   const redModel = models.find((n) => n.props.source === 'red.glb');
   assert.ok(blueModel && redModel);
-  assert.equal(blueModel.props.visible, false);
+  assert.equal(blueModel.props.visible, true, 'side view shows the full blue robot');
   assert.notEqual(redModel.props.visible, false);
   assert.equal(typeof blueModel.props.onLoadEnd, 'function');
 
   const oobQuads = withMaterial(inRing.all, 'questStanceRingOutOfBounds');
   assert.equal(oobQuads.length, 4);
 
-  // The stance marker is centered under the eyes; the fighters keep their feet.
+  // Pre-Ready side view centers the stance marker under Blue's feet (anchor) so Blue is centered in the box.
   const markerNode = inRing.all.find(
     (n) =>
       n.type === 'ViroNode' &&
@@ -782,11 +828,11 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
       !collectNodes(n.props.children).some((child) => child.type === 'Viro3DObject')
   );
   assert.ok(markerNode);
-  const marker = stanceMarkerRingLocal(calls.calibratedWith);
-  assert.ok(Math.abs(markerNode.props.position[0] - marker[0]) < 1e-12);
-  assert.ok(Math.abs(markerNode.props.position[2] - marker[2]) < 1e-12);
-  assert.ok(Math.abs(markerNode.props.position[1] - (marker[1] + 0.0005)) < 1e-12);
-  assert.notEqual(markerNode.props.position[0], calls.calibratedWith.x);
+  assert.ok(Math.abs(markerNode.props.position[0] - calls.calibratedWith.x) < 1e-12);
+  assert.ok(Math.abs(markerNode.props.position[2] - calls.calibratedWith.z) < 1e-12);
+  assert.ok(Math.abs(markerNode.props.position[1] - (ARENA_LAYOUT.floorHeight + 0.0005)) < 1e-12);
+  const eyeMarker = stanceMarkerRingLocal(calls.calibratedWith);
+  assert.notEqual(eyeMarker[0], calls.calibratedWith.x);
   const blueFighterNode = inRing.all.find(
     (n) =>
       n.type === 'ViroNode' &&
@@ -796,6 +842,128 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
   assert.ok(blueFighterNode);
   assert.equal(blueFighterNode.props.position[0], calls.calibratedWith.x);
   assert.equal(blueFighterNode.props.position[2], calls.calibratedWith.z);
+  assert.equal(blueFighterNode.props.visible, true);
+  assert.equal(blueFighterNode.props.viroTag, 'quest-blue-node');
+  const bodyModel = models.find((n) => n.props.source === 'quest-body.glb');
+  assert.ok(bodyModel);
+  assert.equal(bodyModel.props.visible, false, 'the headless body waits for the eye view');
+  assert.deepEqual(
+    [...bodyModel.props.scale],
+    [ARENA_LAYOUT.fighterScale, ARENA_LAYOUT.fighterScale, ARENA_LAYOUT.fighterScale]
+  );
+  assert.equal(collectNodes(blueFighterNode.props.children).includes(bodyModel), true);
+  assert.equal(bodyModel.props.onLoadEnd, undefined);
+  const handScale = ARENA_LAYOUT.fighterScale * QUEST_WORLD_SCALE;
+  const segmentSources = [
+    'quest-upper-left.glb',
+    'quest-upper-right.glb',
+    'quest-forearm-left.glb',
+    'quest-forearm-right.glb',
+    'quest-hand-left.glb',
+    'quest-hand-right.glb',
+  ];
+  const rig = inRing.all.find((n) => n.props?.viroTag === 'quest-rig-outer');
+  assert.ok(rig);
+  const sideRig = questIntroRig(harness.trackerSnapshot.calibration, calls.calibratedWith, 0);
+  const eyeRig = questComposedRigTransform(
+    harness.trackerSnapshot.calibration,
+    calls.calibratedWith
+  );
+  assert.ok(Math.abs(rig.props.position[0] - sideRig.position[0]) < 1e-9);
+  assert.ok(Math.abs(rig.props.position[1] - sideRig.position[1]) < 1e-9);
+  assert.ok(Math.abs(rig.props.position[2] - sideRig.position[2]) < 1e-9);
+  assert.ok(Math.abs(rig.props.rotation[1] - sideRig.rotationY) < 1e-9);
+  assert.ok(
+    Math.hypot(...sideRig.position.map((value, index) => value - eyeRig.position[index])) > 1
+  );
+  for (const sourceName of segmentSources) {
+    const mesh = models.find((n) => n.props.source === sourceName);
+    assert.ok(mesh, sourceName);
+    assert.deepEqual([...mesh.props.scale], [1, 1, 1]);
+    const node = inRing.all.find(
+      (n) => n.type === 'ViroNode' && collectNodes(n.props.children).includes(mesh)
+    );
+    assert.match(node.props.viroTag, /^quest-(left|right)-(upper|forearm|fist)$/);
+    assert.equal(node.props.visible, true);
+    assert.equal(node.props.opacity, 0);
+    assert.deepEqual([...node.props.scale], [handScale, handScale, handScale]);
+    assert.equal(collectNodes(rig.props.children).includes(mesh), false);
+  }
+  assert.equal(panel.texts().includes('Fade'), false);
+  assert.equal(panel.texts().includes('Pan'), false);
+  assert.equal(hitQuad(inRing.all, 'comfort'), undefined);
+  for (const model of inRing.all.filter((n) => n.type === 'Viro3DObject')) {
+    if (typeof model.props.onLoadEnd === 'function') model.props.onLoadEnd();
+  }
+  // Ready begins the visible pan intro in side view with title overlay hidden and cover starting transparent.
+  clickAction(inRing.all, 'ready');
+  const panning = harness.render();
+  assert.equal(
+    panning.all.some((n) => n.props?.materials?.[0] === 'questIntroCover'),
+    true
+  );
+  // QuestIntroCover keeps opacity only on ViroQuad (never on parent ViroNode) and uses constant position/materials.
+  const coverQuad = panning.all.find((n) => n.props?.materials?.[0] === 'questIntroCover');
+  assert.ok(coverQuad);
+  const coverNode = panning.all.find(
+    (n) => n.type === 'ViroNode' && collectNodes(n.props.children).includes(coverQuad)
+  );
+  assert.equal(coverNode.props.opacity, undefined);
+  assert.equal(coverQuad.props.opacity, 0);
+  // Title overlay is reversibly hidden while introActive so it cannot bleed over the black cover.
+  assert.equal(panel.titleHidden.length, 1);
+
+  // Visible pan intro: pans from side view, blinks opaque BEFORE entering Blue's head (blend <= 0.70),
+  // swaps presentation='eyes' while opacity===1, finishes blend->1, and fades out at 1.55s.
+  const panSession =
+    require('../src/features/quest-vr/quest-arena-session.ts').createQuestArenaSession(
+      manualClock()
+    );
+  t.after(() => panSession.dispose());
+  panSession.solo();
+  const panSnap = panSession.getSnapshot();
+  panSession.assetLoaded(panSnap.lease, panSnap.token, panSnap.placementVersion, 'arena');
+  panSession.assetLoaded(panSnap.lease, panSnap.token, panSnap.placementVersion, 'blue');
+  panSession.assetLoaded(panSnap.lease, panSnap.token, panSnap.placementVersion, 'red');
+  panSession.ready();
+  assert.equal(panSession.getSnapshot().presentation, 'side');
+  assert.equal(panSession.getSnapshot().introActive, true);
+  assert.equal(panSession.getIntroOpacity(), 0);
+  for (let i = 0; i < 17; i += 1) panSession.stepExternalFrame(0.05); // 0.85s
+  assert.equal(panSession.getSnapshot().presentation, 'side');
+  assert.ok(panSession.getRigBlend() > 0.6 && panSession.getRigBlend() <= 0.65);
+  assert.ok(Math.abs(panSession.getIntroOpacity()) < 1e-12);
+  for (let i = 0; i < 4; i += 1) panSession.stepExternalFrame(0.05); // 1.05s -> opaque before head boundary
+  assert.ok(panSession.getRigBlend() <= 0.71);
+  assert.equal(panSession.getIntroOpacity(), 1);
+  assert.equal(panSession.getSnapshot().presentation, 'eyes');
+  panSession.stepExternalFrame(0.05); // 1.10s -> swapped while opacity===1
+  assert.equal(panSession.getSnapshot().presentation, 'eyes');
+  assert.equal(panSession.getIntroOpacity(), 1);
+  for (let i = 0; i < 3; i += 1) panSession.stepExternalFrame(0.05); // 1.25s -> blend reaches 1
+  assert.equal(panSession.getRigBlend(), 1);
+  for (let i = 0; i < 6; i += 1) panSession.stepExternalFrame(0.05); // 1.55s -> finished
+  assert.equal(panSession.getSnapshot().introActive, false);
+  assert.equal(panSession.getIntroOpacity(), 0);
+
+  // Neon #1.2: Back pressed mid-intro calls onFrame with opacity 0 so QuestIntroCover never sticks.
+  panSession.back();
+  panSession.solo();
+  const s2 = panSession.getSnapshot();
+  panSession.assetLoaded(s2.lease, s2.token, s2.placementVersion, 'arena');
+  panSession.assetLoaded(s2.lease, s2.token, s2.placementVersion, 'blue');
+  panSession.assetLoaded(s2.lease, s2.token, s2.placementVersion, 'red');
+  panSession.ready();
+  for (let i = 0; i < 21; i += 1) panSession.stepExternalFrame(0.05); // 1.05s -> opacity 1
+  assert.equal(panSession.getIntroOpacity(), 1);
+  let lastNotifiedOpacity = -1;
+  const stopOnFrame = panSession.onFrame(() => {
+    lastNotifiedOpacity = panSession.getIntroOpacity();
+  });
+  panSession.back();
+  stopOnFrame();
+  assert.equal(lastNotifiedOpacity, 0, 'Back mid-intro notifies frame listeners with opacity 0');
+  panSession.dispose();
 
   assert.ok(harness.builtMenus.some((entry) => entry.options?.posture === 'seated'));
   assert.ok(harness.buttonLookups.some((entry) => entry.arg?.posture === 'seated'));
@@ -811,9 +979,9 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
   assert.equal(harness.clock.pending.size, 0, 'no status poll outlives the scene');
 });
 
-test('controller trigger hits flip the Posture label and Exit leaves; gaze never activates', () => {
+test('controller trigger hits flip the Posture label and Exit leaves; gaze never activates', (t) => {
   questMenuLayer.set('compositor');
-  const harness = createSceneHarness();
+  const harness = createSceneHarness(t);
   const { calls, panel } = harness;
   let frame = harness.render();
   assert.ok(panel.texts().includes('Standing'));
@@ -845,9 +1013,9 @@ test('controller trigger hits flip the Posture label and Exit leaves; gaze never
   harness.unmount();
 });
 
-test('page changes move the layer, panel and targets together with no loading block, and stale targets log the guard', async () => {
+test('page changes move the layer, panel and targets together with no loading block, and stale targets log the guard', async (t) => {
   questMenuLayer.set('compositor');
-  const harness = createSceneHarness();
+  const harness = createSceneHarness(t);
   const { panel } = harness;
   let frame = await harness.settle();
   // Clean compositor UI draws immediately with roundRect/text ops on card and image ops on title.
@@ -930,9 +1098,9 @@ test('page changes move the layer, panel and targets together with no loading bl
   harness.unmount();
 });
 
-test('pointer hover draws a Viro outline and never redraws the panel; gaze does not hover', async () => {
+test('pointer hover draws a Viro outline and never redraws the panel; gaze does not hover', async (t) => {
   questMenuLayer.set('compositor');
-  const harness = createSceneHarness();
+  const harness = createSceneHarness(t);
   const { panel } = harness;
   let frame = await harness.settle();
   const drawn = panel.draws.length;
@@ -971,9 +1139,9 @@ test('pointer hover draws a Viro outline and never redraws the panel; gaze does 
   harness.unmount();
 });
 
-test('a failed or missing layer falls back to Viro buttons that still work', async () => {
+test('a failed or missing layer falls back to Viro buttons that still work', async (t) => {
   questMenuLayer.set('compositor');
-  const failed = createSceneHarness();
+  const failed = createSceneHarness(t);
   let frame = failed.render();
   failed.panel.status = -1;
   frame = failed.poll();
@@ -993,7 +1161,7 @@ test('a failed or missing layer falls back to Viro buttons that still work', asy
   assert.deepEqual(failed.panel.hidden, [1]);
 
   // A renderer without the menu layer never opens one.
-  const missing = createSceneHarness({ panelAvailable: false });
+  const missing = createSceneHarness(t, { panelAvailable: false });
   frame = missing.render();
   assert.equal(missing.panel.opened, 0);
   assert.equal(fallbackQuads(frame.all).length, 3);
@@ -1007,7 +1175,7 @@ test('a failed or missing layer falls back to Viro buttons that still work', asy
 
   // The launcher choice applies to the next scene.
   questMenuLayer.set('viro');
-  const off = createSceneHarness();
+  const off = createSceneHarness(t);
   frame = off.render();
   assert.equal(off.panel.opened, 0);
   assert.equal(fallbackQuads(frame.all).length, 3);
@@ -1015,7 +1183,7 @@ test('a failed or missing layer falls back to Viro buttons that still work', asy
   questMenuLayer.set('compositor');
 
   // A slow first frame shows Viro buttons until the layer appears.
-  const slow = createSceneHarness();
+  const slow = createSceneHarness(t);
   slow.panel.status = 0;
   frame = slow.render();
   for (let i = 0; i < 20; i += 1) frame = slow.poll();
@@ -1027,9 +1195,9 @@ test('a failed or missing layer falls back to Viro buttons that still work', asy
   slow.unmount();
 });
 
-test('only menu hit targets take rays: scenery, mask, labels and outline ignore events', () => {
+test('only menu hit targets take rays: scenery, mask, labels and outline ignore events', (t) => {
   questMenuLayer.set('compositor');
-  const harness = createSceneHarness();
+  const harness = createSceneHarness(t);
   let frame = harness.render();
   clickAction(frame.all, 'solo', 1);
   frame = harness.render();
@@ -1075,4 +1243,203 @@ test('only menu hit targets take rays: scenery, mask, labels and outline ignore 
   assert.equal(questMenuHit.writesToDepthBuffer, false);
   assert.deepEqual([...questMenuHit.colorWriteMask], ['None']);
   harness.unmount();
+});
+
+test('preview arms coalesce samples, gate visibility, and cancel updates on deactivation', (t) => {
+  const harness = createSceneHarness(t);
+  harness.trackerSnapshot.calibration = { ...DEFAULT_CALIBRATION, origin: [0, 1.4, 0] };
+  const listeners = new Set();
+  const source = {
+    onSample: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  const session = { getLiveTransforms: () => ({ blue: { lift: 0 } }) };
+  const nodes = harness.renderComponent('QuestPreviewHands', { source, session, active: true });
+  const writes = [];
+  const parts = nodes.filter((node) => node.type === 'ViroNode');
+  for (const [index, node] of parts.entries()) {
+    node.props.ref.current = { setNativeProps: (props) => writes.push({ index, props }) };
+  }
+  const emit = (sample) => {
+    for (const listener of listeners) listener(sample);
+  };
+  const sample = (seq, x = -0.2) => ({
+    seq,
+    refEpoch: 0,
+    focused: true,
+    actionsReady: true,
+    left: {
+      hand: 'left',
+      position: [x, 1.12, -0.35],
+      orientation: [0, 0, 0, 1],
+      tracking: 'tracked',
+      grip: { position: [x, 1.12, -0.35], orientation: [0, 0, 0, 1], tracking: 'tracked' },
+    },
+    right: null,
+  });
+  emit(sample(1));
+  emit(sample(2, -0.25));
+  assert.equal(harness.clock.pending.size, 1, 'one queued frame for multiple polls');
+  assert.equal(writes.length, 0);
+  harness.clock.advance(16);
+  assert.ok(writes.some(({ props }) => props.opacity === 1));
+  assert.ok(
+    writes.some(({ props }) => props.position && Math.abs(props.position[0] - -0.25) < 0.02),
+    'latest poll wins'
+  );
+  writes.length = 0;
+  emit(sample(3, -0.25));
+  harness.clock.advance(16);
+  assert.equal(writes.length, 0, 'unchanged poses and visibility send no commands');
+  emit(null);
+  harness.clock.advance(16);
+  assert.equal(writes.filter(({ props }) => props.opacity === 0).length, 3);
+  writes.length = 0;
+  emit(null);
+  harness.clock.advance(16);
+  assert.equal(writes.length, 0, 'lost hands do not flood hidden writes');
+  emit(sample(4));
+  harness.clock.advance(16);
+  emit(sample(5, -0.3));
+  assert.equal(harness.clock.pending.size, 1);
+  writes.length = 0;
+  harness.renderComponent('QuestPreviewHands', { source, session, active: false });
+  assert.equal(
+    writes.filter(({ props }) => props.opacity === 0).length,
+    3,
+    'Back hides the visible limbs'
+  );
+  assert.equal(listeners.size, 0);
+  assert.equal(harness.clock.pending.size, 0, 'deactivation cancels the owned queued frame');
+  writes.length = 0;
+  harness.renderComponent('QuestPreviewHands', { source, session, active: true });
+  emit(sample(6));
+  harness.clock.advance(16);
+  assert.equal(
+    writes.filter(({ props }) => props.scale).length,
+    2,
+    'reactivation restores both segment scales'
+  );
+});
+
+test('native hands own pose transforms without a JS sample subscription or animation frame', (t) => {
+  const harness = createSceneHarness(t, { nativeHands: true });
+  const source = {
+    onSample: () => {
+      throw new Error('native mode must not subscribe JS transforms');
+    },
+  };
+  const session = {
+    getLiveTransforms: () => {
+      throw new Error('native mode must not infer a JS elbow');
+    },
+  };
+  const nodes = harness.renderComponent('QuestPreviewHands', { source, session, active: true });
+  for (const n of nodes.filter((node) => node.type === 'ViroNode')) {
+    assert.equal(n.props.visible, true);
+    assert.equal(n.props.opacity, 0);
+  }
+  for (const n of nodes.filter((node) => node.type === 'Viro3DObject'))
+    assert.equal(n.props.visible, true);
+  const tags = nodes.filter((node) => node.type === 'ViroNode').map((node) => node.props.viroTag);
+  assert.deepEqual([...tags].sort(), [
+    'quest-left-fist',
+    'quest-left-forearm',
+    'quest-left-upper',
+    'quest-right-fist',
+    'quest-right-forearm',
+    'quest-right-upper',
+  ]);
+  assert.deepEqual(harness.calls.nativeHands, [true]);
+  assert.equal(harness.clock.pending.size, 0);
+  harness.renderComponent('QuestPreviewHands', { source, session, active: false });
+  assert.deepEqual(harness.calls.nativeHands, [true, false, false]);
+  assert.equal(harness.clock.pending.size, 0);
+});
+
+test('fallback rechecks freshness and recenter epoch on an unchanged controller sequence', (t) => {
+  const harness = createSceneHarness(t);
+  harness.trackerSnapshot.calibration = { ...DEFAULT_CALIBRATION, origin: [0, 1.4, 0] };
+  let listener,
+    nowNs = 2_000_000;
+  const source = {
+    onSample: (next) => {
+      listener = next;
+      return () => {
+        listener = null;
+      };
+    },
+    getLiveState: () => ({ nowNs }),
+  };
+  const session = { getLiveTransforms: () => ({ blue: { lift: 0 } }) };
+  const nodes = harness.renderComponent('QuestPreviewHands', { source, session, active: true });
+  const writes = [];
+  for (const node of nodes.filter((n) => n.type === 'ViroNode'))
+    node.props.ref.current = { setNativeProps: (props) => writes.push(props) };
+  const sample = {
+    seq: 1,
+    capturedNs: 0,
+    refEpoch: 0,
+    focused: true,
+    actionsReady: true,
+    left: {
+      hand: 'left',
+      grip: { position: [-0.2, 1.12, -0.35], orientation: [0, 0, 0, 1], tracking: 'tracked' },
+    },
+    right: null,
+  };
+  listener(sample);
+  harness.clock.advance(16);
+  assert.equal(writes.filter((p) => p.opacity === 1).length, 3);
+  writes.length = 0;
+  nowNs = 62_000_000;
+  listener(sample);
+  harness.clock.advance(16);
+  assert.equal(
+    writes.filter((p) => p.opacity === 0).length,
+    3,
+    '50ms guard runs before 100ms source cutoff'
+  );
+  nowNs = 2_000_000;
+  listener(sample);
+  harness.clock.advance(16);
+  writes.length = 0;
+  harness.trackerSnapshot.refEpoch = 1;
+  listener(sample);
+  harness.clock.advance(16);
+  assert.equal(
+    writes.filter((p) => p.opacity === 0).length,
+    3,
+    'same seq cannot survive a reference epoch change'
+  );
+});
+
+test('missing native visual nodes switches to fresh grip refs after a bounded readiness check', (t) => {
+  const harness = createSceneHarness(t, { nativeHands: true, nativeMeshes: false });
+  let subscriptions = 0;
+  const source = {
+    onSample: () => {
+      subscriptions++;
+      return () => {
+        subscriptions--;
+      };
+    },
+  };
+  const session = { getLiveTransforms: () => ({ blue: { lift: 0 } }) };
+  const props = { source, session, active: true };
+  harness.renderComponent('QuestPreviewHands', props);
+  assert.equal(subscriptions, 0);
+  harness.clock.advance(1500);
+  harness.renderComponent('QuestPreviewHands', props);
+  assert.equal(subscriptions, 1, 'native missing tags/geometry cannot lock out the ref fallback');
+  assert.equal(
+    harness.calls.nativeHands.at(-1),
+    false,
+    'native ownership released before ref writes'
+  );
+  harness.unmount();
+  assert.equal(subscriptions, 0);
+  assert.equal(harness.clock.pending.size, 0);
 });

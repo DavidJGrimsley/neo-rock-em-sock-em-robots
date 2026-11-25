@@ -74,6 +74,10 @@ class QuestInputModule : Module() {
     dw: Int,
     dh: Int
   ): Boolean
+  private external fun nativeHandsVisualNodesReady(): Boolean
+  private external fun nativeHandsVersion(): Int
+  private external fun nativeSetHandsEnabled(enabled: Boolean)
+  private external fun nativeReadGrip(longs: LongArray, count: Int, ints: IntArray, floats: FloatArray): Boolean
   private external fun nativeRigSyncVersion(): Int
   private external fun nativePublishRigState(active: Boolean, values: FloatArray?): Boolean
   private external fun nativeClearRigState()
@@ -98,12 +102,24 @@ class QuestInputModule : Module() {
     }
   }
 
+  private val handsReady: Boolean by lazy {
+    try {
+      System.loadLibrary("viro_renderer")
+      nativeHandsVersion() == 1
+    } catch (_: LinkageError) { false }
+  }
+  private val gripInts = IntArray(CAPACITY * 8)
+  private val gripFloats = FloatArray(CAPACITY * 26)
+
   // Reused by every read. Sync functions run on the JS thread; the lock is a guard only.
   private val lock = Any()
   private val header = LongArray(HEADER_LONGS)
   private val longs = LongArray(CAPACITY * LONGS_PER_SAMPLE)
   private val ints = IntArray(CAPACITY * INTS_PER_SAMPLE)
   private val floats = FloatArray(CAPACITY * FLOATS_PER_SAMPLE)
+  private val emptyDoubles = DoubleArray(0)
+  private val emptyInts = IntArray(0)
+  private val emptyFloats = FloatArray(0)
 
   // Sky diagnostics panel rasterizer state (mirrors QuestPanelModule off-thread pattern).
   @Volatile private var diagOwner = 0
@@ -144,16 +160,16 @@ class QuestInputModule : Module() {
       val haveOrigin = header[12] == 1L
       val originDisplay = header[10]
       val originMonotonic = header[11]
-      val seq = DoubleArray(count)
-      val displayTimeNs = DoubleArray(count)
-      val capturedNs = DoubleArray(count)
+      val seq = if (count == 0) emptyDoubles else DoubleArray(count)
+      val displayTimeNs = if (count == 0) emptyDoubles else DoubleArray(count)
+      val capturedNs = if (count == 0) emptyDoubles else DoubleArray(count)
       for (i in 0 until count) {
         val at = i * LONGS_PER_SAMPLE
         seq[i] = exact(longs[at])
         displayTimeNs[i] = exact(longs[at + 1] - originDisplay)
         capturedNs[i] = exact(longs[at + 2] - originMonotonic)
       }
-      return mapOf(
+      val result = mutableMapOf<String, Any?>(
         "available" to true,
         "version" to header[0].toInt(),
         "generation" to exact(header[1]),
@@ -173,9 +189,15 @@ class QuestInputModule : Module() {
         "seq" to seq,
         "displayTimeNs" to displayTimeNs,
         "capturedNs" to capturedNs,
-        "ints" to ints.copyOf(count * INTS_PER_SAMPLE),
-        "floats" to floats.copyOf(count * FLOATS_PER_SAMPLE)
+        "ints" to (if (count == 0) emptyInts else ints.copyOf(count * INTS_PER_SAMPLE)),
+        "floats" to (if (count == 0) emptyFloats else floats.copyOf(count * FLOATS_PER_SAMPLE))
       )
+      if (handsReady && (count == 0 || nativeReadGrip(longs, count, gripInts, gripFloats))) {
+        result["gripVersion"] = 1
+        result["gripInts"] = if (count == 0) emptyInts else gripInts.copyOf(count * 8)
+        result["gripFloats"] = if (count == 0) emptyFloats else gripFloats.copyOf(count * 26)
+      }
+      return result
     }
   }
 
@@ -513,6 +535,15 @@ class QuestInputModule : Module() {
       true
     }
 
+    Function("handsVisualNodesReady") {
+      try { handsReady && nativeHandsVisualNodesReady() } catch (_: LinkageError) { false }
+    }
+    Function("handsVersion") { if (handsReady) 1 else 0 }
+    Function("setHandsEnabled") { enabled: Boolean ->
+      if (!handsReady) return@Function false
+      nativeSetHandsEnabled(enabled)
+      true
+    }
     Function("read") { afterSeq: Double -> read(afterSeq) }
 
     // Bound OpenXR interaction profile per hand, left then right; empty until bound.
@@ -571,6 +602,7 @@ class QuestInputModule : Module() {
     }
 
     OnDestroy {
+      if (handsReady) nativeSetHandsEnabled(false)
       if (available) nativeSetMarkersEnabled(false)
       if (rigSyncReady) nativeClearRigState()
       synchronized(diagDrawLock) {

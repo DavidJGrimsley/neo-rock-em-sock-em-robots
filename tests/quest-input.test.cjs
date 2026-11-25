@@ -811,7 +811,7 @@ test('patch 0003 stays inside the existing session and keeps native locking simp
 test('patch 0004 synchronizes rig and fighter transforms on the OpenXR render thread before prepareFrame', () => {
   const patch = read('tools/quest/viro-renderer/0004-openxr-quest-rig-sync.patch');
   const lock = JSON.parse(read('tools/quest/viro-renderer/lock.json'));
-  assert.equal(lock.patches.at(-1), '0004-openxr-quest-rig-sync.patch');
+  assert.equal(lock.patches[3], '0004-openxr-quest-rig-sync.patch');
   assert.doesNotMatch(patch, /anthropic|claude|openai|grok/i);
   const files = [...patch.matchAll(/^diff --git a\/(\S+)/gm)].map((match) => match[1]).sort();
   assert.deepEqual(files, [
@@ -1120,8 +1120,8 @@ test('diagnostics live patch targets bounded sub-regions and responds faster tha
   assert.match(patch0003, /nativeDiagDrawRegion/);
 
   const visualizer = read('src/features/quest-vr/quest-input-visualizer.native.tsx');
-  assert.match(visualizer, /QUEST_DIAG_PATCH_ANALOG_MS = 33/);
-  assert.match(visualizer, /QUEST_DIAG_PATCH_EDGE_MS = 10/);
+  assert.match(visualizer, /QUEST_DIAG_PATCH_ANALOG_MS = 100/);
+  assert.match(visualizer, /QUEST_DIAG_PATCH_EDGE_MS = 16/);
   assert.match(visualizer, /questInputNative\?\.patchDiagnostics\?\.\(owner/);
   assert.match(visualizer, /source\.onSample\(/);
 });

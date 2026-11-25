@@ -1,10 +1,16 @@
 import { ArenaMatch } from '../arena-fighter/arena-match.ts';
+import { forward } from '../arena-fighter/arena-combat-motion.ts';
 import type {
   AnalogMovement,
   ArenaAsset,
   FighterId,
   FighterTransform,
 } from '../arena-fighter/arena-controller.ts';
+import {
+  createQuestFirstPersonBodyTrackerState,
+  stepQuestFirstPersonBodyClip,
+  type QuestFirstPersonBodyClip,
+} from './quest-first-person-body.ts';
 import { DEFAULT_CALIBRATION, type Calibration } from './quest-head-rig.ts';
 import {
   questHeadTracker,
@@ -32,19 +38,23 @@ export const QUEST_LEAVING = 'Leaving the headset…';
  *   `Fight_Arena.glb` inner rope/post edge (`0.22326`), keeping a 180-degree turned
  *   eye anchor (`0.205 + 0.01522 = 0.22022`) inside the ropes while freeing ~0.48 m
  *   of ring space compared to phone AR (`0.175`).
- * - `separation: 0.085`: 1.36 m foot-to-foot at 16x VR scale, maintaining >= 0.438 m
- *   eye-to-idle-head clearance even at full +0.20 m physical forward lean while
- *   keeping `Combo_Punch` (`<= 0.114`) and future AI reach (`0.095`) viable.
+ * - `separation: 0.065`: 1.04 m origin-to-origin at 16x VR scale, putting the
+ *   opponent's head front at 0.349 m and head center at 0.595 m ahead of the
+ *   wearer's eyes (0.675 m from shoulders) so a natural standing jab reaches
+ *   the opponent's face and Stage 06 head/chest targets without leaning, while
+ *   still preserving >= 0.149 m eye-to-idle-head clearance at full +0.20 m
+ *   forward lean, >= 0.028 m chest-to-guard-glove clearance, >= 0.23 m walking
+ *   toe-to-toe clearance, and `Combo_Punch` (`<= 0.114`) / AI reach (`0.095`).
  * - `stableFacing: true`: keeps player ring/body yaw fixed without opponent-orbit
  *   auto-turning while `QuestArenaSession` translates left-stick inputs into
  *   view-relative horizontal movement from live headset yaw.
  */
 export const QUEST_ARENA_RULES = {
   boundary: 0.205,
-  separation: 0.085,
+  separation: 0.065,
   reach: 0.095,
-  cpuPreferredRange: 0.09,
-  cpuMinimumRange: 0.086,
+  cpuPreferredRange: 0.075,
+  cpuMinimumRange: 0.068,
   stableFacing: true,
   dashEnabled: true,
   dashTravel: 0.06,
@@ -99,10 +109,14 @@ export interface QuestArenaView {
   /** Spawn/round-start transforms for initial mount; live frame movement uses getLiveTransforms(). */
   transforms: { blue: FighterTransform; red: FighterTransform } | null;
   fighters: { blue: QuestFighterPresentation; red: QuestFighterPresentation } | null;
+  bodyClip: QuestFirstPersonBodyClip;
   animationsRunning: boolean;
   outcome: FighterId | 'draw' | null;
   lastReady: QuestReadyResult | null;
   lines: string[];
+  /** menu before Solo, side until Ready, eyes after the intro. */
+  presentation: 'menu' | 'side' | 'eyes';
+  introActive: boolean;
 }
 
 export interface QuestClock {
@@ -179,6 +193,13 @@ export function createQuestArenaSession(
   let match: ArenaMatch | null = null;
   let unsubscribe: (() => void) | null = null;
   let page: QuestMenuPage = 'menu';
+  let presentation: 'menu' | 'side' | 'eyes' = 'menu';
+  let intro: {
+    elapsed: number;
+    duration: number;
+    blend: number;
+    opacity: number;
+  } | null = null;
   let lastReady: QuestReadyResult | null = null;
   let acknowledged = false;
   let readyQueued = false;
@@ -217,6 +238,7 @@ export function createQuestArenaSession(
   let recenterNeutral = false;
   let recenterSampleT: number | null = null;
   let recenterInputSeq: number | null = null;
+  let bodyTracker = createQuestFirstPersonBodyTrackerState();
 
   function emptyView(): QuestArenaView {
     return {
@@ -239,16 +261,44 @@ export function createQuestArenaSession(
       lease: 0,
       transforms: null,
       fighters: null,
+      bodyClip: 'IdleAggro',
       animationsRunning: false,
       outcome: null,
       lastReady,
       lines: menuLines(page, null, acknowledged, leaving),
+      presentation,
+      introActive: intro !== null,
     };
   }
 
   function currentAnalog(): AnalogMovement {
     if (!appActive || menuFocused) return { advance: 0, strafe: 0 };
     return { advance: locomotion.advance, strafe: locomotion.strafe };
+  }
+
+  function isBodyLocomotionActive(
+    snapshot: ReturnType<ArenaMatch['getSnapshot']> | undefined,
+    head: QuestHeadLocomotionState & { referenceResets?: number }
+  ) {
+    if (presentation !== 'eyes' || !snapshot) return false;
+    if (
+      snapshot.stage !== 'fighting' ||
+      !snapshot.animationsRunning ||
+      snapshot.impactPauseRemaining !== 0
+    ) {
+      return false;
+    }
+    if (!appActive || menuFocused || recenterNeutral || head.recentering) return false;
+    if (latestInput.status !== 'live' || !latestInput.sample) return false;
+    if (!latestInput.sample.focused || !latestInput.sample.actionsReady) return false;
+    if (
+      typeof latestInput.sample.refEpoch === 'number' &&
+      typeof head.refEpoch === 'number' &&
+      latestInput.sample.refEpoch !== head.refEpoch
+    ) {
+      return false;
+    }
+    return true;
   }
 
   function applyLocomotionToMatch() {
@@ -311,29 +361,31 @@ export function createQuestArenaSession(
     if (recenterNeutral) {
       locomotion = { advance: 0, strafe: 0, active: false, magnitude: 0 };
       neutralizeDash();
-      applyLocomotionToMatch();
-      return head;
-    }
+    } else {
+      if (
+        head.recentering ||
+        !appActive ||
+        menuFocused ||
+        (typeof latestInput.sample?.refEpoch === 'number' &&
+          typeof head.refEpoch === 'number' &&
+          latestInput.sample.refEpoch !== head.refEpoch)
+      ) {
+        neutralizeDash();
+      }
 
-    if (
-      head.recentering ||
-      !appActive ||
-      menuFocused ||
-      (typeof latestInput.sample?.refEpoch === 'number' &&
-        typeof head.refEpoch === 'number' &&
-        latestInput.sample.refEpoch !== head.refEpoch)
-    ) {
-      neutralizeDash();
+      locomotion = questLocomotionFromInput({
+        sample: latestInput.sample,
+        status: latestInput.status,
+        menuFocused,
+        appActive,
+        head,
+      });
     }
-
-    locomotion = questLocomotionFromInput({
-      sample: latestInput.sample,
-      status: latestInput.status,
-      menuFocused,
-      appActive,
-      head,
-    });
     applyLocomotionToMatch();
+    if (!isBodyLocomotionActive(match?.getSnapshot(), head) && bodyTracker.clip !== 'IdleAggro') {
+      bodyTracker = createQuestFirstPersonBodyTrackerState();
+      publish();
+    }
     return head;
   }
 
@@ -355,6 +407,18 @@ export function createQuestArenaSession(
 
   function publish() {
     const snapshot = match?.getSnapshot();
+    if (
+      !match ||
+      !snapshot ||
+      presentation !== 'eyes' ||
+      snapshot.stage !== 'fighting' ||
+      !snapshot.animationsRunning ||
+      snapshot.impactPauseRemaining !== 0
+    ) {
+      if (bodyTracker.clip !== 'IdleAggro' || bodyTracker.candidateClip !== null) {
+        bodyTracker = createQuestFirstPersonBodyTrackerState();
+      }
+    }
     if (match && snapshot) {
       const roundKey = `${lease}:${snapshot.roundId}`;
       if (!spawnTransforms || spawnRoundKey !== roundKey) {
@@ -397,10 +461,13 @@ export function createQuestArenaSession(
               blue: { clip: snapshot.blue.clip, animationId: snapshot.blue.animationId },
               red: { clip: snapshot.red.clip, animationId: snapshot.red.animationId },
             },
+            bodyClip: bodyTracker.clip,
             animationsRunning: snapshot.animationsRunning && snapshot.impactPauseRemaining === 0,
             outcome: snapshot.outcome,
             lastReady,
             lines: menuLines(page, snapshot.stage, acknowledged, leaving),
+            presentation,
+            introActive: intro !== null,
           }
         : emptyView();
 
@@ -428,7 +495,54 @@ export function createQuestArenaSession(
     cancelRafFrame();
   }
 
+  function beginViewpointIntro() {
+    if (presentation !== 'side' || intro) return;
+    intro = { elapsed: 0, duration: 1.55, blend: 0, opacity: 0 };
+  }
+
+  function advanceIntro(dtSeconds: number) {
+    if (!intro || dtSeconds <= 0) return;
+    intro.elapsed += dtSeconds;
+    // Pan from side view toward POV, reach opaque cover at blend <= 0.70 well before
+    // entering Blue's head volume, swap to headless POV while opaque, then fade cover out.
+    const panClearEnd = 0.85;
+    const coverInEnd = 1.05;
+    const coverHoldEnd = 1.25;
+    if (intro.elapsed < panClearEnd) {
+      intro.blend = 0.64 * (intro.elapsed / panClearEnd);
+      intro.opacity = 0;
+    } else if (intro.elapsed < coverInEnd) {
+      const u = (intro.elapsed - panClearEnd) / (coverInEnd - panClearEnd);
+      intro.blend = 0.64 + 0.06 * u;
+      intro.opacity = u;
+    } else if (intro.elapsed < coverHoldEnd) {
+      const u = (intro.elapsed - coverInEnd) / (coverHoldEnd - coverInEnd);
+      intro.blend = 0.7 + 0.3 * u;
+      intro.opacity = 1;
+      if (presentation !== 'eyes') {
+        presentation = 'eyes';
+        publish();
+      }
+    } else {
+      intro.blend = 1;
+      intro.opacity = Math.max(
+        0,
+        1 - (intro.elapsed - coverHoldEnd) / (intro.duration - coverHoldEnd)
+      );
+      if (presentation !== 'eyes') {
+        presentation = 'eyes';
+        publish();
+      }
+    }
+    if (intro && intro.elapsed >= intro.duration) {
+      intro = null;
+      presentation = 'eyes';
+      publish();
+    }
+  }
+
   function notifyFrame(dtSeconds = 0) {
+    advanceIntro(dtSeconds);
     frameListeners.forEach((listener) => listener(dtSeconds));
   }
 
@@ -436,12 +550,41 @@ export function createQuestArenaSession(
     if (!Number.isFinite(rawDtSeconds) || rawDtSeconds <= 0) return;
     const clampedDt = Math.min(MAX_FRAME_DT_S, rawDtSeconds);
     let remaining = clampedDt;
+    let bodyClipChanged = false;
     while (remaining > 1e-6) {
       const stepDt = Math.min(MAX_STEP_DT_S, remaining);
       remaining -= stepDt;
-      recomputeLocomotion();
+      const head = recomputeLocomotion();
+      const before = match?.getTransform('blue') ?? null;
       match?.tick(token, stepDt);
+      const after = match?.getTransform('blue') ?? null;
+      const snapshot = match?.getSnapshot();
+      const bodyActive = isBodyLocomotionActive(snapshot, head);
+      let forwardSpeed = 0;
+      let leftSpeed = 0;
+      if (bodyActive && before && after && stepDt > 1e-6) {
+        const dx = after.x - before.x;
+        const dz = after.z - before.z;
+        const fwd = forward(after.yaw);
+        const left = { x: fwd.z, z: -fwd.x };
+        forwardSpeed = (dx * fwd.x + dz * fwd.z) / stepDt;
+        leftSpeed = (dx * left.x + dz * left.z) / stepDt;
+      }
+      const nextBodyTracker = stepQuestFirstPersonBodyClip(bodyTracker, {
+        active: bodyActive,
+        running: Boolean(
+          snapshot && snapshot.animationsRunning && snapshot.impactPauseRemaining === 0
+        ),
+        forwardSpeed,
+        leftSpeed,
+        dtSeconds: stepDt,
+      });
+      if (nextBodyTracker.clip !== bodyTracker.clip) {
+        bodyClipChanged = true;
+      }
+      bodyTracker = nextBodyTracker;
     }
+    if (bodyClipChanged) publish();
     notifyFrame(clampedDt);
   }
 
@@ -492,6 +635,8 @@ export function createQuestArenaSession(
     match?.dispose();
     match = null;
     page = 'menu';
+    presentation = 'menu';
+    intro = null;
     lastReady = null;
     acknowledged = false;
     readyQueued = false;
@@ -503,6 +648,8 @@ export function createQuestArenaSession(
     recenterInputSeq = null;
     locomotion = { advance: 0, strafe: 0, active: false, magnitude: 0 };
     dashTriggerState = { armed: false };
+    bodyTracker = createQuestFirstPersonBodyTrackerState();
+    notifyFrame(0);
   }
 
   function armAssetTimeout() {
@@ -531,6 +678,7 @@ export function createQuestArenaSession(
           if (token !== null) match.tick(token, 1 / 60);
           acknowledged = true;
           readyQueued = false;
+          beginViewpointIntro();
           startLoop();
           notifyFrame();
           return { called: true, started: true, reason: 'started' };
@@ -547,6 +695,7 @@ export function createQuestArenaSession(
         if (token !== null) match.tick(token, 1 / 60);
         acknowledged = true;
         readyQueued = false;
+        beginViewpointIntro();
         startLoop();
         notifyFrame();
         return { called: true, started: true, reason: 'resumed' };
@@ -560,6 +709,7 @@ export function createQuestArenaSession(
         acknowledged = true;
         readyQueued = false;
         spawnRoundKey = '';
+        beginViewpointIntro();
         startLoop();
         notifyFrame();
         return { called: true, started: true, reason: 'rematched' };
@@ -571,11 +721,15 @@ export function createQuestArenaSession(
   return {
     subscribe: (listener: () => void) => {
       listeners.add(listener);
-      return () => listeners.delete(listener);
+      return () => {
+        listeners.delete(listener);
+      };
     },
     onFrame: (listener: (dtSeconds: number) => void) => {
       frameListeners.add(listener);
-      return () => frameListeners.delete(listener);
+      return () => {
+        frameListeners.delete(listener);
+      };
     },
     getSnapshot: () => view,
     getLiveTransforms: (): { blue: FighterTransform; red: FighterTransform } | null =>
@@ -605,6 +759,8 @@ export function createQuestArenaSession(
       lease += 1;
       match = created;
       page = 'ring';
+      presentation = 'side';
+      intro = null;
       lastReady = null;
       acknowledged = false;
       readyQueued = false;
@@ -619,6 +775,13 @@ export function createQuestArenaSession(
       lastReady = result;
       publish();
       return result;
+    },
+    getRigBlend() {
+      if (!intro) return presentation === 'side' ? 0 : 1;
+      return intro.blend;
+    },
+    getIntroOpacity() {
+      return intro?.opacity ?? 0;
     },
     setInputState(
       sample: QuestInputSample | null,
@@ -677,6 +840,9 @@ export function createQuestArenaSession(
       lastFrameMs = null;
       advanceSessionDt(token, dtSeconds);
       finishLoopStep();
+    },
+    getBodyClip() {
+      return bodyTracker.clip;
     },
     animationApplied(id: FighterId, animationId: number) {
       match?.animationApplied(id, animationId);

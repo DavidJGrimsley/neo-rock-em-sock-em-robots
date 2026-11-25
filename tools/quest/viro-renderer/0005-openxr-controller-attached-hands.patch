@@ -1,0 +1,578 @@
+diff --git a/android/sharedCode/src/main/cpp/QuestHandsMath.h b/android/sharedCode/src/main/cpp/QuestHandsMath.h
+new file mode 100644
+--- /dev/null
++++ b/android/sharedCode/src/main/cpp/QuestHandsMath.h
+@@ -0,0 +1,92 @@
++// Shared portable math for patch 0005 and host tests. Right-handed OpenXR LOCAL metres.
++// Elbows are cosmetic two-bone estimates; no controller provides a tracked elbow.
++#pragma once
++#include <cmath>
++
++namespace quest_hands_math {
++struct V { float x, y, z; };
++struct Q { float x, y, z, w; };
++inline V add(V a, V b) { return {a.x+b.x,a.y+b.y,a.z+b.z}; }
++inline V sub(V a, V b) { return {a.x-b.x,a.y-b.y,a.z-b.z}; }
++inline V scale(V a, float s) { return {a.x*s,a.y*s,a.z*s}; }
++inline float dot(V a, V b) { return a.x*b.x+a.y*b.y+a.z*b.z; }
++inline V cross(V a, V b) { return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x}; }
++inline float length(V a) { return std::sqrt(dot(a,a)); }
++inline V unit(V a) { const float n=length(a); return n>1e-8f?scale(a,1/n):V{0,0,0}; }
++inline bool finite(V p) { return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.z); }
++inline bool normalize(Q &q) {
++    const float n=std::sqrt(q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w);
++    if (!std::isfinite(n)||std::fabs(n-1)>0.05f) return false;
++    q={q.x/n,q.y/n,q.z/n,q.w/n}; return true;
++}
++// Explicit Hamilton product: VROQuaternion's operator* uses the reverse order.
++inline Q mul(Q a,Q b) {
++    return {a.w*b.x+a.x*b.w+a.y*b.z-a.z*b.y,
++            a.w*b.y-a.x*b.z+a.y*b.w+a.z*b.x,
++            a.w*b.z+a.x*b.y-a.y*b.x+a.z*b.w,
++            a.w*b.w-a.x*b.x-a.y*b.y-a.z*b.z};
++}
++inline V rotate(Q q,V p) {
++    const V u{q.x,q.y,q.z}; const V t=scale(cross(u,p),2);
++    return add(p,add(scale(t,q.w),cross(u,t)));
++}
++constexpr float kFighterScale=0.12f/1.59857170559f;
++constexpr float kScale=kFighterScale*16.0f; // fighterScale 0.07506875 * worldScale 16
++// quest-blue-node is an unscaled parent; fighterScale lives on its mesh children.
++inline V shoulder(V rigPos,Q rigRotation,V rigScale,V bodyPos,Q bodyRotation,V bodyScale,int side) {
++    const V joint=scale({side==0?0.127665097f:-0.127665068f,0.83775128f,0.135874959f},kFighterScale);
++    const V local=add(bodyPos,rotate(bodyRotation,{joint.x*bodyScale.x,joint.y*bodyScale.y,joint.z*bodyScale.z}));
++    return add(rigPos,rotate(rigRotation,{local.x*rigScale.x,local.y*rigScale.y,local.z*rigScale.z}));
++}
++// Mesh +X is left thumb, -X right thumb; -Z is the knuckle/punch axis.
++// Grip -Z runs little finger -> thumb; grip -Y is the knuckle direction.
++// Both proper rotations map the anatomical thumb to grip -Z, without mirroring.
++inline Q meshToGrip(int side) {
++    return side==0?Q{-0.5f,0.5f,0.5f,0.5f}:Q{-0.5f,-0.5f,-0.5f,0.5f};
++}
++inline V palmCenter(int side) {
++    // Halfway from source wrist to midpoint(index_01,pinky_01), in baked mesh space.
++    return side==0?V{0.000395137f,-0.005049033f,-0.068952912f}:
++                   V{-0.000395141f,-0.005049129f,-0.068952916f};
++}
++struct Fist { V wrist; Q rotation; bool visible; };
++inline bool fresh(bool focused,bool active,bool valid,long long poseTime,long long frameTime,
++                  long long captured,long long now) {
++    return focused&&active&&valid&&poseTime==frameTime&&captured>0&&now>=captured&&now-captured<=50000000LL;
++}
++inline Fist fist(int side,V grip,Q orientation) {
++    if (!finite(grip)||!normalize(orientation)) return {{0,0,0},{0,0,0,1},false};
++    const Q rotation=mul(orientation,meshToGrip(side));
++    return {sub(grip,rotate(rotation,scale(palmCenter(side),kScale))),rotation,true};
++}
++inline Q basis(V z,V up) {
++    V y=sub(up,scale(z,dot(up,z)));
++    if (length(y)<1e-6f) {
++        const V fallback=std::fabs(z.y)<0.9f?V{0,1,0}:V{1,0,0};
++        y=sub(fallback,scale(z,dot(fallback,z)));
++    }
++    y=unit(y); const V x=unit(cross(y,z)); y=unit(cross(z,x));
++    Q q{}; const float trace=x.x+y.y+z.z;
++    if (trace>0) { const float s=std::sqrt(trace+1)*2; q={(y.z-z.y)/s,(z.x-x.z)/s,(x.y-y.x)/s,s/4}; }
++    else if (x.x>y.y&&x.x>z.z) { const float s=std::sqrt(1+x.x-y.y-z.z)*2; q={s/4,(y.x+x.y)/s,(z.x+x.z)/s,(y.z-z.y)/s}; }
++    else if (y.y>z.z) { const float s=std::sqrt(1+y.y-x.x-z.z)*2; q={(y.x+x.y)/s,s/4,(z.y+y.z)/s,(z.x-x.z)/s}; }
++    else { const float s=std::sqrt(1+z.z-x.x-y.y)*2; q={(z.x+x.z)/s,(z.y+y.z)/s,s/4,(x.y-y.x)/s}; }
++    normalize(q); return q;
++}
++struct Arm { V elbow; Q upper,forearm; float stretch; bool visible; };
++inline Arm arm(V shoulder,V wrist,Q fistRotation,Q bodyRotation,int side) {
++    const float l1=0.218699927f*kScale,l2=0.188133323f*kScale;
++    const V delta=sub(wrist,shoulder); const float d=length(delta),reach=l1+l2;
++    if (!finite(shoulder)||!finite(wrist)||d<1e-4f||d>2.05f*reach) return {{0,0,0},{0,0,0,1},{0,0,0,1},1,false};
++    const float stretch=d>0.94f*reach?std::fmin(2.05f,d/(0.94f*reach)):1;
++    const float a=l1*stretch,b=l2*stretch;
++    const V dir=unit(delta),pole=rotate(bodyRotation,unit({side==0?0.45f:-0.45f,-1,-0.25f}));
++    V bend=sub(pole,scale(dir,dot(pole,dir)));
++    if (length(bend)<1e-5f) bend=sub(V{0,-1,0},scale(dir,-dir.y));
++    if (length(bend)<1e-5f) bend=sub(V{1,0,0},scale(dir,dir.x));
++    const float along=(a*a-b*b+d*d)/(2*d);
++    const V elbow=add(add(shoulder,scale(dir,along)),scale(unit(bend),std::sqrt(std::fmax(0,a*a-along*along))));
++    return {elbow,basis(unit(sub(shoulder,elbow)),scale(pole,-1)),
++            basis(unit(sub(elbow,wrist)),rotate(fistRotation,{0,1,0})),stretch,true};
++}
++} // namespace quest_hands_math
+diff --git a/android/sharedCode/src/main/cpp/QuestHandsRenderer.h b/android/sharedCode/src/main/cpp/QuestHandsRenderer.h
+new file mode 100644
+--- /dev/null
++++ b/android/sharedCode/src/main/cpp/QuestHandsRenderer.h
+@@ -0,0 +1,163 @@
++// Patch 0005: controller grip-attached visuals, updated only on VROOpenXRRender.
++// Included once after QuestInputSampler.h and QuestRigSync.h in the renderer TU.
++#pragma once
++#include "QuestHandsMath.h"
++
++namespace quest_hands {
++namespace m = quest_hands_math;
++static std::atomic<bool> enabled{false};
++static std::atomic<bool> visualNodesReady{false};
++static const char *tags[6] = {"quest-left-upper", "quest-left-forearm", "quest-left-fist",
++                             "quest-right-upper", "quest-right-forearm", "quest-right-fist"};
++struct Cache {
++    std::weak_ptr<VRONode> root;
++    std::weak_ptr<VRONode> nodes[6];
++    int64_t captured=0,applied=0,lastFrame=0,lastLog=0;
++    int frames=0,visible=0,hidden=0;
++    int meshNodes[2]={0,0},hiddenMeshNodes[2]={0,0},drawnMeshNodes[2]={0,0};
++    long long predicted=0;
++    int gripFlags[2]={0,0},gripActive[2]={0,0};
++    std::vector<double> captureApply,applyRender,captureEyes,captureEnd,interval;
++};
++// Each renderer owns its cache on its render thread; an old session cannot reset a newer thread.
++static thread_local Cache cache;
++inline m::V vec(VROVector3f p) { return {p.x,p.y,p.z}; }
++inline m::Q quat(VROQuaternion q) { return {q.X,q.Y,q.Z,q.W}; }
++// VRTNode.handleAppearanceChange propagates parent disappearance to the GLB
++// wrapper. Native root-only unhide cannot reverse that cached Java visibility.
++// These six static derivatives are wholly owned cosmetic subtrees (no helpers).
++inline void setSubtreeHidden(const std::shared_ptr<VRONode> &node,bool hidden) {
++    if (!node) return;
++    if (node->isHidden()!=hidden) node->setHidden(hidden);
++    for (const auto &child:node->getChildNodes()) setSubtreeHidden(child,hidden);
++}
++inline void set(const std::shared_ptr<VRONode> &n,m::V p,m::Q q,float stretch=1) {
++    if (!n) return;
++    n->setPosition({p.x,p.y,p.z});
++    n->setRotation(VROQuaternion(q.x,q.y,q.z,q.w));
++    n->setScale({m::kScale,m::kScale,m::kScale*stretch});
++    if (n->getOpacity()!=1) n->setOpacity(1);
++    setSubtreeHidden(n,false);
++}
++inline void hide() {
++    for (auto &w:cache.nodes) if (auto n=w.lock()) n->setHidden(true);
++    cache.captured=cache.applied=cache.lastFrame=0;
++}
++// Release this thread's refs only, never mutate a VRONode off-thread.
++// Render-thread exit also destroys its thread-local cache.
++// Renderer session recreation must preserve the mounted JS lifecycle intent.
++inline void reset() { cache=Cache{}; }
++inline void apply(const std::shared_ptr<VRONode> &root,const QuestRawInput &raw,
++                  XrTime frameTime,int sessionState) {
++    cache.captured=0;
++    // Ownership release must not keep hiding nodes driven by the ref fallback.
++    // JS lifecycle cleanup queues root opacity zero; descendants stay logically live.
++    if (!enabled.load(std::memory_order_relaxed)) { cache=Cache{}; return; }
++    if (!root) { hide(); return; }
++    if (cache.root.lock()!=root) { hide(); cache=Cache{}; cache.root=root; }
++    for (int i=0;i<6;++i) {
++        auto node=cache.nodes[i].lock();
++        if (!node||!node->getParentNode()) cache.nodes[i]=quest_rig::findNodeByTag(root,tags[i]);
++    }
++    const int64_t now=quest_input::monotonicNow();
++    const bool focused=sessionState==XR_SESSION_STATE_FOCUSED&&raw.syncResult==XR_SUCCESS&&raw.actionsReady;
++    auto rig=quest_rig::renderCache.nodes[0].lock();
++    auto blue=quest_rig::renderCache.nodes[3].lock();
++    bool appliedPose=false;
++    for (int side=0;side<2;++side) {
++        const auto &grip=raw.grips[side];
++        const auto flags=grip.locationFlags;
++        cache.gripFlags[side]=static_cast<int>(flags); cache.gripActive[side]=grip.poseActive?1:0;
++        const bool valid=XR_SUCCEEDED(grip.locateResult)&&
++            (flags&XR_SPACE_LOCATION_POSITION_VALID_BIT)&&(flags&XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
++        const bool fresh=m::fresh(focused,grip.poseActive,valid,raw.poseTime,frameTime,raw.capturedMonoNs,now);
++        const auto &p=grip.pose.position; const auto &q=grip.pose.orientation;
++        auto f=m::fist(side,{p.x,p.y,p.z},{q.x,q.y,q.z,q.w});
++        auto upper=cache.nodes[side*3].lock(),forearm=cache.nodes[side*3+1].lock(),fist=cache.nodes[side*3+2].lock();
++        if (!fresh||!f.visible) {
++            if (upper) upper->setHidden(true);
++            if (forearm) forearm->setHidden(true);
++            if (fist) fist->setHidden(true);
++            ++cache.hidden; continue;
++        }
++        if (fist) { appliedPose=true; ++cache.visible; }
++        set(fist,f.wrist,f.rotation); // never clamp or hide a valid fist at arm reach limits
++        bool armVisible=false;
++        if (rig&&blue) {
++            const auto rs=vec(rig->getScale()),bs=vec(blue->getScale());
++            const auto rq=quat(rig->getRotation()),bq=quat(blue->getRotation());
++            const auto shoulder=m::shoulder(vec(rig->getPosition()),rq,rs,
++                                               vec(blue->getPosition()),bq,bs,side);
++            const auto arm=m::arm(shoulder,f.wrist,f.rotation,m::mul(rq,bq),side);
++            armVisible=arm.visible;
++            if (arm.visible) { set(upper,shoulder,arm.upper,arm.stretch); set(forearm,f.wrist,arm.forearm,arm.stretch); }
++        }
++        if (!armVisible) { if (upper) upper->setHidden(true); if (forearm) forearm->setHidden(true); }
++    }
++    cache.captured=appliedPose?raw.capturedMonoNs:0; cache.applied=quest_input::monotonicNow();
++    if (cache.captured>0&&cache.applied>=cache.captured) cache.captureApply.push_back((cache.applied-cache.captured)*1e-6);
++}
++inline double percentile(std::vector<double> values,double p) {
++    if (values.empty()) return -1;
++    std::sort(values.begin(),values.end());
++    return values[std::min(values.size()-1,static_cast<size_t>(std::ceil(p*values.size())-1))];
++}
++// Immediately before first eye rendering. XrTime is logged separately, never subtracted from CLOCK_MONOTONIC.
++inline void beforeEyes(XrTime predicted) {
++    if (!enabled.load(std::memory_order_relaxed)) return;
++    const int64_t now=quest_input::monotonicNow();
++    cache.predicted=predicted;
++    if (cache.captured>0&&cache.applied>0) {
++        cache.applyRender.push_back((now-cache.applied)*1e-6);
++        cache.captureEyes.push_back((now-cache.captured)*1e-6);
++    }
++    if (cache.lastFrame>0) cache.interval.push_back((now-cache.lastFrame)*1e-6);
++    cache.lastFrame=now; ++cache.frames;
++}
++// Observe the actual loaded GLB geometry, including inherited opacity/culling,
++// and entry into VRONode::render(element) this frame. A draw call is not pixel proof.
++inline void inspectMeshes(const std::shared_ptr<VRONode> &node,int frame,int side) {
++    if (!node) return;
++    if (node->getGeometry()) {
++        ++cache.meshNodes[side];
++        if (node->isHidden()||node->getComputedOpacityForQuest()<=0.02f) ++cache.hiddenMeshNodes[side];
++        if (node->getLastGeometryRenderFrameForQuest()==frame) ++cache.drawnMeshNodes[side];
++    }
++    for (const auto &child:node->getChildNodes()) inspectMeshes(child,frame,side);
++}
++// CPU eye-command submission end only: does not wait for GPU completion or photons.
++inline void afterEyes(int frame) {
++    if (!enabled.load(std::memory_order_relaxed)) return;
++    for (int side=0;side<2;++side) {
++        cache.meshNodes[side]=cache.hiddenMeshNodes[side]=cache.drawnMeshNodes[side]=0;
++        inspectMeshes(cache.nodes[side*3+2].lock(),frame,side);
++    }
++    visualNodesReady.store(cache.meshNodes[0]>0&&cache.meshNodes[1]>0,std::memory_order_relaxed);
++    const int64_t now=quest_input::monotonicNow();
++    if (cache.captured>0) cache.captureEnd.push_back((now-cache.captured)*1e-6);
++    if (cache.lastLog==0) cache.lastLog=now;
++    if (now-cache.lastLog<2000000000LL) return;
++    __android_log_print(ANDROID_LOG_INFO,"QuestHands",
++        "grip predicted=%lld frames=%d poseApplied=%d rejected=%d activeL=%d flagsL=%d activeR=%d flagsR=%d captureApplyP50Ms=%.3f captureApplyP95Ms=%.3f applyEyesP95Ms=%.3f captureEyesStartP95Ms=%.3f captureEyesEndP95Ms=%.3f frameP95Ms=%.3f meshL=%d hiddenMeshL=%d drawnMeshL=%d meshR=%d hiddenMeshR=%d drawnMeshR=%d staleCapMs=50",
++        cache.predicted,cache.frames,cache.visible,cache.hidden,cache.gripActive[0],cache.gripFlags[0],
++        cache.gripActive[1],cache.gripFlags[1],percentile(cache.captureApply,.5),
++        percentile(cache.captureApply,.95),percentile(cache.applyRender,.95),percentile(cache.captureEyes,.95),
++        percentile(cache.captureEnd,.95),percentile(cache.interval,.95),
++        cache.meshNodes[0],cache.hiddenMeshNodes[0],cache.drawnMeshNodes[0],
++        cache.meshNodes[1],cache.hiddenMeshNodes[1],cache.drawnMeshNodes[1]);
++    cache.lastLog=now; cache.frames=cache.visible=cache.hidden=0;
++    cache.captureApply.clear(); cache.applyRender.clear(); cache.captureEyes.clear(); cache.captureEnd.clear(); cache.interval.clear();
++}
++} // namespace quest_hands
++
++extern "C" JNIEXPORT jint JNICALL
++Java_expo_modules_questinput_QuestInputModule_nativeHandsVersion(JNIEnv *,jobject) { return 1; }
++extern "C" JNIEXPORT void JNICALL
++Java_expo_modules_questinput_QuestInputModule_nativeSetHandsEnabled(JNIEnv *,jobject,jboolean active) {
++    quest_hands::visualNodesReady.store(false,std::memory_order_relaxed);
++    quest_hands::enabled.store(active==JNI_TRUE,std::memory_order_relaxed);
++}
++extern "C" JNIEXPORT jboolean JNICALL
++Java_expo_modules_questinput_QuestInputModule_nativeHandsVisualNodesReady(JNIEnv *,jobject) {
++    return quest_hands::visualNodesReady.load(std::memory_order_relaxed)?JNI_TRUE:JNI_FALSE;
++}
+diff --git a/android/sharedCode/src/main/cpp/QuestInputSampler.h b/android/sharedCode/src/main/cpp/QuestInputSampler.h
+--- a/android/sharedCode/src/main/cpp/QuestInputSampler.h
++++ b/android/sharedCode/src/main/cpp/QuestInputSampler.h
+@@ -51,6 +51,8 @@
+     int64_t longs[kLongsPerSample];
+     int32_t ints[kIntsPerSample];
+     float   floats[kFloatsPerSample];
++    int32_t gripInts[8]; // per hand: result, flags, velocity flags, active
++    float gripFloats[26]; // per hand: position, orientation, linear/angular velocity
+ };
+ 
+ struct State {
+@@ -272,7 +274,7 @@
+                     int sessionState, int refEpoch) {
+     Slot slot;
+     slot.longs[1] = static_cast<int64_t>(displayTime);
+-    slot.longs[2] = monotonicNow();
++    slot.longs[2] = raw.capturedMonoNs > 0 ? raw.capturedMonoNs : monotonicNow();
+     slot.ints[0] = static_cast<int32_t>(raw.syncResult);
+     slot.ints[1] = sessionState;
+     slot.ints[2] = raw.actionsReady ? 1 : 0;
+@@ -280,6 +282,18 @@
+     slot.ints[4] = refEpoch;
+     packHand(raw.left, slot.ints + 5, slot.floats);
+     packHand(raw.right, slot.ints + 5 + kIntsPerHand, slot.floats + kFloatsPerHand);
++
++    for (int side=0;side<2;++side) {
++        const auto &g=raw.grips[side];
++        const int32_t gi[4]={static_cast<int32_t>(g.locateResult),static_cast<int32_t>(g.locationFlags),
++                             static_cast<int32_t>(g.velocityFlags),g.poseActive?1:0};
++        const float gf[13]={g.pose.position.x,g.pose.position.y,g.pose.position.z,
++            g.pose.orientation.x,g.pose.orientation.y,g.pose.orientation.z,g.pose.orientation.w,
++            g.linearVelocity.x,g.linearVelocity.y,g.linearVelocity.z,
++            g.angularVelocity.x,g.angularVelocity.y,g.angularVelocity.z};
++        std::memcpy(slot.gripInts+side*4,gi,sizeof(gi));
++        std::memcpy(slot.gripFloats+side*13,gf,sizeof(gf));
++    }
+ 
+     std::lock_guard<std::mutex> lock(state.mutex);
+     if (!state.live || generation != state.generation) {
+@@ -675,3 +689,33 @@
+     ++s.revision;
+     return JNI_TRUE;
+ }
++
++// Join by globally unique seq from nativeRead; never pair a newer grip with an older aim sample.
++extern "C" JNIEXPORT jboolean JNICALL
++Java_expo_modules_questinput_QuestInputModule_nativeReadGrip(
++        JNIEnv *env,jobject,jlongArray longs,jint count,jintArray ints,jfloatArray floats) {
++    using namespace quest_input;
++    if (count<0||count>kCapacity||!longs||!ints||!floats||env->GetArrayLength(longs)<count*3||
++        env->GetArrayLength(ints)<count*8||env->GetArrayLength(floats)<count*26) return JNI_FALSE;
++    std::array<jlong,kCapacity*3> seqs{};
++    std::array<jint,kCapacity*8> gi{};
++    std::array<jfloat,kCapacity*26> gf{};
++    env->GetLongArrayRegion(longs,0,count*3,seqs.data());
++    {
++        std::lock_guard<std::mutex> lock(state.mutex);
++        for (int i=0;i<count;++i) {
++            const int64_t seq=seqs[i*3];
++            if (seq<=0||!state.live||seq<state.oldestSeq||seq>state.latestSeq) {
++                gi[i*8]=-12; gi[i*8+4]=-12; continue;
++            }
++            const auto &slot=state.ring[static_cast<size_t>(seq%kCapacity)];
++            if (slot.longs[0]==seq) {
++                std::copy(slot.gripInts,slot.gripInts+8,gi.data()+i*8);
++                std::copy(slot.gripFloats,slot.gripFloats+26,gf.data()+i*26);
++            } else { gi[i*8]=-12; gi[i*8+4]=-12; } // overwritten: inactive/lost, never stale alias
++        }
++    }
++    env->SetIntArrayRegion(ints,0,count*8,gi.data());
++    env->SetFloatArrayRegion(floats,0,count*26,gf.data());
++    return JNI_TRUE;
++}
+diff --git a/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.cpp b/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.cpp
+--- a/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.cpp
++++ b/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.cpp
+@@ -5,6 +5,7 @@
+ // MIT License — see LICENSE file.
+ 
+ #include "VROInputControllerOpenXR.h"
++#include <time.h>
+ #include <android/log.h>
+ #include <cmath>
+ #include "VROLog.h"
+@@ -142,6 +143,12 @@
+ 
+     // ── 3. Suggest interaction profile bindings ───────────────────────────────
+     // Covers Touch controllers (Quest 2) and Touch Plus (Quest 3 default).
++    // Optional controller grip poses join the EXISTING action set before attachment.
++    // Aim and squeeze/value retain their original semantics and menu routing.
++    _leftGripPoseAction = createAction(_actionSet, XR_ACTION_TYPE_POSE_INPUT,
++                                      "left_grip_pose", "Left Controller Grip Pose");
++    _rightGripPoseAction = createAction(_actionSet, XR_ACTION_TYPE_POSE_INPUT,
++                                       "right_grip_pose", "Right Controller Grip Pose");
+     XrPath touchProfile;
+     xrStringToPath(instance, "/interaction_profiles/oculus/touch_controller", &touchProfile);
+ 
+@@ -151,7 +158,7 @@
+         return p;
+     };
+ 
+-    const XrActionSuggestedBinding bindings[] = {
++    std::vector<XrActionSuggestedBinding> bindings = {
+         { _leftAimPoseAction,     makePath("/user/hand/left/input/aim/pose")       },
+         { _rightAimPoseAction,    makePath("/user/hand/right/input/aim/pose")      },
+         { _leftTriggerAction,     makePath("/user/hand/left/input/trigger/value")  },
+@@ -169,14 +176,23 @@
+         { _rightVibrateAction,    makePath("/user/hand/right/output/haptic")       },
+     };
+ 
++    const size_t menuBindingCount = bindings.size();
++    if (_leftGripPoseAction) bindings.push_back({ _leftGripPoseAction, makePath("/user/hand/left/input/grip/pose") });
++    if (_rightGripPoseAction) bindings.push_back({ _rightGripPoseAction, makePath("/user/hand/right/input/grip/pose") });
++
+     XrInteractionProfileSuggestedBinding suggestion = {
+         XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING
+     };
+     suggestion.interactionProfile     = touchProfile;
+-    suggestion.suggestedBindings      = bindings;
+-    suggestion.countSuggestedBindings = (uint32_t)(sizeof(bindings) / sizeof(bindings[0]));
++    suggestion.suggestedBindings      = bindings.data();
++    suggestion.countSuggestedBindings = (uint32_t)bindings.size();
+ 
+     result = xrSuggestInteractionProfileBindings(instance, &suggestion);
++    if (XR_FAILED(result) && bindings.size() > menuBindingCount) {
++        // A runtime rejecting the optional visual bindings must not disable menus.
++        suggestion.countSuggestedBindings = static_cast<uint32_t>(menuBindingCount);
++        result = xrSuggestInteractionProfileBindings(instance, &suggestion);
++    }
+     if (!XR_SUCCEEDED(result)) {
+         ALOGE("xrSuggestInteractionProfileBindings failed: %d", result);
+         return false;
+@@ -226,6 +242,8 @@
+ }
+ 
+ void VROInputControllerOpenXR::destroySpaces() {
++    if (_leftGripSpace != XR_NULL_HANDLE) { xrDestroySpace(_leftGripSpace); _leftGripSpace = XR_NULL_HANDLE; }
++    if (_rightGripSpace != XR_NULL_HANDLE) { xrDestroySpace(_rightGripSpace); _rightGripSpace = XR_NULL_HANDLE; }
+     if (_leftSpace    != XR_NULL_HANDLE) { xrDestroySpace(_leftSpace);    _leftSpace    = XR_NULL_HANDLE; }
+     if (_rightSpace   != XR_NULL_HANDLE) { xrDestroySpace(_rightSpace);   _rightSpace   = XR_NULL_HANDLE; }
+     if (_eyeGazeSpace != XR_NULL_HANDLE) { xrDestroySpace(_eyeGazeSpace); _eyeGazeSpace = XR_NULL_HANDLE; }
+@@ -242,6 +260,15 @@
+     spaceInfo.action = _rightAimPoseAction;
+     r = xrCreateActionSpace(session, &spaceInfo, &_rightSpace);
+     if (!XR_SUCCEEDED(r)) { ALOGE("xrCreateActionSpace right failed: %d", r); return false; }
++
++    if (_leftGripPoseAction) {
++        spaceInfo.action = _leftGripPoseAction;
++        if (XR_FAILED(xrCreateActionSpace(session, &spaceInfo, &_leftGripSpace))) _leftGripSpace = XR_NULL_HANDLE;
++    }
++    if (_rightGripPoseAction) {
++        spaceInfo.action = _rightGripPoseAction;
++        if (XR_FAILED(xrCreateActionSpace(session, &spaceInfo, &_rightGripSpace))) _rightGripSpace = XR_NULL_HANDLE;
++    }
+ 
+     if (_eyeGazeEnabled && _eyeGazePoseAction != XR_NULL_HANDLE) {
+         spaceInfo.action = _eyeGazePoseAction;
+@@ -347,6 +374,31 @@
+     QuestRawHand &right = _questRaw.right;
+     readPose(_leftAimPoseAction,  _leftSpace,  left);
+     readPose(_rightAimPoseAction, _rightSpace, right);
++    const XrAction gripActions[2] = { _leftGripPoseAction, _rightGripPoseAction };
++    const XrSpace gripSpaces[2] = { _leftGripSpace, _rightGripSpace };
++    for (int i = 0; i < 2; ++i) {
++        auto &grip = _questRaw.grips[i];
++        if (!gripActions[i] || !gripSpaces[i]) continue;
++        XrActionStateGetInfo info = getInfo(gripActions[i]);
++        XrActionStatePose state = { XR_TYPE_ACTION_STATE_POSE };
++        grip.poseActive = XR_SUCCEEDED(xrGetActionStatePose(session, &info, &state)) && state.isActive;
++        if (!grip.poseActive) continue;
++        XrSpaceVelocity velocity = { XR_TYPE_SPACE_VELOCITY };
++        XrSpaceLocation location = { XR_TYPE_SPACE_LOCATION };
++        location.next = &velocity;
++        grip.locateResult = xrLocateSpace(gripSpaces[i], baseSpace, time, &location);
++        if (XR_SUCCEEDED(grip.locateResult)) {
++            grip.locationFlags = location.locationFlags;
++            grip.pose = location.pose;
++            grip.velocityFlags = velocity.velocityFlags;
++            grip.linearVelocity = velocity.linearVelocity;
++            grip.angularVelocity = velocity.angularVelocity;
++        }
++    }
++    _questRaw.poseTime = time;
++    timespec captureClock{};
++    clock_gettime(CLOCK_MONOTONIC, &captureClock);
++    _questRaw.capturedMonoNs = static_cast<int64_t>(captureClock.tv_sec) * 1000000000LL + captureClock.tv_nsec;
+     readFloat(_leftTriggerAction,  left.triggerActive,  left.trigger);
+     readFloat(_rightTriggerAction, right.triggerActive, right.trigger);
+     readFloat(_leftGripAction,     left.squeezeActive,  left.squeeze);
+diff --git a/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.h b/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.h
+--- a/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.h
++++ b/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.h
+@@ -58,11 +58,23 @@
+     bool menuActive      = false, menu      = false;  // left hand only
+ };
+ 
++// Grip pose is distinct from squeeze/value and from the menu aim ray.
++struct QuestRawGrip {
++    XrResult locateResult = XR_ERROR_HANDLE_INVALID;
++    XrSpaceLocationFlags locationFlags = 0;
++    XrSpaceVelocityFlags velocityFlags = 0;
++    XrPosef pose = { {0, 0, 0, 1}, {0, 0, 0} };
++    XrVector3f linearVelocity = {0, 0, 0}, angularVelocity = {0, 0, 0};
++    bool poseActive = false;
++};
+ struct QuestRawInput {
+     XrResult     syncResult   = XR_ERROR_HANDLE_INVALID;
+     bool         actionsReady = false;  // action set and both aim spaces exist
+     QuestRawHand left;
+     QuestRawHand right;
++    QuestRawGrip grips[2];
++    XrTime poseTime = 0;
++    int64_t capturedMonoNs = 0;
+ };
+ 
+ class VROInputControllerOpenXR : public VROInputControllerBase {
+@@ -171,6 +183,10 @@
+     // ── Aim pose actions (one per hand) ──────────────────────────────────────
+     XrAction _leftAimPoseAction  = XR_NULL_HANDLE;
+     XrAction _rightAimPoseAction = XR_NULL_HANDLE;
++    XrAction _leftGripPoseAction = XR_NULL_HANDLE;
++    XrAction _rightGripPoseAction = XR_NULL_HANDLE;
++    XrSpace _leftGripSpace = XR_NULL_HANDLE;
++    XrSpace _rightGripSpace = XR_NULL_HANDLE;
+ 
+     // ── Trigger (float, per hand — click detected at ≥0.5) ───────────────────
+     XrAction _leftTriggerAction  = XR_NULL_HANDLE;
+diff --git a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
+--- a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
++++ b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
+@@ -8,6 +8,7 @@
+ #include "QuestPanelLayer.h"
+ #include "QuestInputSampler.h"
+ #include "QuestRigSync.h"
++#include "QuestHandsRenderer.h"
+ 
+ #include <android/log.h>
+ #include <sys/prctl.h>
+@@ -899,6 +900,7 @@
+     // App input bridge: this session's samples end here; a newer session is untouched.
+     quest_input::endSession(_questInputGeneration);
+     quest_rig::resetRenderCache();
++    quest_hands::reset();
+     // AR session teardown — destroy the plane detector before the XrSession.
+     if (_arSession) {
+         _arSession->destroyPlaneDetector();
+@@ -1303,6 +1305,7 @@
+     // App input bridge: a frame without an input pass is counted, never sampled.
+     if (!(viewsValid && frameState.shouldRender)) {
+         quest_input::noteFrameWithoutInput(_questInputGeneration);
++        quest_hands::hide();
+     }
+ 
+     if (viewsValid && frameState.shouldRender) {
+@@ -1335,6 +1338,9 @@
+             rigSceneRoot = _sceneController->getScene()->getRootNode();
+         }
+         quest_rig::applyToScene(rigSceneRoot, (int)_sessionState);
++        if (_inputController) quest_hands::apply(rigSceneRoot, _inputController->getQuestRawInput(),
++                                                frameState.predictedDisplayTime, (int)_sessionState);
++        else quest_hands::hide();
+ 
+         // ── Prepare the Viro renderer (once per frame, before any eye render) ─
+         // Use the left eye pose/fov to drive scene-level preparation (culling,
+@@ -1387,6 +1393,7 @@
+             }
+         }
+ 
++        quest_hands::beforeEyes(frameState.predictedDisplayTime);
+         for (uint32_t eye = 0; eye < 2; ++eye) {
+             renderEye((int)eye, views[eye], _swapchains[eye]);
+ 
+@@ -1402,6 +1409,7 @@
+             projViews[eye].subImage.imageArrayIndex = 0;
+         }
+ 
++        if (_renderer && _renderer->hasRenderContext()) quest_hands::afterEyes(_renderer->getRenderContext()->getFrame());
+         // Tick the frame scheduler so that queued tasks (texture hydration,
+         // model load callbacks, etc.) are processed. Must be called after
+         // prepareFrame() and after all eye rendering is done.
+diff --git a/ViroRenderer/VRONode.cpp b/ViroRenderer/VRONode.cpp
+--- a/ViroRenderer/VRONode.cpp
++++ b/ViroRenderer/VRONode.cpp
+@@ -224,6 +224,7 @@
+         return;
+     }
+     if (_geometry && _computedOpacity > kHiddenOpacityThreshold) {
++        _questLastGeometryRenderFrame = context.getFrame();
+         _geometry->render(elementIndex, material,
+                           _worldTransform, _worldInverseTransposeTransform, _computedOpacity,
+                           context, driver);
+diff --git a/ViroRenderer/VRONode.h b/ViroRenderer/VRONode.h
+--- a/ViroRenderer/VRONode.h
++++ b/ViroRenderer/VRONode.h
+@@ -443,6 +443,9 @@
+         return _opacity;
+     }
+     void setOpacity(float opacity);
++    // Quest cosmetic diagnostics: read on render thread after eye rendering only.
++    float getComputedOpacityForQuest() const { return _computedOpacity; }
++    int getLastGeometryRenderFrameForQuest() const { return _questLastGeometryRenderFrame; }
+ 
+     virtual bool isHidden() const {
+         return _hidden;
+@@ -1150,6 +1153,7 @@
+      load callback has been invoked.
+      */
+     bool _holdRendering;
++    int _questLastGeometryRenderFrame = -1;
+     
+     /*
+      Task queus used for loading objects into this VRONode. We store these here in order

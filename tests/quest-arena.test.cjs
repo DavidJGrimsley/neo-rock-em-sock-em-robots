@@ -556,10 +556,7 @@ test('the Quest scene stays on the existing virtual navigator and stock assets',
   assert.doesNotMatch(scene, /exitVRScene\(\)/);
   assert.doesNotMatch(scene, /onClick=\{/);
   assert.doesNotMatch(scene, /exitRequest !== null/);
-  assert.doesNotMatch(
-    scene,
-    /ViroARScene|ViroXRSceneNavigator|setTracking|setPlacement/
-  );
+  assert.doesNotMatch(scene, /ViroARScene|ViroXRSceneNavigator|setTracking|setPlacement/);
   assert.match(scene, /ViroGameLoop/);
   assert.match(scene, /ViroGameLoopUtils/);
   assert.match(navigator, /passthroughEnabled=\{false\}/);
