@@ -297,14 +297,37 @@ test('questLocomotionFromInput enforces safety gates and maps view-relative hori
         near(worldDir[1], expected[1], 1e-6, `cal=${calYaw} head=${headYaw} ${label} worldZ`);
       }
 
-      // Diagonal speed remains normalized to <= 1 (no sqrt(2) boost) at any view angle.
-      const diag = questLocomotionFromInput({
-        sample: makeSample({ stick: [1, 1] }),
-        status: 'live',
-        head,
-      });
-      near(diag.magnitude, 1, 1e-6);
-      near(Math.hypot(diag.advance, diag.strafe), 1, 1e-6);
+      // All 4 diagonal directions stay normalized to <= 1 (no sqrt(2) boost) and steer view-relatively at any head yaw.
+      const fwdXZ = worldForwardXZ(headYaw);
+      const leftXZ = worldLeftXZ(headYaw);
+      const diagNorm = Math.SQRT1_2;
+      for (const [sx, sy, df, dl, dlabel] of [
+        [-1, 1, 1, 1, 'up-left'],
+        [1, 1, 1, -1, 'up-right'],
+        [-1, -1, -1, 1, 'down-left'],
+        [1, -1, -1, -1, 'down-right'],
+      ]) {
+        const diag = questLocomotionFromInput({
+          sample: makeSample({ stick: [sx, sy] }),
+          status: 'live',
+          head,
+        });
+        near(diag.magnitude, 1, 1e-6);
+        near(Math.hypot(diag.advance, diag.strafe), 1, 1e-6);
+        const diagWorld = ringDisplacementFromStick(90, calYaw, diag);
+        near(
+          diagWorld[0],
+          (fwdXZ[0] * df + leftXZ[0] * dl) * diagNorm,
+          1e-6,
+          `cal=${calYaw} head=${headYaw} ${dlabel} worldX`
+        );
+        near(
+          diagWorld[1],
+          (fwdXZ[1] * df + leftXZ[1] * dl) * diagNorm,
+          1e-6,
+          `cal=${calYaw} head=${headYaw} ${dlabel} worldZ`
+        );
+      }
     }
   }
 

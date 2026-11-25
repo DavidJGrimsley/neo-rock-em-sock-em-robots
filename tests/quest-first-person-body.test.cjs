@@ -9,6 +9,7 @@ const ts = require('typescript');
 const {
   QUEST_FIRST_PERSON_BODY_CLIPS,
   QUEST_BODY_CLIP_SWITCH_DWELL_S,
+  QUEST_BODY_DIRECTION_HYSTERESIS_DEG,
   QUEST_BODY_MOVE_START_SPEED,
   QUEST_BODY_MOVE_STOP_SPEED,
   QUEST_BODY_STOP_DWELL_S,
@@ -368,7 +369,7 @@ function sampleTrack(times, values, t, isQuat) {
   return values[lo].map((v, i) => v + (values[lo + 1][i] - v) * alpha);
 }
 
-test('stepQuestFirstPersonBodyClip maps locomotion directions with diagonal hysteresis and immediate stop', () => {
+test('stepQuestFirstPersonBodyClip maps all 8 directions with angular hysteresis and immediate diagonal activation', () => {
   let state = createQuestFirstPersonBodyTrackerState();
   assert.equal(state.clip, 'IdleAggro');
 
@@ -382,8 +383,25 @@ test('stepQuestFirstPersonBodyClip maps locomotion directions with diagonal hyst
   });
   assert.equal(state.clip, 'IdleAggro');
 
+  // All 4 diagonal directions activate immediately from IdleAggro without stepping through cardinals.
+  for (const [forwardSpeed, leftSpeed, expected] of [
+    [0.055, 0.055, 'WalkForwardLeft'],
+    [0.055, -0.055, 'WalkForwardRight'],
+    [-0.055, 0.055, 'WalkBackwardLeft'],
+    [-0.055, -0.055, 'WalkBackwardRight'],
+  ]) {
+    const diag = stepQuestFirstPersonBodyClip(createQuestFirstPersonBodyTrackerState(), {
+      active: true,
+      running: true,
+      forwardSpeed,
+      leftSpeed,
+      dtSeconds: 0.016,
+    });
+    assert.equal(diag.clip, expected, `diagonal (${forwardSpeed}, ${leftSpeed})`);
+  }
+
   // Forward activates immediately at typical ring speed (<= 0.08 sim/s).
-  state = stepQuestFirstPersonBodyClip(state, {
+  state = stepQuestFirstPersonBodyClip(createQuestFirstPersonBodyTrackerState(), {
     active: true,
     running: true,
     forwardSpeed: 0.06,
@@ -392,19 +410,52 @@ test('stepQuestFirstPersonBodyClip maps locomotion directions with diagonal hyst
   });
   assert.equal(state.clip, 'WalkForward');
 
-  // Near-45-degree diagonal keeps WalkForward rather than chattering to strafe.
+  // Small angle drift inside boundary hysteresis (25 deg < 22.5 + QUEST_BODY_DIRECTION_HYSTERESIS_DEG) holds WalkForward.
+  const driftRad = (25 * Math.PI) / 180;
   for (let i = 0; i < 10; i++) {
     state = stepQuestFirstPersonBodyClip(state, {
       active: true,
       running: true,
-      forwardSpeed: 0.05,
-      leftSpeed: 0.055,
+      forwardSpeed: 0.07 * Math.cos(driftRad),
+      leftSpeed: 0.07 * Math.sin(driftRad),
       dtSeconds: 0.02,
     });
     assert.equal(state.clip, 'WalkForward');
   }
 
-  // Clear lateral dominance switches to StrafeLeft after brief dwell.
+  // Clear 45-degree diagonal switches smoothly to WalkForwardLeft after dwell.
+  state = stepQuestFirstPersonBodyClip(state, {
+    active: true,
+    running: true,
+    forwardSpeed: 0.055,
+    leftSpeed: 0.055,
+    dtSeconds: QUEST_BODY_CLIP_SWITCH_DWELL_S / 2,
+  });
+  assert.equal(state.clip, 'WalkForward');
+  state = stepQuestFirstPersonBodyClip(state, {
+    active: true,
+    running: true,
+    forwardSpeed: 0.055,
+    leftSpeed: 0.055,
+    dtSeconds: QUEST_BODY_CLIP_SWITCH_DWELL_S,
+  });
+  assert.equal(state.clip, 'WalkForwardLeft');
+
+  // Boundary hysteresis holds WalkForwardLeft across minor 20-deg and 70-deg wobble without chattering.
+  assert.ok(QUEST_BODY_DIRECTION_HYSTERESIS_DEG >= 5);
+  for (const wobbleDeg of [20, 70, 45]) {
+    const wRad = (wobbleDeg * Math.PI) / 180;
+    state = stepQuestFirstPersonBodyClip(state, {
+      active: true,
+      running: true,
+      forwardSpeed: 0.07 * Math.cos(wRad),
+      leftSpeed: 0.07 * Math.sin(wRad),
+      dtSeconds: 0.02,
+    });
+    assert.equal(state.clip, 'WalkForwardLeft');
+  }
+
+  // Clear lateral dominance switches from WalkForwardLeft to StrafeLeft after brief dwell.
   state = stepQuestFirstPersonBodyClip(state, {
     active: true,
     running: true,
@@ -412,7 +463,7 @@ test('stepQuestFirstPersonBodyClip maps locomotion directions with diagonal hyst
     leftSpeed: 0.07,
     dtSeconds: QUEST_BODY_CLIP_SWITCH_DWELL_S / 2,
   });
-  assert.equal(state.clip, 'WalkForward');
+  assert.equal(state.clip, 'WalkForwardLeft');
   state = stepQuestFirstPersonBodyClip(state, {
     active: true,
     running: true,
@@ -432,15 +483,15 @@ test('stepQuestFirstPersonBodyClip maps locomotion directions with diagonal hyst
   });
   assert.equal(state.clip, 'StrafeLeft');
 
-  // Reversing to StrafeRight right after the brief zero-crossing transitions cleanly after switch dwell.
+  // Reversing to WalkBackwardRight right after brief zero-crossing transitions cleanly after switch dwell.
   state = stepQuestFirstPersonBodyClip(state, {
     active: true,
     running: true,
-    forwardSpeed: 0,
-    leftSpeed: -0.07,
+    forwardSpeed: -0.055,
+    leftSpeed: -0.055,
     dtSeconds: QUEST_BODY_CLIP_SWITCH_DWELL_S,
   });
-  assert.equal(state.clip, 'StrafeRight');
+  assert.equal(state.clip, 'WalkBackwardRight');
 
   // Sustained release below stop threshold settles to IdleAggro once stop dwell elapses.
   state = stepQuestFirstPersonBodyClip(state, {
@@ -452,7 +503,7 @@ test('stepQuestFirstPersonBodyClip maps locomotion directions with diagonal hyst
   });
   assert.equal(state.clip, 'IdleAggro');
 
-  // Remaining two clips.
+  // Remaining cardinal clips.
   const back = stepQuestFirstPersonBodyClip(createQuestFirstPersonBodyTrackerState(), {
     active: true,
     running: true,
@@ -491,7 +542,7 @@ test('stepQuestFirstPersonBodyClip maps locomotion directions with diagonal hyst
   assert.equal(stoppedByPause.clip, 'IdleAggro');
 });
 
-test('QuestArenaSession drives bodyClip independently of head yaw and stops on release, boundary block, focus loss, recenter, and dispose', (t) => {
+test('QuestArenaSession drives diagonal translation and all 8 bodyClip directions under head yaw while stopping on block/release/focus loss', (t) => {
   const { clock, advanceBy, pendingCount, clearAll } = makeHarnessClock();
   const mocks = makeQuestHeadSource(0);
   const session = createQuestArenaSession(clock, mocks.headSource);
@@ -520,33 +571,91 @@ test('QuestArenaSession drives bodyClip independently of head yaw and stops on r
 
   const startBlueYaw = session.getLiveTransforms().blue.yaw;
 
-  // Walking backward first gives ring room to test forward/left/right cleanly.
+  // Walking backward first gives open ring room behind and to the sides for diagonal tests.
   pushStick(0, -1);
   advanceBy(16);
   session.stepExternalFrame(0.016);
   assert.equal(session.getSnapshot().bodyClip, 'WalkBackward');
   assert.equal(session.getLiveTransforms().blue.yaw, startBlueYaw);
 
-  // Pushing stick forward with neutral head yaw walks forward without rotating body yaw.
-  mocks.setHeadYaw(0);
+  // Move further back so forward-diagonal strides never clip separation before testing all 4 diagonals.
+  for (let i = 0; i < 12; i++) {
+    advanceBy(50);
+    session.stepExternalFrame(0.05);
+  }
+  pushStick(0, 0);
+  for (let i = 0; i < 4; i++) {
+    advanceBy(16);
+    session.stepExternalFrame(0.016);
+  }
+  assert.equal(session.getSnapshot().bodyClip, 'IdleAggro');
+
+  // Verify all 4 diagonal thumbstick inputs move diagonally at normalized speed (<= 0.08 sim/s) and pick the matching diagonal clip.
+  const blueYawRad = (startBlueYaw * Math.PI) / 180;
+  const fwdVec = [Math.sin(blueYawRad), Math.cos(blueYawRad)];
+  const leftVec = [fwdVec[1], -fwdVec[0]];
+  const diagCases = [
+    { stick: [-0.707, 0.707], clip: 'WalkForwardLeft', signF: 1, signL: 1 },
+    { stick: [0.707, 0.707], clip: 'WalkForwardRight', signF: 1, signL: -1 },
+    { stick: [-0.707, -0.707], clip: 'WalkBackwardLeft', signF: -1, signL: 1 },
+    { stick: [0.707, -0.707], clip: 'WalkBackwardRight', signF: -1, signL: -1 },
+  ];
+  for (const dc of diagCases) {
+    mocks.setHeadYaw(0);
+    const before = session.getLiveTransforms().blue;
+    pushStick(dc.stick[0], dc.stick[1]);
+    for (let i = 0; i < 5; i++) {
+      advanceBy(16);
+      session.stepExternalFrame(0.016);
+    }
+    const after = session.getLiveTransforms().blue;
+    const dx = after.x - before.x;
+    const dz = after.z - before.z;
+    const dist = Math.hypot(dx, dz);
+    const elapsed = 5 * 0.016;
+    assert.ok(dist > 0.005 && dist / elapsed <= 0.08 + 1e-6, `${dc.clip} speed=${dist / elapsed}`);
+    const df = dx * fwdVec[0] + dz * fwdVec[1];
+    const dl = dx * leftVec[0] + dz * leftVec[1];
+    assert.ok(df * dc.signF > 0.003 && dl * dc.signL > 0.003, `${dc.clip} df=${df} dl=${dl}`);
+    assert.ok(
+      Math.abs(Math.abs(df) - Math.abs(dl)) < 1e-3,
+      `${dc.clip} unequal diagonal axes df=${df} dl=${dl}`
+    );
+    assert.equal(session.getSnapshot().bodyClip, dc.clip);
+    assert.equal(after.yaw, startBlueYaw);
+
+    pushStick(0, 0);
+    for (let i = 0; i < 4; i++) {
+      advanceBy(16);
+      session.stepExternalFrame(0.016);
+    }
+    assert.equal(session.getSnapshot().bodyClip, 'IdleAggro');
+  }
+
+  // Head-yaw steering while pushing stick forward (+Y) steers through cardinal and diagonal clips without rotating body yaw.
   pushStick(0, 1);
+  mocks.setHeadYaw(45);
   for (let i = 0; i < 6; i++) {
     advanceBy(16);
     session.stepExternalFrame(0.016);
   }
-  assert.equal(session.getSnapshot().bodyClip, 'WalkForward');
+  assert.equal(session.getSnapshot().bodyClip, 'WalkForwardLeft');
   assert.equal(session.getLiveTransforms().blue.yaw, startBlueYaw);
 
-  // Turning head +90 deg while pushing stick forward strafes Left in body frame while preserving body yaw.
   mocks.setHeadYaw(90);
   for (let i = 0; i < 6; i++) {
     advanceBy(16);
     session.stepExternalFrame(0.016);
   }
   assert.equal(session.getSnapshot().bodyClip, 'StrafeLeft');
-  assert.equal(session.getLiveTransforms().blue.yaw, startBlueYaw);
 
-  // Turning head -90 deg while pushing stick forward strafes Right.
+  mocks.setHeadYaw(-45);
+  for (let i = 0; i < 6; i++) {
+    advanceBy(16);
+    session.stepExternalFrame(0.016);
+  }
+  assert.equal(session.getSnapshot().bodyClip, 'WalkForwardRight');
+
   mocks.setHeadYaw(-90);
   for (let i = 0; i < 6; i++) {
     advanceBy(16);
@@ -567,26 +676,24 @@ test('QuestArenaSession drives bodyClip independently of head yaw and stops on r
   }
   assert.equal(session.getSnapshot().bodyClip, 'WalkForward');
 
-  // Releasing stick settles cleanly to IdleAggro after stop dwell.
-  pushStick(0, 0);
-  for (let i = 0; i < 4; i++) {
-    advanceBy(16);
-    session.stepExternalFrame(0.016);
-  }
-  assert.equal(session.getSnapshot().bodyClip, 'IdleAggro');
-
-  // Pushing forward until blocked by the opponent stops walking in place and settles to IdleAggro.
-  mocks.setHeadYaw(0);
-  pushStick(0, 1);
+  // Pushing forward until blocked at minimum separation stops walking in place and settles to IdleAggro,
+  // and pushing forward-left while pressed against the opponent slides tangentially left as StrafeLeft.
   for (let i = 0; i < 60; i++) {
     advanceBy(50);
     session.stepExternalFrame(0.05);
   }
   assert.equal(session.getSnapshot().bodyClip, 'IdleAggro');
 
+  pushStick(-0.707, 0.707);
+  for (let i = 0; i < 6; i++) {
+    advanceBy(16);
+    session.stepExternalFrame(0.016);
+  }
+  assert.equal(session.getSnapshot().bodyClip, 'StrafeLeft');
+
   // Steer backward into open space, then verify focus loss, menu focus, recenter, and app pause stop immediately.
   pushStick(0, -1);
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 6; i++) {
     advanceBy(16);
     session.stepExternalFrame(0.016);
   }
@@ -621,7 +728,7 @@ test('QuestArenaSession drives bodyClip independently of head yaw and stops on r
   assert.equal(pendingCount(), 0);
 });
 
-test('extracted quest-blue-body.glb has valid 20-joint skin, 5 locomotion clips, locked shoulders, safe head height, and untouched original assets', () => {
+test('extracted quest-blue-body.glb has valid 20-joint skin, 9 locomotion clips (including 4 diagonals), locked shoulders, safe head height, and untouched original assets', () => {
   const { json, bin } = parseGlb(path.join(repoRoot, 'assets/arena/quest/quest-blue-body.glb'));
   assert.equal(json.skins.length, 1);
   const skin = json.skins[0];
@@ -793,6 +900,7 @@ test('extracted quest-blue-body.glb has valid 20-joint skin, 5 locomotion clips,
     )
   );
 
+  const clipStrideExtents = new Map();
   for (const anim of json.animations) {
     let maxT = 0;
     const sampleTimes = new Set();
@@ -803,8 +911,18 @@ test('extracted quest-blue-body.glb has valid 20-joint skin, 5 locomotion clips,
     }
     for (const alpha of [0, 0.25, 0.5, 0.75, 1]) sampleTimes.add(maxT * alpha);
 
+    let lFront = null;
+    let lBack = null;
+    let rFront = null;
+    let rBack = null;
     for (const t of sampleTimes) {
       const worlds = computeWorlds(anim, t);
+      const fl = worlds[footLNode];
+      const fr = worlds[footRNode];
+      if (!lFront || fl[14] > lFront[2]) lFront = [fl[12], fl[13], fl[14]];
+      if (!lBack || fl[14] < lBack[2]) lBack = [fl[12], fl[13], fl[14]];
+      if (!rFront || fr[14] > rFront[2]) rFront = [fr[12], fr[13], fr[14]];
+      if (!rBack || fr[14] < rBack[2]) rBack = [fr[12], fr[13], fr[14]];
       const l = worlds[upperLNode];
       const r = worlds[upperRNode];
       assert.ok(
@@ -870,7 +988,25 @@ test('extracted quest-blue-body.glb has valid 20-joint skin, 5 locomotion clips,
       const oz = Math.max(0, Math.min(lBox[5], rBox[5]) - Math.max(lBox[2], rBox[2]));
       maxLegOverlapVol = Math.max(maxLegOverlapVol, ox * oy * oz);
     }
+    clipStrideExtents.set(anim.name, {
+      lDeltaX: lFront[0] - lBack[0],
+      lDeltaZ: lFront[2] - lBack[2],
+      rDeltaX: rFront[0] - rBack[0],
+      rDeltaZ: rFront[2] - rBack[2],
+    });
   }
+
+  // Verify each diagonal clip produces a genuine diagonal foot-stride vector distinct from cardinal walks.
+  const wf = clipStrideExtents.get('WalkForward');
+  assert.ok(Math.abs(wf.lDeltaX) < 0.02 && wf.lDeltaZ > 0.35);
+  const wfl = clipStrideExtents.get('WalkForwardLeft');
+  assert.ok(wfl.lDeltaX > 0.08 && wfl.rDeltaX > 0.08 && wfl.lDeltaZ > 0.35);
+  const wfr = clipStrideExtents.get('WalkForwardRight');
+  assert.ok(wfr.lDeltaX < -0.08 && wfr.rDeltaX < -0.08 && wfr.lDeltaZ > 0.35);
+  const wbl = clipStrideExtents.get('WalkBackwardLeft');
+  assert.ok(-wbl.lDeltaX > 0.07 && -wbl.rDeltaX > 0.07 && wbl.lDeltaZ > 0.35);
+  const wbr = clipStrideExtents.get('WalkBackwardRight');
+  assert.ok(-wbr.lDeltaX < -0.07 && -wbr.rDeltaX < -0.06 && wbr.lDeltaZ > 0.35);
 
   assert.ok(recomputedMaxY < 1.02, `recomputed maxY=${recomputedMaxY}`);
   assert.ok(
@@ -1274,7 +1410,7 @@ test('QuestArenaScene body animation effect handles cancelled-rAF pause and sub-
     interruptible: true,
   });
 
-  // 4. Settled clip switches while already running & interruptible switch immediately with interruptible: true.
+  // 4. Settled clip switches while already running & interruptible switch immediately with interruptible: true (including diagonals).
   bodyWrites.length = 0;
   view = { ...view, bodyClip: 'WalkForward' };
   renderScene();
@@ -1282,11 +1418,17 @@ test('QuestArenaScene body animation effect handles cancelled-rAF pause and sub-
   assert.deepEqual(snapshotWrites(bodyWrites), [
     { name: 'WalkForward', loop: true, run: true, interruptible: true },
   ]);
+  view = { ...view, bodyClip: 'WalkForwardLeft' };
+  renderScene();
   view = { ...view, bodyClip: 'StrafeLeft' };
+  renderScene();
+  view = { ...view, bodyClip: 'WalkBackwardRight' };
   renderScene();
   assert.deepEqual(snapshotWrites(bodyWrites), [
     { name: 'WalkForward', loop: true, run: true, interruptible: true },
+    { name: 'WalkForwardLeft', loop: true, run: true, interruptible: true },
     { name: 'StrafeLeft', loop: true, run: true, interruptible: true },
+    { name: 'WalkBackwardRight', loop: true, run: true, interruptible: true },
   ]);
 
   // 5. Remounted body model (new lease) starts fresh and runs Step 1 + Step 2.

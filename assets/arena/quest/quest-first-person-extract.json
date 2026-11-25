@@ -139,8 +139,8 @@
   },
   "body": {
     "file": "quest-blue-body.glb",
-    "bytes": 1222820,
-    "sha256": "4aeb1b6738d52a2ed898c192ffee4a7c74a62fe215ac335d202dd3b4e9ea759c",
+    "bytes": 1413456,
+    "sha256": "c2ccd83f2de46a145785ea676aba5411068b6f808ee5070dd3681305987af358",
     "triangles": 13714,
     "bounds": {
       "min": [-0.175260882, -0.001069596, 0.06239604],
@@ -173,6 +173,26 @@
         "name": "StrafeRight",
         "durationSeconds": 0.8,
         "frames": 25
+      },
+      {
+        "name": "WalkForwardLeft",
+        "durationSeconds": 1.466666698,
+        "frames": 45
+      },
+      {
+        "name": "WalkForwardRight",
+        "durationSeconds": 1.466666698,
+        "frames": 45
+      },
+      {
+        "name": "WalkBackwardLeft",
+        "durationSeconds": 1.299999952,
+        "frames": 40
+      },
+      {
+        "name": "WalkBackwardRight",
+        "durationSeconds": 1.299999952,
+        "frames": 40
       }
     ],
     "maxShoulderDriftModel": 0,

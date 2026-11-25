@@ -26,7 +26,23 @@ const BODY_FORWARD_SHIFT_MODEL = 0.16;
 const TEXTURE_EDGE = 256;
 const ARM_TEXTURE_EDGE = 128;
 
-const BODY_CLIPS = ['IdleAggro', 'WalkForward', 'WalkBackward', 'StrafeLeft', 'StrafeRight'];
+const BODY_CLIPS = [
+  'IdleAggro',
+  'WalkForward',
+  'WalkBackward',
+  'StrafeLeft',
+  'StrafeRight',
+  'WalkForwardLeft',
+  'WalkForwardRight',
+  'WalkBackwardLeft',
+  'WalkBackwardRight',
+];
+const DIAGONAL_WALK_CLIPS = {
+  WalkForwardLeft: { baseClip: 'WalkForward', dirX: 1, dirZ: 1 },
+  WalkForwardRight: { baseClip: 'WalkForward', dirX: -1, dirZ: 1 },
+  WalkBackwardLeft: { baseClip: 'WalkBackward', dirX: 1, dirZ: -1 },
+  WalkBackwardRight: { baseClip: 'WalkBackward', dirX: -1, dirZ: -1 },
+};
 const BODY_JOINT_NAMES = [
   'SK_ZMike',
   'root',
@@ -1769,7 +1785,9 @@ function buildAnimatedBodySkin(blue, bodyParts) {
   const animations = BODY_CLIPS.map((clipName) => {
     if (clipName === 'StrafeLeft') return buildProceduralStrafeClip(1);
     if (clipName === 'StrafeRight') return buildProceduralStrafeClip(-1);
-    const { times, byNode } = readClipChannelMap(clipName);
+    const diagonalSpec = DIAGONAL_WALK_CLIPS[clipName] || null;
+    const sourceClipName = diagonalSpec ? diagonalSpec.baseClip : clipName;
+    const { times, byNode } = readClipChannelMap(sourceClipName);
     const frameCount = times.length;
     const tracks = BODY_JOINT_NAMES.map((_, idx) => ({
       node: idx,
@@ -1801,7 +1819,7 @@ function buildAnimatedBodySkin(blue, bodyParts) {
       frameLocal[rootIdx] = srcTrs(rootIdx);
       frameWorld[rootIdx] = composeTrs(frameWorld[0], frameLocal[rootIdx]);
 
-      // 2: pelvis (animated Y/X with bounded Z lean and damped upright rotation)
+      // 2: pelvis (animated Y/X with bounded Z lean and damped upright rotation; diagonals add subtle pelvis sway + yaw toward travel axis)
       const srcPelvisLocal = srcTrs(pelvisIdx);
       const srcPelvisWorld = composeTrs(frameWorld[rootIdx], srcPelvisLocal);
       const restPelvisWorld = restWorlds[pelvisIdx];
@@ -1809,9 +1827,16 @@ function buildAnimatedBodySkin(blue, bodyParts) {
         -0.025,
         Math.min(0.04, srcPelvisWorld.t[2] - restPelvisWorld.t[2])
       );
+      let pelvisRot = quatNorm(slerpQuat(restPelvisWorld.r, srcPelvisWorld.r, 0.4));
+      let pelvisX = srcPelvisWorld.t[0];
+      if (diagonalSpec) {
+        const pelvisYawDeg = diagonalSpec.dirX * diagonalSpec.dirZ * 22;
+        pelvisRot = quatNorm(quatMul(quatAxisAngle([0, 1, 0], pelvisYawDeg), pelvisRot));
+        pelvisX += diagonalSpec.dirX * 0.024;
+      }
       const pelvisWorld = {
-        t: [srcPelvisWorld.t[0], srcPelvisWorld.t[1], restPelvisWorld.t[2] + clampedDz],
-        r: quatNorm(slerpQuat(restPelvisWorld.r, srcPelvisWorld.r, 0.4)),
+        t: [pelvisX, srcPelvisWorld.t[1], restPelvisWorld.t[2] + clampedDz],
+        r: pelvisRot,
       };
       frameWorld[pelvisIdx] = pelvisWorld;
       frameLocal[pelvisIdx] = worldToLocalTrs(frameWorld[rootIdx], pelvisWorld);
@@ -1836,6 +1861,38 @@ function buildAnimatedBodySkin(blue, bodyParts) {
       };
       bridgeSpine();
 
+      let legShiftFactor = null;
+      if (diagonalSpec) {
+        const computeSrcFootZ = (thighIdx, calfIdx, footIdx) => {
+          const tw = composeTrs(srcPelvisWorld, srcTrs(thighIdx));
+          const cw = composeTrs(tw, srcTrs(calfIdx));
+          const fw = composeTrs(cw, srcTrs(footIdx));
+          return fw.t[2];
+        };
+        const zMid = 0.15;
+        const halfSpanZ = 0.21;
+        const sL = Math.max(
+          -1,
+          Math.min(1, (computeSrcFootZ(thighLIdx, calfLIdx, footLIdx) - zMid) / halfSpanZ)
+        );
+        const sR = Math.max(
+          -1,
+          Math.min(1, (computeSrcFootZ(thighRIdx, calfRIdx, footRIdx) - zMid) / halfSpanZ)
+        );
+        const coupling = diagonalSpec.dirX * diagonalSpec.dirZ;
+        legShiftFactor = {
+          left: coupling * sL,
+          right: coupling * sR,
+        };
+      }
+
+      const abductDegForJoint = (idx) => {
+        if (!legShiftFactor) return 0;
+        if (idx === thighLIdx || idx === footLIdx) return 13 + 10.5 * legShiftFactor.left;
+        if (idx === thighRIdx || idx === footRIdx) return -13 + 10.5 * legShiftFactor.right;
+        return 0;
+      };
+
       // Remaining joints: upper-body/shoulders stay at rest local; thighs compensate pelvis damping so legs keep source world orientation without hip detachment.
       for (let i = 0; i < jointNodes.length; i += 1) {
         if (frameLocal[i]) continue;
@@ -1848,9 +1905,28 @@ function buildAnimatedBodySkin(blue, bodyParts) {
         } else if (thighJoints.has(i)) {
           const srcThighLocal = srcTrs(i);
           const srcThighWorld = composeTrs(srcPelvisWorld, srcThighLocal);
+          const abductDeg = abductDegForJoint(i);
+          const thighWorldRot =
+            abductDeg !== 0
+              ? quatNorm(quatMul(quatAxisAngle([0, 0, 1], abductDeg), srcThighWorld.r))
+              : srcThighWorld.r;
           frameLocal[i] = {
             t: srcThighLocal.t,
-            r: worldToLocalTrs(pelvisWorld, srcThighWorld).r,
+            r: worldToLocalTrs(pelvisWorld, { t: [0, 0, 0], r: thighWorldRot }).r,
+            s: [1, 1, 1],
+          };
+        } else if (diagonalSpec && (i === footLIdx || i === footRIdx)) {
+          const srcFootLocal = srcTrs(i);
+          const parentWorld = frameWorld[parentOfBodyJoint[i]];
+          const footWorldRot = quatNorm(
+            quatMul(
+              quatAxisAngle([0, 0, 1], -0.65 * abductDegForJoint(i)),
+              composeTrs(parentWorld, srcFootLocal).r
+            )
+          );
+          frameLocal[i] = {
+            t: srcFootLocal.t,
+            r: worldToLocalTrs(parentWorld, { t: [0, 0, 0], r: footWorldRot }).r,
             s: [1, 1, 1],
           };
         } else {
