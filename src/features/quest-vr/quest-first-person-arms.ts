@@ -321,6 +321,7 @@ function solveArm(
   const zScale = distance > bendAt ? Math.min(QUEST_ARM_STRETCH_CAP, distance / bendAt) : 1;
   const upperEff = upperLen * zScale;
   const forearmEff = forearmLen * zScale;
+  if (distance < Math.abs(upperEff - forearmEff) + 1e-5) return null;
   const direction = normalize(delta);
   if (!direction) return null;
   const side = hand === 'left' ? 1 : -1;

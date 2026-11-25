@@ -369,6 +369,33 @@ test('connected cosmetic arms solve elbow bends upright and hide beyond stretch 
   assert.deepEqual(far.left.position, [-2, 1, -2]);
   assert.equal(far.left.upper, null);
   assert.equal(far.left.forearm, null);
+
+  // Inside minimum unequal-bone triangle reach (|L1 - L2| ~= 3.67 cm): hide arm segments, keep fist.
+  const eye = [0, 1.1271, 0.2028];
+  const leftShoulderModel = [0.127665097, 0.83775128, 0.135874959];
+  const yawRad = (body.calibration.yaw * Math.PI) / 180;
+  const rx = (leftShoulderModel[0] - eye[0]) * QUEST_FIRST_PERSON_ARM_SCALE;
+  const rz = (leftShoulderModel[2] - eye[2]) * QUEST_FIRST_PERSON_ARM_SCALE;
+  const leftShoulderWorld = [
+    body.calibration.origin[0] + rx * Math.cos(yawRad) + rz * Math.sin(yawRad),
+    body.calibration.origin[1] + (leftShoulderModel[1] - eye[1]) * QUEST_FIRST_PERSON_ARM_SCALE,
+    body.calibration.origin[2] - rx * Math.sin(yawRad) + rz * Math.cos(yawRad),
+  ];
+  const nearShoulderWrist = [
+    leftShoulderWorld[0],
+    leftShoulderWorld[1],
+    leftShoulderWorld[2] - 0.01,
+  ];
+  const near = placeQuestFirstPersonArms({
+    sample: sample({ left: hand('left', nearShoulderWrist) }),
+    headRefEpoch: 4,
+    body,
+  });
+  assert.equal(near.left.visible, true);
+  assert.equal(near.left.reason, null);
+  assert.deepEqual(near.left.position, nearShoulderWrist);
+  assert.equal(near.left.upper, null);
+  assert.equal(near.left.forearm, null);
 });
 
 test('the Quest scene mounts the headless body without hiding the original load', () => {

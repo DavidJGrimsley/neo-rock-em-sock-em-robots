@@ -963,6 +963,39 @@ test('QuestArenaScene wires onCameraTransformUpdate, solo calibration, posture, 
   panSession.back();
   stopOnFrame();
   assert.equal(lastNotifiedOpacity, 0, 'Back mid-intro notifies frame listeners with opacity 0');
+
+  // Pausing (setAppActive(false)) during the opaque intro clears the cover so Ready to resume is visible.
+  panSession.solo();
+  const s3 = panSession.getSnapshot();
+  panSession.assetLoaded(s3.lease, s3.token, s3.placementVersion, 'arena');
+  panSession.assetLoaded(s3.lease, s3.token, s3.placementVersion, 'blue');
+  panSession.assetLoaded(s3.lease, s3.token, s3.placementVersion, 'red');
+  panSession.ready();
+  for (let i = 0; i < 22; i += 1) panSession.stepExternalFrame(0.05); // 1.10s -> eyes, opacity 1
+  assert.equal(panSession.getSnapshot().presentation, 'eyes');
+  assert.equal(panSession.getSnapshot().introActive, true);
+  assert.equal(panSession.getIntroOpacity(), 1);
+  let pauseNotifiedOpacity = -1;
+  const stopPauseFrame = panSession.onFrame(() => {
+    pauseNotifiedOpacity = panSession.getIntroOpacity();
+  });
+  panSession.setAppActive(false);
+  stopPauseFrame();
+  assert.equal(pauseNotifiedOpacity, 0, 'setAppActive(false) notifies cover with opacity 0');
+  assert.equal(panSession.getSnapshot().introActive, false);
+  assert.equal(panSession.getIntroOpacity(), 0);
+  assert.equal(panSession.getSnapshot().presentation, 'eyes');
+  assert.equal(panSession.getRigBlend(), 1);
+  panSession.setAppActive(true);
+  assert.equal(panSession.getSnapshot().stage, 'paused');
+  assert.equal(panSession.getSnapshot().introActive, false);
+  assert.equal(panSession.getIntroOpacity(), 0);
+  panSession.stepExternalFrame(0.05);
+  assert.equal(panSession.getSnapshot().introActive, false);
+  assert.equal(panSession.getIntroOpacity(), 0);
+  assert.equal(panSession.ready().reason, 'resumed');
+  assert.equal(panSession.getSnapshot().presentation, 'eyes');
+  assert.equal(panSession.getSnapshot().introActive, false);
   panSession.dispose();
 
   assert.ok(harness.builtMenus.some((entry) => entry.options?.posture === 'seated'));

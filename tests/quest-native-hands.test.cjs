@@ -228,6 +228,9 @@ int main(){
       close(add(wrist,rotate(a.forearm,{0,0,.188133323f*kScale*a.stretch})),a.elbow);
     }
     assert(!arm({0,1,0},{0,1,-3},f.rotation,{0,0,0,1},side).visible);
+    assert(!arm({0,1,0},{0,1,0.01f},f.rotation,{0,0,0,1},side).visible);
+    assert(!arm({0,1,0},{0,1,0.036f},f.rotation,{0,0,0,1},side).visible);
+    assert(arm({0,1,0},{0,1,0.05f},f.rotation,{0,0,0,1},side).visible);
     assert(fist(side,{0,1,-3},{0,0,0,1}).visible);
   }
   assert(fresh(true,true,true,10,10,100,50000100));

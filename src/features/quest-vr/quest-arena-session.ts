@@ -496,7 +496,7 @@ export function createQuestArenaSession(
   }
 
   function beginViewpointIntro() {
-    if (presentation !== 'side' || intro) return;
+    if (presentation !== 'side' || intro || !appActive) return;
     intro = { elapsed: 0, duration: 1.55, blend: 0, opacity: 0 };
   }
 
@@ -593,6 +593,10 @@ export function createQuestArenaSession(
     const snap = match.getSnapshot();
     if (!isActiveMatchStage(snap.stage) || !appActive) {
       stopLoop();
+      if (intro) {
+        intro = null;
+        notifyFrame(0);
+      }
       publish();
     }
   }
@@ -811,9 +815,16 @@ export function createQuestArenaSession(
     setAppActive(active: boolean) {
       if (appActive === active) return;
       appActive = active;
-      if (!active) neutralizeDash();
+      const hadIntro = intro !== null;
+      if (!active) {
+        intro = null;
+        neutralizeDash();
+      }
       recomputeLocomotion();
-      if (!match) return;
+      if (!match) {
+        if (!active && hadIntro) notifyFrame(0);
+        return;
+      }
       match.setAppActive(active);
       if (!active) {
         stopLoop();

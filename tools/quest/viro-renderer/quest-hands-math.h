@@ -80,6 +80,7 @@ inline Arm arm(V shoulder,V wrist,Q fistRotation,Q bodyRotation,int side) {
     if (!finite(shoulder)||!finite(wrist)||d<1e-4f||d>2.05f*reach) return {{0,0,0},{0,0,0,1},{0,0,0,1},1,false};
     const float stretch=d>0.94f*reach?std::fmin(2.05f,d/(0.94f*reach)):1;
     const float a=l1*stretch,b=l2*stretch;
+    if (d<std::fabs(a-b)+1e-5f) return {{0,0,0},{0,0,0,1},{0,0,0,1},1,false};
     const V dir=unit(delta),pole=rotate(bodyRotation,unit({side==0?0.45f:-0.45f,-1,-0.25f}));
     V bend=sub(pole,scale(dir,dot(pole,dir)));
     if (length(bend)<1e-5f) bend=sub(V{0,-1,0},scale(dir,-dir.y));
