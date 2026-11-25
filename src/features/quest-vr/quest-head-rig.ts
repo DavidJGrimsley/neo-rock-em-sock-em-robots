@@ -1,4 +1,5 @@
 import { ARENA_LAYOUT, type FighterTransform } from '../arena-fighter/arena-controller.ts';
+import { viroEulerDegrees, type Quat } from './quest-input.ts';
 
 export type Vec3 = readonly [number, number, number];
 export type Posture = 'standing' | 'seated';
@@ -176,6 +177,150 @@ export function questRigTransform(
  * world(p) = position + R_y(rotationY) * (scale * p).
  * Keeping translation and rotation on one ViroNode prevents split-node native bridge tearing.
  */
+/** Hypothesis, wearer-check: side camera sits this far from the pair, in OpenXR metres. */
+export const QUEST_SIDE_VIEW_DISTANCE_M = 3.25;
+
+/**
+ * Ring anchor whose eyes sit beside both fighters. Calibration yaw looks at the
+ * pair along ring -Z. The headset orientation is not changed.
+ */
+export function questSideViewAnchor(): RigAnchor {
+  const distanceRing = QUEST_SIDE_VIEW_DISTANCE_M / QUEST_WORLD_SCALE;
+  const yaw = 180;
+  const mz = ROBOT_EYE_MODEL[2] * ARENA_LAYOUT.fighterScale;
+  // yaw 180 puts the eye at anchor.z - mz. The pair midpoint is ring z = 0.
+  return { x: 0, z: distanceRing + mz, yaw };
+}
+
+export function lerpAngle(from: number, to: number, t: number): number {
+  return wrap180(from + wrap180(to - from) * t);
+}
+
+/** blend 0 is the side view. blend 1 is the eye rig. Scale stays 16. One smoothstep. */
+export function questIntroRig(
+  cal: Calibration,
+  eyeAnchor: RigAnchor,
+  blend: number
+): ComposedRigTransform {
+  const eye = questComposedRigTransform(cal, eyeAnchor);
+  const side = questComposedRigTransform(cal, questSideViewAnchor());
+  const t = Math.min(1, Math.max(0, blend));
+  if (t <= 0) return side;
+  if (t >= 1) return eye;
+  const smooth = t * t * (3 - 2 * t);
+  return {
+    position: [
+      side.position[0] + (eye.position[0] - side.position[0]) * smooth,
+      side.position[1] + (eye.position[1] - side.position[1]) * smooth,
+      side.position[2] + (eye.position[2] - side.position[2]) * smooth,
+    ],
+    rotationY: lerpAngle(side.rotationY, eye.rotationY, smooth),
+    scale: eye.scale,
+  };
+}
+
+/** Hypothesis: the fade quad sits this far along the live head forward, in metres. */
+export const QUEST_INTRO_COVER_DISTANCE_M = 0.35;
+
+function coverNormalize(v: Vec3): Vec3 | null {
+  const n = Math.hypot(v[0], v[1], v[2]);
+  if (!Number.isFinite(n) || n < 1e-8) return null;
+  return [v[0] / n, v[1] / n, v[2] / n];
+}
+
+function coverCross(a: Vec3, b: Vec3): Vec3 {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+
+function coverDot(a: Vec3, b: Vec3): number {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+/**
+ * Pose for a scene quad that fills the current view. The headset orientation
+ * is not changed. A ViroQuad faces local +Z, so +Z points back at the head.
+ */
+export function questHeadCoverPose(
+  sample: HeadSample,
+  distanceM = QUEST_INTRO_COVER_DISTANCE_M
+): { position: Vec3; rotation: Vec3 } | null {
+  const forward = coverNormalize(sample.forward);
+  const up = coverNormalize(sample.up);
+  if (!forward || !up || !Number.isFinite(distanceM) || distanceM <= 0) return null;
+  const zAxis: Vec3 = [-forward[0], -forward[1], -forward[2]];
+  let y = [
+    up[0] - zAxis[0] * coverDot(up, zAxis),
+    up[1] - zAxis[1] * coverDot(up, zAxis),
+    up[2] - zAxis[2] * coverDot(up, zAxis),
+  ] as Vec3;
+  if (Math.hypot(y[0], y[1], y[2]) < 1e-6) {
+    const fallback: Vec3 = Math.abs(zAxis[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    y = [
+      fallback[0] - zAxis[0] * coverDot(fallback, zAxis),
+      fallback[1] - zAxis[1] * coverDot(fallback, zAxis),
+      fallback[2] - zAxis[2] * coverDot(fallback, zAxis),
+    ];
+  }
+  const yAxis = coverNormalize(y);
+  if (!yAxis) return null;
+  const xAxis = coverNormalize(coverCross(yAxis, zAxis));
+  if (!xAxis) return null;
+  const rebuiltY = coverNormalize(coverCross(zAxis, xAxis));
+  if (!rebuiltY) return null;
+  const m = [
+    xAxis[0],
+    xAxis[1],
+    xAxis[2],
+    rebuiltY[0],
+    rebuiltY[1],
+    rebuiltY[2],
+    zAxis[0],
+    zAxis[1],
+    zAxis[2],
+  ];
+  const trace = m[0] + m[4] + m[8];
+  let x: number;
+  let yy: number;
+  let z: number;
+  let w: number;
+  if (trace > 0) {
+    const s = Math.sqrt(trace + 1) * 2;
+    w = 0.25 * s;
+    x = (m[5] - m[7]) / s;
+    yy = (m[6] - m[2]) / s;
+    z = (m[1] - m[3]) / s;
+  } else if (m[0] > m[4] && m[0] > m[8]) {
+    const s = Math.sqrt(1 + m[0] - m[4] - m[8]) * 2;
+    w = (m[5] - m[7]) / s;
+    x = 0.25 * s;
+    yy = (m[3] + m[1]) / s;
+    z = (m[6] + m[2]) / s;
+  } else if (m[4] > m[8]) {
+    const s = Math.sqrt(1 + m[4] - m[0] - m[8]) * 2;
+    w = (m[6] - m[2]) / s;
+    x = (m[3] + m[1]) / s;
+    yy = 0.25 * s;
+    z = (m[7] + m[5]) / s;
+  } else {
+    const s = Math.sqrt(1 + m[8] - m[0] - m[4]) * 2;
+    w = (m[1] - m[3]) / s;
+    x = (m[6] + m[2]) / s;
+    yy = (m[7] + m[5]) / s;
+    z = 0.25 * s;
+  }
+  const n = Math.hypot(x, yy, z, w);
+  if (!Number.isFinite(n) || n < 1e-8) return null;
+  const rotation = viroEulerDegrees([x / n, yy / n, z / n, w / n] as Quat);
+  return {
+    position: [
+      sample.position[0] + forward[0] * distanceM,
+      sample.position[1] + forward[1] * distanceM,
+      sample.position[2] + forward[2] * distanceM,
+    ],
+    rotation,
+  };
+}
+
 export function questComposedRigTransform(
   cal: Calibration,
   anchor: RigAnchor,

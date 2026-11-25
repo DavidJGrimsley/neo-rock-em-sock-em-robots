@@ -358,6 +358,12 @@ export function createQuestMenuCompositor(
       lastSpec = null;
       present(lastFrame);
     },
+    /** Temporarily hides the layer while keeping snapshot mode intact for reversible re-present. */
+    hide() {
+      if (disposed || owner === null) return;
+      lastSpec = null;
+      release();
+    },
     dispose() {
       if (disposed) return;
       disposed = true;

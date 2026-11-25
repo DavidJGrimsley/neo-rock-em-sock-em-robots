@@ -133,3 +133,15 @@ test('a renderer built without the menu layer patch is rejected at prebuild', ()
     fs.rmSync(project, { recursive: true, force: true });
   }
 });
+
+test('the skeletal crossfade patch blends clip switches smoothly without affecting loop restarts or JNI exports', () => {
+  const lock = JSON.parse(read('tools/quest/viro-renderer/lock.json'));
+  assert.equal(lock.patches[5], '0006-openxr-skeletal-crossfade.patch');
+  const patch = read(`tools/quest/viro-renderer/${lock.patches[5]}`);
+  assert.match(patch, /getActiveClipName/);
+  assert.match(patch, /setActiveClipName/);
+  assert.match(patch, /hasPose/);
+  assert.match(patch, /VROQuaternion::slerp/);
+  assert.match(patch, /isClipSwitch/);
+  assert.doesNotMatch(patch, /Java_|JNIEXPORT/);
+});

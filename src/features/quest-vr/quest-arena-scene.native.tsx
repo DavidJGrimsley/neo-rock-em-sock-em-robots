@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from 'react';
+import {
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type RefObject,
+} from 'react';
 import { Asset } from 'expo-asset';
 import {
   Viro3DObject,
@@ -24,14 +32,23 @@ import { questInputNative, questRigSyncAvailable } from '../../../modules/quest-
 import { questPanelAvailable, questPanelNative } from '../../../modules/quest-panel/src/index.ts';
 import { createQuestArenaSession, type QuestArenaSession } from './quest-arena-session.ts';
 import {
+  placeQuestFirstPersonArms,
+  QUEST_FIRST_PERSON_ARM_SCALE,
+  type QuestArmBody,
+} from './quest-first-person-arms.ts';
+import type { QuestFirstPersonBodyClip } from './quest-first-person-body.ts';
+import {
+  QUEST_INTRO_COVER_DISTANCE_M,
   menuFrame,
-  questComposedRigTransform,
+  questHeadCoverPose,
+  questIntroRig,
   stanceMarkerRingLocal,
   wrap180,
   type Calibration,
   type RigAnchor,
 } from './quest-head-rig.ts';
 import { questHeadTracker } from './quest-head-tracker.ts';
+import type { QuestInputSample } from './quest-input.ts';
 import {
   createSceneQuestInputSource,
   QuestDiagnosticsPanel,
@@ -80,6 +97,24 @@ const sources = {
   red: require('../../../assets/arena/Mike_Player2_RedOrange_Combat_AR.glb'),
 };
 
+const previewSources = {
+  // Quest-only extracts. The phone scene keeps the original Combat GLBs.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  body: require('../../../assets/arena/quest/quest-blue-body.glb'),
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  upperLeft: require('../../../assets/arena/quest/quest-blue-upper-left.glb'),
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  upperRight: require('../../../assets/arena/quest/quest-blue-upper-right.glb'),
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  forearmLeft: require('../../../assets/arena/quest/quest-blue-forearm-left.glb'),
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  forearmRight: require('../../../assets/arena/quest/quest-blue-forearm-right.glb'),
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  handLeft: require('../../../assets/arena/quest/quest-blue-hand-left.glb'),
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  handRight: require('../../../assets/arena/quest/quest-blue-hand-right.glb'),
+};
+
 const menuFontModules = {
   body: require('../../../assets/arena/ui/ArenaNotoSans.ttf') as number,
   button: require('../../../assets/arena/ui/ArenaNotoSansSemibold.ttf') as number,
@@ -109,6 +144,16 @@ const fighterScale: [number, number, number] = Array(3).fill(ARENA_LAYOUT.fighte
   number,
   number,
 ];
+const previewHandScale: [number, number, number] = [
+  QUEST_FIRST_PERSON_ARM_SCALE,
+  QUEST_FIRST_PERSON_ARM_SCALE,
+  QUEST_FIRST_PERSON_ARM_SCALE,
+];
+const unitScale: [number, number, number] = [1, 1, 1];
+const handInitialPosition: Vec3Tuple = [0, 0, 0];
+const introCoverPosition: Vec3Tuple = [0, 0, -QUEST_INTRO_COVER_DISTANCE_M];
+const introCoverMaterials = ['questIntroCover'];
+const introCoverSize = 3;
 const arenaScale: [number, number, number] = [
   ARENA_LAYOUT.arenaScale * ARENA_LAYOUT.arenaHorizontalScale,
   ARENA_LAYOUT.arenaScale,
@@ -120,6 +165,7 @@ const stanceRingThickness = 0.004;
 const stanceRingHalf = (stanceRingSize - stanceRingThickness) / 2;
 const stanceRingLift = 0.0005;
 const idleAnimation = { name: 'IdleAggro', loop: true, run: true, interruptible: true };
+const bodyIdleAnimation = { name: 'IdleAggro', loop: true, run: false, interruptible: true };
 const LOOPING_CLIPS = new Set([
   'Idle',
   'IdleAggro',
@@ -167,6 +213,15 @@ ViroMaterials.createMaterials({
   questMenuFallbackDanger: { diffuseColor: '#d99a9a', lightingModel: 'Constant' },
   questMenuFallbackBack: { diffuseColor: '#1e293b', lightingModel: 'Constant' },
   questMenuFallbackPosture: { diffuseColor: '#334155', lightingModel: 'Constant' },
+  // Black blink in front of the tracked head. It does not write or test depth, or turn the headset.
+  questIntroCover: {
+    diffuseColor: '#000000',
+    lightingModel: 'Constant',
+    blendMode: 'Alpha',
+    cullMode: 'None',
+    readsFromDepthBuffer: false,
+    writesToDepthBuffer: false,
+  },
 });
 
 // The medical viewer's headset text: scale 0.05 with the box in scaled units.
@@ -229,6 +284,7 @@ interface InitialRingPose {
 }
 
 interface SyncedTransformCache {
+  presentation?: 'menu' | 'side' | 'eyes';
   rigOuterNode?: ViroNode | null;
   rigPosition?: Vec3Tuple;
   rigRotationY?: number;
@@ -274,11 +330,35 @@ function pushNodeTransform(
   });
 }
 
+function pushNodeScale(nodeRef: RefObject<ViroNode | null>, scale: Vec3Tuple) {
+  const node = nodeRef.current;
+  if (!node) return;
+  if (typeof ViroGameLoopUtils?.setScale === 'function') {
+    ViroGameLoopUtils.setScale(nodeRef, scale);
+    return;
+  }
+  setNativeNodeProps(node, { scale });
+}
+
 function writeFighterAnimation(
   model: Viro3DObject | null,
   animation: { name: string; loop: boolean; run: boolean; interruptible: boolean }
 ) {
   setNativeNodeProps(model, { animation });
+}
+
+function scheduleAnimationFrame(callback: () => void): unknown {
+  return typeof globalThis.requestAnimationFrame === 'function'
+    ? globalThis.requestAnimationFrame(callback)
+    : setTimeout(callback, 16);
+}
+
+function cancelScheduledAnimationFrame(handle: unknown) {
+  if (typeof globalThis.cancelAnimationFrame === 'function') {
+    globalThis.cancelAnimationFrame(handle as number);
+    return;
+  }
+  clearTimeout(handle as ReturnType<typeof setTimeout>);
 }
 
 interface RingNodeRefs {
@@ -291,6 +371,15 @@ interface RingNodeRefs {
 const QUEST_RIG_MAX_STEP_EXTRAP_M = 0.25;
 const QUEST_RIG_MAX_YAW_STEP_EXTRAP_DEG = 30;
 
+function stanceCenterForPresentation(
+  anchor: RigAnchor,
+  presentation: 'menu' | 'side' | 'eyes'
+): readonly [number, number, number] {
+  return presentation === 'side'
+    ? [anchor.x, ARENA_LAYOUT.floorHeight, anchor.z]
+    : stanceMarkerRingLocal(anchor);
+}
+
 function publishQuestRigState(
   session: QuestArenaSession,
   cache: SyncedTransformCache,
@@ -301,19 +390,20 @@ function publishQuestRigState(
   if (!live) return;
   const cal =
     questHeadTracker.getLiveHeadState?.().calibration ?? questHeadTracker.getSnapshot().calibration;
+  const snap = session.getSnapshot();
   const anchor: RigAnchor = { x: live.blue.x, z: live.blue.z, yaw: live.blue.yaw };
-  const rig = questComposedRigTransform(cal, anchor);
-  const stanceCenter = stanceMarkerRingLocal(anchor);
+  const rig = questIntroRig(cal, anchor, session.getRigBlend());
+  const stanceCenter = stanceCenterForPresentation(anchor, snap.presentation);
   const stancePosition: Vec3Tuple = [
     stanceCenter[0],
     stanceCenter[1] + stanceRingLift,
     stanceCenter[2],
   ];
 
-  const snap = session.getSnapshot();
   const canDifferentiate =
     allowExtrapolation &&
-    snap.stage === 'fighting' &&
+    (snap.stage === 'fighting' || snap.introActive) &&
+    cache.presentation === snap.presentation &&
     dtSeconds > 1e-4 &&
     dtSeconds <= 0.1 &&
     cache.rigPosition !== undefined &&
@@ -368,9 +458,11 @@ function publishQuestRigState(
 
     const continuous =
       Math.hypot(rigDx, rigDy, rigDz) <= QUEST_RIG_MAX_STEP_EXTRAP_M &&
+      Math.hypot(stanceDx, stanceDy, stanceDz) <= QUEST_RIG_MAX_STEP_EXTRAP_M &&
       Math.hypot(redDx, redDy, redDz) <= QUEST_RIG_MAX_STEP_EXTRAP_M &&
       Math.hypot(blueDx, blueDy, blueDz) <= QUEST_RIG_MAX_STEP_EXTRAP_M &&
       Math.abs(rigDyaw) <= QUEST_RIG_MAX_YAW_STEP_EXTRAP_DEG &&
+      Math.abs(stanceDyaw) <= QUEST_RIG_MAX_YAW_STEP_EXTRAP_DEG &&
       Math.abs(redDyaw) <= QUEST_RIG_MAX_YAW_STEP_EXTRAP_DEG &&
       Math.abs(blueDyaw) <= QUEST_RIG_MAX_YAW_STEP_EXTRAP_DEG;
 
@@ -430,6 +522,7 @@ function publishQuestRigState(
     blueYawRate,
   ]);
 
+  cache.presentation = snap.presentation;
   cache.rigPosition = [...rig.position];
   cache.rigRotationY = rig.rotationY;
   cache.stancePosition = stancePosition;
@@ -455,8 +548,8 @@ function syncQuestRingTransforms(
   const cal =
     questHeadTracker.getLiveHeadState?.().calibration ?? questHeadTracker.getSnapshot().calibration;
   const anchor: RigAnchor = { x: live.blue.x, z: live.blue.z, yaw: live.blue.yaw };
-  const rig = questComposedRigTransform(cal, anchor);
-  const stanceCenter = stanceMarkerRingLocal(anchor);
+  const rig = questIntroRig(cal, anchor, session.getRigBlend());
+  const stanceCenter = stanceCenterForPresentation(anchor, session.getSnapshot().presentation);
   const stancePosition: Vec3Tuple = [
     stanceCenter[0],
     stanceCenter[1] + stanceRingLift,
@@ -552,10 +645,12 @@ function QuestFighter({
   session,
   nodeRef,
   modelRef,
+  bodyModelRef,
   viroTag,
   initialPosition,
   initialRotation,
   visible = true,
+  bodyVisible = false,
 }: {
   id: FighterId;
   lease: number;
@@ -564,19 +659,25 @@ function QuestFighter({
   session: QuestArenaSession;
   nodeRef: RefObject<ViroNode | null>;
   modelRef: RefObject<Viro3DObject | null>;
+  bodyModelRef?: RefObject<Viro3DObject | null>;
   viroTag: string;
   initialPosition: Vec3Tuple;
   initialRotation: Vec3Tuple;
   visible?: boolean;
+  bodyVisible?: boolean;
 }) {
   if (token === null || placementVersion === null) return null;
+  // The blue node stays explicitly visible so the headless body can render.
+  // Patch 0004 already moves this tag. The original skinned model stays loaded
+  // and visible false; the derivative does not take its load lease.
+  const nodeVisible = id === 'blue' ? true : visible;
   return (
     <ViroNode
       ref={nodeRef}
       viroTag={viroTag}
       position={initialPosition}
       rotation={initialRotation}
-      visible={visible}>
+      visible={nodeVisible}>
       <Viro3DObject
         ref={modelRef}
         source={sources[id]}
@@ -589,9 +690,315 @@ function QuestFighter({
         onLoadEnd={() => session.assetLoaded(lease, token, placementVersion, id)}
         onError={() => session.assetFailed(lease, token, placementVersion, id)}
       />
+      {id === 'blue' ? (
+        <Viro3DObject
+          ref={bodyModelRef}
+          source={previewSources.body}
+          type="GLB"
+          scale={fighterScale}
+          animation={bodyIdleAnimation}
+          visible={bodyVisible}
+          ignoreEventHandling
+        />
+      ) : null}
     </ViroNode>
   );
 }
+
+function eyeArmBody(session: QuestArenaSession): QuestArmBody | null {
+  const live = session.getLiveTransforms();
+  const calibration = questHeadTracker.getLiveHeadState?.()?.calibration;
+  if (!live || !calibration || !Number.isFinite(live.blue.lift)) return null;
+  return { calibration, lift: live.blue.lift };
+}
+
+const QuestPreviewHands = memo(function QuestPreviewHands({
+  source,
+  session,
+  active,
+}: {
+  source: {
+    onSample: (listener: (sample: QuestInputSample | null) => void) => () => void;
+    getLiveState?: () => { nowNs?: number | null };
+  };
+  session: QuestArenaSession;
+  active: boolean;
+}) {
+  const [nativeFallback, setNativeFallback] = useState(false);
+  // Reset derived recovery state during an inactive render, before effects run.
+  if (!active && nativeFallback) setNativeFallback(false);
+  const leftUpperRef = useRef<ViroNode | null>(null);
+  const rightUpperRef = useRef<ViroNode | null>(null);
+  const leftForearmRef = useRef<ViroNode | null>(null);
+  const rightForearmRef = useRef<ViroNode | null>(null);
+  const leftFistRef = useRef<ViroNode | null>(null);
+  const rightFistRef = useRef<ViroNode | null>(null);
+  useEffect(() => {
+    // Patch 0005 owns all six transforms directly on VROOpenXRRender. Only
+    // lifecycle crosses JNI; no polling, React, Fabric or renderer queue per pose.
+    let nativeHands = false;
+    try {
+      nativeHands = !nativeFallback && questInputNative?.setHandsEnabled?.(active) === true;
+    } catch {
+      /* old renderer */
+    }
+    if (nativeHands) {
+      // One bounded readiness check per activation, not per-pose bridge traffic.
+      // Missing tags/GLB geometry must not silently lock out the visible ref path.
+      const healthTimer =
+        active && questInputNative?.handsVisualNodesReady
+          ? setTimeout(() => {
+              try {
+                if (!questInputNative?.handsVisualNodesReady?.()) {
+                  console.warn(
+                    '[QuestHands] native mesh nodes unavailable; using fresh grip fallback'
+                  );
+                  setNativeFallback(true);
+                }
+              } catch {
+                setNativeFallback(true);
+              }
+            }, 1500)
+          : null;
+      return () => {
+        if (healthTimer !== null) clearTimeout(healthTimer);
+        questInputNative?.setHandsEnabled?.(false);
+        for (const ref of [
+          leftUpperRef,
+          rightUpperRef,
+          leftForearmRef,
+          rightForearmRef,
+          leftFistRef,
+          rightFistRef,
+        ]) {
+          setNativeNodeProps(ref.current, { opacity: 0, visible: true });
+        }
+      };
+    }
+    const nodes = {
+      left: { upper: leftUpperRef, forearm: leftForearmRef, fist: leftFistRef },
+      right: { upper: rightUpperRef, forearm: rightForearmRef, fist: rightFistRef },
+    };
+    const transforms = new Map<string, { position: Vec3Tuple; rotation: Vec3Tuple }>();
+    const placePart = (
+      side: 'left' | 'right',
+      part: 'upper' | 'forearm' | 'fist',
+      position: readonly number[],
+      rotation: readonly number[]
+    ) => {
+      const key = `${side}:${part}`;
+      const previous = transforms.get(key);
+      const pos: Vec3Tuple = [position[0], position[1], position[2]];
+      const rot: Vec3Tuple = [rotation[0], rotation[1], rotation[2]];
+      const positionChanged = !sameVec3(previous?.position, pos);
+      const rotationChanged = !sameVec3(previous?.rotation, rot);
+      if (!positionChanged && !rotationChanged) return;
+      pushNodeTransform(
+        nodes[side][part],
+        positionChanged ? pos : null,
+        rotationChanged ? rot : null
+      );
+      transforms.set(key, { position: pos, rotation: rot });
+    };
+    const vis = {
+      left: { upper: false, forearm: false, fist: false },
+      right: { upper: false, forearm: false, fist: false },
+    };
+    const scaleZ = {
+      left: { upper: Number.NaN, forearm: Number.NaN },
+      right: { upper: Number.NaN, forearm: Number.NaN },
+    };
+    const setPartVisible = (
+      side: 'left' | 'right',
+      part: 'upper' | 'forearm' | 'fist',
+      next: boolean
+    ) => {
+      if (vis[side][part] === next) return;
+      vis[side][part] = next;
+      setNativeNodeProps(nodes[side][part].current, { opacity: next ? 1 : 0, visible: true });
+    };
+    const hideAll = () => {
+      for (const side of ['left', 'right'] as const) {
+        setPartVisible(side, 'upper', false);
+        setPartVisible(side, 'forearm', false);
+        setPartVisible(side, 'fist', false);
+      }
+    };
+    if (!active) {
+      hideAll();
+      return;
+    }
+
+    const scheduleFrame =
+      typeof globalThis.requestAnimationFrame === 'function'
+        ? (cb: () => void) => globalThis.requestAnimationFrame(cb)
+        : (cb: () => void) => setTimeout(cb, 16);
+    const cancelFrame =
+      typeof globalThis.cancelAnimationFrame === 'function'
+        ? (handle: unknown) => globalThis.cancelAnimationFrame(handle as number)
+        : (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>);
+
+    let pendingSample: QuestInputSample | null = null;
+    let hasPending = false;
+    let frameHandle: unknown = null;
+
+    const flush = () => {
+      frameHandle = null;
+      if (!hasPending) return;
+      hasPending = false;
+      const sample = pendingSample;
+      // Recheck age and reference epoch even when no new sequence arrives.
+      const head = questHeadTracker.getLiveHeadState?.();
+      const frame = placeQuestFirstPersonArms({
+        sample,
+        headRefEpoch: head?.refEpoch ?? null,
+        body: eyeArmBody(session),
+        poseSource: 'grip',
+        nowNs: source.getLiveState?.().nowNs,
+      });
+      (['left', 'right'] as const).forEach((side) => {
+        const placement = frame[side];
+        const refs = nodes[side];
+        const showFist = Boolean(placement.visible && placement.position && placement.rotation);
+        if (showFist && placement.position && placement.rotation) {
+          placePart(side, 'fist', placement.position, placement.rotation);
+          setPartVisible(side, 'fist', true);
+        } else {
+          setPartVisible(side, 'fist', false);
+        }
+        for (const part of ['upper', 'forearm'] as const) {
+          const segment = placement[part];
+          if (showFist && segment) {
+            placePart(side, part, segment.position, segment.rotation);
+            // A previous active effect may have left the mounted node stretched.
+            // Always resend the first scale after reactivation, then gate repeats.
+            if (
+              !Number.isFinite(scaleZ[side][part]) ||
+              Math.abs(scaleZ[side][part] - segment.scale[2]) > 1e-4
+            ) {
+              scaleZ[side][part] = segment.scale[2];
+              pushNodeScale(refs[part], [segment.scale[0], segment.scale[1], segment.scale[2]]);
+            }
+            setPartVisible(side, part, true);
+          } else {
+            setPartVisible(side, part, false);
+          }
+        }
+      });
+    };
+
+    const stopSamples = source.onSample((sample) => {
+      pendingSample = sample;
+      hasPending = true;
+      if (frameHandle === null) {
+        frameHandle = scheduleFrame(flush);
+      }
+    });
+    return () => {
+      stopSamples();
+      hideAll();
+      if (frameHandle !== null) {
+        cancelFrame(frameHandle);
+        frameHandle = null;
+      }
+    };
+  }, [active, session, source, nativeFallback]);
+  // Java appearance must stay live; native/imperative opacity gates the roots.
+  // visible=false here also hides the GLB child's cached appearance.
+  const segment = (sourceId: number, nodeRef: RefObject<ViroNode | null>, tag: string) => (
+    <ViroNode
+      viroTag={tag}
+      ref={nodeRef}
+      position={handInitialPosition}
+      visible={true}
+      opacity={0}
+      scale={previewHandScale}>
+      <Viro3DObject
+        source={sourceId}
+        type="GLB"
+        scale={unitScale}
+        visible={true}
+        ignoreEventHandling
+      />
+    </ViroNode>
+  );
+  return (
+    <>
+      {segment(previewSources.upperLeft, leftUpperRef, 'quest-left-upper')}
+      {segment(previewSources.upperRight, rightUpperRef, 'quest-right-upper')}
+      {segment(previewSources.forearmLeft, leftForearmRef, 'quest-left-forearm')}
+      {segment(previewSources.forearmRight, rightForearmRef, 'quest-right-forearm')}
+      {segment(previewSources.handLeft, leftFistRef, 'quest-left-fist')}
+      {segment(previewSources.handRight, rightFistRef, 'quest-right-fist')}
+    </>
+  );
+});
+
+const QuestIntroCover = memo(function QuestIntroCover({
+  session,
+  introActive,
+}: {
+  session: QuestArenaSession;
+  introActive: boolean;
+}) {
+  const nodeRef = useRef<ViroNode | null>(null);
+  const quadRef = useRef<ViroQuad | null>(null);
+  const visibleRef = useRef(false);
+
+  useEffect(() => {
+    if (!introActive && visibleRef.current) {
+      visibleRef.current = false;
+      setNativeNodeProps(quadRef.current, { opacity: 0 });
+      setNativeNodeProps(nodeRef.current, { visible: false });
+    }
+  }, [introActive]);
+
+  useEffect(() => {
+    const hideCover = () => {
+      if (!visibleRef.current) return;
+      visibleRef.current = false;
+      setNativeNodeProps(quadRef.current, { opacity: 0 });
+      setNativeNodeProps(nodeRef.current, { visible: false });
+    };
+    const stop = session.onFrame(() => {
+      const opacity = session.getIntroOpacity();
+      if (opacity <= 0) {
+        hideCover();
+        return;
+      }
+      const sample = questHeadTracker.getLiveHeadState?.()?.sample;
+      const pose = sample ? questHeadCoverPose(sample) : null;
+      if (pose) {
+        pushNodeTransform(
+          nodeRef,
+          [pose.position[0], pose.position[1], pose.position[2]],
+          [pose.rotation[0], pose.rotation[1], pose.rotation[2]]
+        );
+      }
+      setNativeNodeProps(quadRef.current, { opacity });
+      if (!visibleRef.current) {
+        visibleRef.current = true;
+        setNativeNodeProps(nodeRef.current, { visible: true });
+      }
+    });
+    return () => {
+      stop();
+    };
+  }, [session]);
+  return (
+    <ViroNode ref={nodeRef} position={introCoverPosition} visible={false}>
+      <ViroQuad
+        ref={quadRef}
+        width={introCoverSize}
+        height={introCoverSize}
+        materials={introCoverMaterials}
+        renderingOrder={1000}
+        opacity={0}
+        ignoreEventHandling
+      />
+    </ViroNode>
+  );
+});
 
 // Centered under the robot eyes, which the rig places on the calibrated head.
 // The fighter and arena are not moved.
@@ -661,7 +1068,10 @@ function QuestRing({
   blueNodeRef,
   redNodeRef,
   blueModelRef,
+  blueBodyModelRef,
   redModelRef,
+  showOriginal,
+  showBody,
 }: {
   lease: number;
   token: number | null;
@@ -674,7 +1084,10 @@ function QuestRing({
   blueNodeRef: RefObject<ViroNode | null>;
   redNodeRef: RefObject<ViroNode | null>;
   blueModelRef: RefObject<Viro3DObject | null>;
+  blueBodyModelRef: RefObject<Viro3DObject | null>;
   redModelRef: RefObject<Viro3DObject | null>;
+  showOriginal: boolean;
+  showBody: boolean;
 }) {
   if (token === null || placementVersion === null) return null;
   return (
@@ -716,10 +1129,12 @@ function QuestRing({
         session={session}
         nodeRef={blueNodeRef}
         modelRef={blueModelRef}
+        bodyModelRef={blueBodyModelRef}
         viroTag="quest-blue-node"
         initialPosition={initialPose.bluePosition}
         initialRotation={initialPose.blueRotation}
-        visible={false}
+        visible={showOriginal}
+        bodyVisible={showBody}
       />
       <QuestFighter
         id="red"
@@ -1021,6 +1436,7 @@ export default function QuestArenaScene() {
   const blueNodeRef = useRef<ViroNode | null>(null);
   const redNodeRef = useRef<ViroNode | null>(null);
   const blueModelRef = useRef<Viro3DObject | null>(null);
+  const blueBodyModelRef = useRef<Viro3DObject | null>(null);
   const redModelRef = useRef<Viro3DObject | null>(null);
   const syncedTransformsRef = useRef<SyncedTransformCache>({});
   const rigSyncActive = useMemo(() => questRigSyncAvailable(), []);
@@ -1030,6 +1446,17 @@ export default function QuestArenaScene() {
   >({
     blue: { id: Number.NaN, name: 'IdleAggro', loop: true },
     red: { id: Number.NaN, name: 'IdleAggro', loop: true },
+  });
+  const appliedBodyAnimationRef = useRef<{
+    model: Viro3DObject | null;
+    name: QuestFirstPersonBodyClip;
+    run: boolean;
+    interruptible: boolean;
+  }>({
+    model: null,
+    name: 'IdleAggro',
+    run: false,
+    interruptible: true,
   });
   const lastLogAt = useRef(0);
   const posture = tracker.calibration.posture;
@@ -1045,8 +1472,8 @@ export default function QuestArenaScene() {
       return null;
     }
     const anchor: RigAnchor = tracker.anchor ?? view.transforms.blue;
-    const rig = questComposedRigTransform(calibration, anchor);
-    const stanceCenter = stanceMarkerRingLocal(anchor);
+    const rig = questIntroRig(calibration, anchor, session.getRigBlend());
+    const stanceCenter = stanceCenterForPresentation(anchor, view.presentation);
     return {
       key: `${view.lease}:${view.token}:${view.placementVersion}`,
       rigPosition: [...rig.position],
@@ -1068,9 +1495,9 @@ export default function QuestArenaScene() {
       redRotation: [0, view.transforms.red.yaw, 0],
     };
     // Initial JSX mount props stay frozen per round/placement so React re-renders
-    // (200ms tracker updates, calibration changes) never overwrite setNativeProps.
+    // (200ms tracker updates, calibration changes, or presentation flip) never overwrite setNativeProps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view.lease, view.page, view.placementVersion, view.token, view.transforms]);
+  }, [session, view.lease, view.page, view.placementVersion, view.token, view.transforms]);
 
   const updateMenuFocus = () => {
     let hovered = false;
@@ -1231,6 +1658,12 @@ export default function QuestArenaScene() {
         blue: { id: Number.NaN, name: 'IdleAggro', loop: true },
         red: { id: Number.NaN, name: 'IdleAggro', loop: true },
       };
+      appliedBodyAnimationRef.current = {
+        model: null,
+        name: 'IdleAggro',
+        run: false,
+        interruptible: true,
+      };
       return;
     }
     syncQuestRingTransforms(
@@ -1253,6 +1686,7 @@ export default function QuestArenaScene() {
     view.lease,
     view.page,
     view.placementVersion,
+    view.presentation,
     view.token,
   ]);
 
@@ -1261,14 +1695,6 @@ export default function QuestArenaScene() {
     const fighters = view.fighters;
     const run = view.animationsRunning;
     const pendingFrames: unknown[] = [];
-    const schedule =
-      typeof globalThis.requestAnimationFrame === 'function'
-        ? (cb: () => void) => globalThis.requestAnimationFrame(cb)
-        : (cb: () => void) => setTimeout(cb, 16);
-    const cancel =
-      typeof globalThis.cancelAnimationFrame === 'function'
-        ? (handle: unknown) => globalThis.cancelAnimationFrame(handle as number)
-        : (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>);
 
     for (const [id, modelRef] of [
       ['blue', blueModelRef],
@@ -1291,7 +1717,7 @@ export default function QuestArenaScene() {
       // Viro 3.0.3 resumes the old executable when paused; resume first, then apply clip change.
       writeFighterAnimation(model, { name: clip, loop, run: true, interruptible: false });
       if (applied.id === animationId) continue;
-      const handle = schedule(() => {
+      const handle = scheduleAnimationFrame(() => {
         writeFighterAnimation(model, { name: clip, loop, run: true, interruptible: true });
         appliedAnimationsRef.current[id] = { id: animationId, name: clip, loop };
         session.animationApplied(id, animationId);
@@ -1299,9 +1725,95 @@ export default function QuestArenaScene() {
       pendingFrames.push(handle);
     }
     return () => {
-      for (const handle of pendingFrames) cancel(handle);
+      for (const handle of pendingFrames) cancelScheduledAnimationFrame(handle);
     };
   }, [session, view.animationsRunning, view.fighters, view.lease, view.page]);
+
+  useEffect(() => {
+    if (view.page !== 'ring') return;
+    const bodyModel = blueBodyModelRef.current;
+    if (!bodyModel) return;
+    if (appliedBodyAnimationRef.current.model !== bodyModel) {
+      appliedBodyAnimationRef.current = {
+        model: bodyModel,
+        name: 'IdleAggro',
+        run: false,
+        interruptible: true,
+      };
+    }
+    const activeBody = view.presentation === 'eyes' && view.animationsRunning;
+    if (!activeBody) {
+      if (appliedBodyAnimationRef.current.run) {
+        const name = appliedBodyAnimationRef.current.name;
+        writeFighterAnimation(bodyModel, {
+          name,
+          loop: true,
+          run: false,
+          interruptible: false,
+        });
+        appliedBodyAnimationRef.current = {
+          model: bodyModel,
+          name,
+          run: false,
+          interruptible: false,
+        };
+      }
+      return;
+    }
+
+    const desiredClip: QuestFirstPersonBodyClip = view.bodyClip ?? 'IdleAggro';
+    const applied = appliedBodyAnimationRef.current;
+    if (applied.run && applied.name === desiredClip && applied.interruptible) return;
+
+    if (applied.run && applied.interruptible) {
+      // Already running and interruptible: switch clip directly without a wasted interruptible:false frame.
+      writeFighterAnimation(bodyModel, {
+        name: desiredClip,
+        loop: true,
+        run: true,
+        interruptible: true,
+      });
+      appliedBodyAnimationRef.current = {
+        model: bodyModel,
+        name: desiredClip,
+        run: true,
+        interruptible: true,
+      };
+      return;
+    }
+
+    // Match Viro 3.0.3 pause/resume semantics: enable run first, then apply clip switch on next frame.
+    writeFighterAnimation(bodyModel, {
+      name: desiredClip,
+      loop: true,
+      run: true,
+      interruptible: false,
+    });
+    appliedBodyAnimationRef.current = {
+      model: bodyModel,
+      name: desiredClip,
+      run: true,
+      interruptible: false,
+    };
+    const handle = scheduleAnimationFrame(() => {
+      if (blueBodyModelRef.current !== bodyModel) return;
+      writeFighterAnimation(bodyModel, {
+        name: desiredClip,
+        loop: true,
+        run: true,
+        interruptible: true,
+      });
+      appliedBodyAnimationRef.current = {
+        model: bodyModel,
+        name: desiredClip,
+        run: true,
+        interruptible: true,
+      };
+    });
+    return () => {
+      cancelScheduledAnimationFrame(handle);
+    };
+  }, [view.animationsRunning, view.bodyClip, view.lease, view.page, view.presentation]);
 
   // Dev builds serve TTFs/PNGs over Metro HTTP until downloaded to a local file;
   // release builds resolve packaged resource names synchronously above.
@@ -1385,6 +1897,10 @@ export default function QuestArenaScene() {
   }, [calibration, compositor, menu, panelLabel, view.page]);
 
   useEffect(() => {
+    if (view.introActive) {
+      titleCompositor.hide();
+      return;
+    }
     const titleSize = QUEST_TITLE_SIZE[view.page];
     titleCompositor.present({
       label: `title ${view.page}`,
@@ -1395,7 +1911,7 @@ export default function QuestArenaScene() {
       widthM: titleSize.widthM,
       heightM: titleSize.heightM,
     });
-  }, [calibration, titleCompositor, titleModel, view.page]);
+  }, [calibration, titleCompositor, titleModel, view.introActive, view.page]);
 
   const onAction = (action: QuestMenuAction) => {
     logMenu('info', `action ${action} on ${view.page}`);
@@ -1433,7 +1949,10 @@ export default function QuestArenaScene() {
         blueNodeRef={blueNodeRef}
         redNodeRef={redNodeRef}
         blueModelRef={blueModelRef}
+        blueBodyModelRef={blueBodyModelRef}
         redModelRef={redModelRef}
+        showOriginal={view.presentation !== 'eyes'}
+        showBody={view.presentation === 'eyes'}
       />
     );
   }, [
@@ -1443,8 +1962,19 @@ export default function QuestArenaScene() {
     view.lease,
     view.page,
     view.placementVersion,
+    view.presentation,
     view.token,
   ]);
+
+  const handsActive = ringElement !== null && view.presentation === 'eyes';
+  const handsElement = useMemo(
+    () => <QuestPreviewHands source={input} session={session} active={handsActive} />,
+    [handsActive, input, session]
+  );
+  const introCoverElement = useMemo(
+    () => <QuestIntroCover session={session} introActive={view.introActive} />,
+    [session, view.introActive]
+  );
 
   return (
     <ViroScene onCameraTransformUpdate={questHeadTracker.onCameraTransform}>
@@ -1455,6 +1985,8 @@ export default function QuestArenaScene() {
       <ViroAmbientLight color="#ffffff" intensity={700} />
       <ViroDirectionalLight color="#ffffff" intensity={900} direction={[-0.4, -1, -0.3]} />
       {ringElement}
+      {handsElement}
+      {introCoverElement}
       <QuestInputMarkers source={input} onPipelineChange={setMarkerPipeline} />
       <QuestDiagnosticsPanel
         source={input}

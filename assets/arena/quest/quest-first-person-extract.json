@@ -1,0 +1,280 @@
+{
+  "generator": "scripts/quest-first-person-extract.cjs",
+  "source": {
+    "blue": {
+      "file": "Mike_Player1_Blue_Combat_AR.glb",
+      "bytes": 19978136,
+      "sha256": "ac3afd1fa615a2ea5b34de72f22a5780a158369e7b425d619dfcc5cd3b69833f"
+    },
+    "red": {
+      "file": "Mike_Player2_RedOrange_Combat_AR.glb",
+      "bytes": 19087388,
+      "sha256": "a8436e15934cfc82c0f1bbc8c10b63d07289b9787656d5ffcfcf49a362bd7ba5",
+      "jointNamesMatchBlue": true
+    }
+  },
+  "originalsUnchanged": true,
+  "textures": "Body and fist PNGs are box-filtered to 256px. Upper and forearm PNGs are 128px. The Combat files keep their 1024px images.",
+  "grip": "Grip is a controller float. The Combat GLB has no grip pose. The static fist blends first-frame IdleAggro and BlockHold finger rotations; it is not driven by grip or a played clip.",
+  "fistCurl": {
+    "blend": 0.75,
+    "sourceClips": ["IdleAggro", "BlockHold"],
+    "joints": "index, pinky, and thumb 01/02/03",
+    "tips": {
+      "index_l": {
+        "distance": 0.176405169,
+        "position": [0.0347985, -0.061348775, -0.161691608]
+      },
+      "pinky_l": {
+        "distance": 0.168791837,
+        "position": [-0.02088727, -0.058219242, -0.157050712]
+      },
+      "thumb_l": {
+        "distance": 0.152240182,
+        "position": [0.101907085, -0.068938668, -0.089663143]
+      },
+      "index_r": {
+        "distance": 0.176406641,
+        "position": [-0.034798649, -0.061344336, -0.161694865]
+      },
+      "pinky_r": {
+        "distance": 0.168793444,
+        "position": [0.020887166, -0.058215208, -0.157053948]
+      },
+      "thumb_r": {
+        "distance": 0.150194525,
+        "position": [-0.097784833, -0.069354641, -0.090479034]
+      }
+    }
+  },
+  "caps": {
+    "body": 312,
+    "leftUpper": 58,
+    "rightUpper": 58,
+    "leftForearm": 70,
+    "rightForearm": 70,
+    "leftFist": 89,
+    "rightFist": 89
+  },
+  "material": {
+    "name": "MI_ZMike_default",
+    "alphaMode": "OPAQUE",
+    "doubleSided": false,
+    "baseColorAlphaMin": 255
+  },
+  "aimRotation": "Target columns -X +Y -Z, determinant +1. No X mirror and no 180 degree roll.",
+  "removedFromBody": {
+    "headJoints": [
+      "neck_01",
+      "head_01",
+      "Jaw1",
+      "antenna_01",
+      "antenna_02",
+      "antenna_03",
+      "antenna_04",
+      "eye_Parent",
+      "eye_corner01_r",
+      "eye_corner02_r",
+      "eye_corner01_l",
+      "eye_corner02_l",
+      "eye_under_r",
+      "eye_bot02_r",
+      "eye_bot01_r",
+      "eye_bot03_r",
+      "eye_under_l",
+      "eye_bot02_l",
+      "eye_bot01_l",
+      "eye_bot03_l",
+      "eye_r",
+      "eye_l",
+      "eyelid_top_r",
+      "eyelid_top_l",
+      "eyelid_bot_r",
+      "eyelid_bot_l",
+      "Brow_r",
+      "eye_top02_r",
+      "eye_top01_r",
+      "eye_top03_r",
+      "Brow_l",
+      "eye_top02_l",
+      "eye_top01_l",
+      "eye_top03_l",
+      "eye_lookatroot",
+      "eye_lookat_r",
+      "eye_lookat_l"
+    ],
+    "armJoints": [
+      "upperarm_l",
+      "lowerarm_l",
+      "hand_l",
+      "index_01_l",
+      "index_02_l",
+      "index_03_l",
+      "pinky_01_l",
+      "pinky_02_l",
+      "pinky_03_l",
+      "thumb_01_l",
+      "thumb_02_l",
+      "thumb_03_l",
+      "Prop_L",
+      "Buster_L",
+      "upperarm_r",
+      "lowerarm_r",
+      "hand_r",
+      "index_01_r",
+      "index_02_r",
+      "index_03_r",
+      "pinky_01_r",
+      "pinky_02_r",
+      "pinky_03_r",
+      "thumb_01_r",
+      "thumb_02_r",
+      "thumb_03_r",
+      "Prop_R",
+      "Buster_R"
+    ],
+    "eyeMesh": "SKM_MegaMikeZ_part_1",
+    "eyeTriangles": 104,
+    "shoulderCap": "upperarm vertices with projection t < 0.22 stay on the body"
+  },
+  "body": {
+    "file": "quest-blue-body.glb",
+    "bytes": 1413456,
+    "sha256": "c2ccd83f2de46a145785ea676aba5411068b6f808ee5070dd3681305987af358",
+    "triangles": 13714,
+    "bounds": {
+      "min": [-0.175260882, -0.001069596, 0.06239604],
+      "max": [0.175260866, 0.913814207, 0.326281297]
+    },
+    "animated": true,
+    "joints": 20,
+    "clips": [
+      {
+        "name": "IdleAggro",
+        "durationSeconds": 1.5,
+        "frames": 46
+      },
+      {
+        "name": "WalkForward",
+        "durationSeconds": 1.466666698,
+        "frames": 45
+      },
+      {
+        "name": "WalkBackward",
+        "durationSeconds": 1.299999952,
+        "frames": 40
+      },
+      {
+        "name": "StrafeLeft",
+        "durationSeconds": 0.8,
+        "frames": 25
+      },
+      {
+        "name": "StrafeRight",
+        "durationSeconds": 0.8,
+        "frames": 25
+      },
+      {
+        "name": "WalkForwardLeft",
+        "durationSeconds": 1.466666698,
+        "frames": 45
+      },
+      {
+        "name": "WalkForwardRight",
+        "durationSeconds": 1.466666698,
+        "frames": 45
+      },
+      {
+        "name": "WalkBackwardLeft",
+        "durationSeconds": 1.299999952,
+        "frames": 40
+      },
+      {
+        "name": "WalkBackwardRight",
+        "durationSeconds": 1.299999952,
+        "frames": 40
+      }
+    ],
+    "maxShoulderDriftModel": 0,
+    "maxAnimatedY": 0.913814318,
+    "minAnimatedY": -0.001067926,
+    "maxLegOverlapVol": 0,
+    "modelSpace": "Same origin as the Combat GLB. Scene scale is fighterScale under quest-rig-outer."
+  },
+  "arms": {
+    "upperStartT": 0.08,
+    "upperEndT": 1.08,
+    "forearmWristOverlapT": 1.12,
+    "wristJoint": {
+      "radiusModel": 0.055,
+      "center": [0, 0, 0],
+      "sealed": true,
+      "material": "source forearm material and wrist UV"
+    },
+    "aimAxis": [0, 0, -1],
+    "forearmAxis": "Wrist origin, local +Z toward the elbow, local -Z toward the wrist.",
+    "left": {
+      "shoulder": [0.127665097, 0.83775128, 0.135874959],
+      "elbow": [0.346364914, 0.83794439, -0.024230745],
+      "wrist": [0.534448199, 0.833614337, -0.024506176],
+      "upperLength": 0.218699927,
+      "forearmLength": 0.188133323,
+      "aimOffsetToFist": [0.022530327, -0.027989729, -0.112311786],
+      "palmCenter": [0.000395137, -0.005049033, -0.068952912],
+      "fistBounds": {
+        "min": [-0.086899178, -0.100215, -0.172208377],
+        "max": [0.116069601, 0.079009054, 0.055]
+      },
+      "upper": {
+        "file": "quest-blue-upper-left.glb",
+        "bytes": 110260,
+        "sha256": "8de7c87d173ed5690f58d4ea4970efd3260b1fdec642fa0d03edb7ff597a074f",
+        "triangles": 800
+      },
+      "forearm": {
+        "file": "quest-blue-forearm-left.glb",
+        "bytes": 168444,
+        "sha256": "2c731dc9a6f755a26b9409dbe730f36f76ef3f718e533977ec08477707aaac46",
+        "triangles": 1874
+      },
+      "hand": {
+        "file": "quest-blue-hand-left.glb",
+        "bytes": 514656,
+        "sha256": "ee05db61829f3b5843b3209bdc2f4de6a599f179248a92366870cd70e6bb43c0",
+        "triangles": 3620
+      }
+    },
+    "right": {
+      "shoulder": [-0.127665068, 0.837751263, 0.135874958],
+      "elbow": [-0.346364969, 0.837944279, -0.024230774],
+      "wrist": [-0.53444828, 0.833614363, -0.024506227],
+      "upperLength": 0.218700012,
+      "forearmLength": 0.188133346,
+      "aimOffsetToFist": [-0.021969777, -0.027902951, -0.112446428],
+      "palmCenter": [-0.000395141, -0.005049129, -0.068952916],
+      "fistBounds": {
+        "min": [-0.113099404, -0.096331319, -0.172210403],
+        "max": [0.086899114, 0.079009039, 0.055]
+      },
+      "upper": {
+        "file": "quest-blue-upper-right.glb",
+        "bytes": 110256,
+        "sha256": "1940859b77c238c018f90f60cc2b82f56c1748915204abf894f597c83784c343",
+        "triangles": 800
+      },
+      "forearm": {
+        "file": "quest-blue-forearm-right.glb",
+        "bytes": 168448,
+        "sha256": "843ff7bfd4823ebe869c27a47dceea08dd45bc7146a0c19dc3acd3b6743223e5",
+        "triangles": 1874
+      },
+      "hand": {
+        "file": "quest-blue-hand-right.glb",
+        "bytes": 514696,
+        "sha256": "021b0a77e8f46434dd916c44089bad87467d3892615880d1590b9f14644883f1",
+        "triangles": 3620
+      }
+    },
+    "mount": "Upper origin is the shoulder and local -Z points at the elbow. Forearm and fist origins are the wrist. The forearm local +Z points at the elbow. The fist local -Z is the aim pointer. The scene scales once by QUEST_FIRST_PERSON_ARM_SCALE and stretches only local Z on the upper and forearm."
+  }
+}

@@ -157,6 +157,8 @@ export function createQuestInputSource(deps: {
   let ringHead = 0;
 
   let cursor = 0;
+  let nativeNowNs: number | null = null;
+  let nativeReadAt = 0;
   let running = false;
   let pollTimer: unknown = null;
   let lastPublishAt: number | null = null;
@@ -316,6 +318,10 @@ export function createQuestInputSource(deps: {
     }
     readCost.push(deps.now() - startedAt);
     const batch = decodeBatch(raw);
+    nativeNowNs = batch.nowNs;
+    // Conservative age: include JNI/decode time instead of anchoring the native
+    // read timestamp after a potentially delayed JS conversion.
+    nativeReadAt = startedAt;
     let acceptedSamples: readonly QuestInputSample[] | undefined;
     if (!batch.ok) {
       if (raw && raw.available === false) {
@@ -469,6 +475,10 @@ export function createQuestInputSource(deps: {
     getSnapshot: () => snapshot,
     getLiveState: () => ({
       latest,
+      nowNs:
+        nativeNowNs === null
+          ? null
+          : nativeNowNs + Math.max(0, deps.now() - nativeReadAt) * 1_000_000,
       hands: { left: { ...hands.left }, right: { ...hands.right } },
     }),
     summaryLine,

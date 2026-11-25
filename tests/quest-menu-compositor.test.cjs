@@ -143,7 +143,10 @@ test('every screen fits the native panel limits and hover is never part of the i
   }
   const titleModel = buildQuestMenuTitle({ titles: sampleTitles });
   assert.equal(titleModel.ops.filter((op) => op.op === 'image').length, 3);
-  assert.equal(titleModel.ops.some((op) => op.op === 'roundRect'), false);
+  assert.equal(
+    titleModel.ops.some((op) => op.op === 'roundRect'),
+    false
+  );
   // The same screen with and without a hover option draws the same pixels.
   const plain = buildQuestMenu('menu', ['a'], { posture: 'standing' });
   const hovered = buildQuestMenu('menu', ['a'], { posture: 'standing', hover: 'solo' });
@@ -375,6 +378,8 @@ test('QuestPanelModule and the renderer patch agree on the JNI contract', () => 
     '0002-openxr-quest-panel-layer.patch',
     '0003-openxr-quest-input-sampler.patch',
     '0004-openxr-quest-rig-sync.patch',
+    '0005-openxr-controller-attached-hands.patch',
+    '0006-openxr-skeletal-crossfade.patch',
   ]);
   assert.match(kotlin, /^package expo\.modules\.questpanel$/m);
   assert.match(kotlin, /class QuestPanelModule : Module\(\)/);
@@ -459,7 +464,9 @@ test('the renderer submits the layer under the scene and blends the eye buffer o
   );
   assert.ok(
     cpp.indexOf('layers.push_back(questTitlePanel)') >
-      cpp.indexOf('layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&projLayer))')
+      cpp.indexOf(
+        'layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&projLayer))'
+      )
   );
   // Premultiplied source alpha, only as the else of the passthrough branch and
   // only while a panel is submitted; the brace and push_back are upstream context.

@@ -58,6 +58,8 @@ export interface QuestAnalog {
 
 export interface QuestHandSample {
   hand: QuestHand;
+  /** Optional real OpenXR grip pose from patch 0005. Aim and all v1 fields stay unchanged. */
+  grip?: QuestControllerPose | null;
   locateOk: boolean;
   poseActive: boolean;
   positionValid: boolean;
@@ -77,6 +79,21 @@ export interface QuestHandSample {
   /** null while the action is inactive. Primary is A or X, secondary B or Y; menu is left only. */
   buttons: { primary: boolean | null; secondary: boolean | null; menu: boolean | null };
 }
+
+export type QuestControllerPose = Pick<
+  QuestHandSample,
+  | 'locateOk'
+  | 'poseActive'
+  | 'positionValid'
+  | 'positionTracked'
+  | 'orientationValid'
+  | 'orientationTracked'
+  | 'position'
+  | 'orientation'
+  | 'linearVelocity'
+  | 'angularVelocity'
+  | 'tracking'
+>;
 
 export interface QuestInputSample {
   seq: number;
@@ -307,6 +324,26 @@ export function decodeBatch(batch: QuestInputBatch | null | undefined): QuestDec
     if (!left || !right) {
       invalid += 1;
       continue;
+    }
+    if (
+      batch.gripVersion === 1 &&
+      Array.isArray(batch.gripInts) &&
+      Array.isArray(batch.gripFloats) &&
+      batch.gripInts.length === count * 8 &&
+      batch.gripFloats.length === count * 26
+    ) {
+      for (const [side, hand] of [left, right].entries()) {
+        const gi = i * 8 + side * 4,
+          gf = i * 26 + side * 13;
+        const grip = decodeHand(
+          hand.hand,
+          [...batch.gripInts.slice(gi, gi + 4), 0],
+          0,
+          [...batch.gripFloats.slice(gf, gf + 13), 0, 0, 0, 0],
+          0
+        );
+        hand.grip = grip;
+      }
     }
     samples.push({
       seq: seq[i],

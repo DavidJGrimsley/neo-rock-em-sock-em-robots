@@ -192,9 +192,10 @@ run('jar', ['xf', stockAar], { cwd: stockDir });
 const stockLibrary = path.join(stockDir, 'jni/arm64-v8a/libviro_renderer.so');
 
 function elf(file) {
-  const readelf = (args) => run(path.join(llvm, 'llvm-readelf' + exe), [...args, file], {
-    capture: true,
-  });
+  const readelf = (args) =>
+    run(path.join(llvm, 'llvm-readelf' + exe), [...args, file], {
+      capture: true,
+    });
   const exports = run(
     path.join(llvm, 'llvm-nm' + exe),
     ['-D', '--defined-only', '--format=just-symbols', file],
@@ -233,9 +234,13 @@ function jniSymbols(jarFile) {
     .map((entry) => entry.slice(0, -6).replaceAll('/', '.'));
   const symbols = new Set();
   for (let index = 0; index < classes.length; index += 150) {
-    const listing = run('javap', ['-p', '-classpath', jarFile, ...classes.slice(index, index + 150)], {
-      capture: true,
-    });
+    const listing = run(
+      'javap',
+      ['-p', '-classpath', jarFile, ...classes.slice(index, index + 150)],
+      {
+        capture: true,
+      }
+    );
     let current = null;
     for (const line of listing.split(/\r?\n/)) {
       const header = /(?:class|interface|enum)\s+([\w.$]+)/.exec(line);
@@ -254,8 +259,7 @@ const missingJni = [...declared].filter((symbol) => !candidate.exports.has(symbo
 const stockOnly = [...stock.exports].filter((symbol) => !candidate.exports.has(symbol)).sort();
 const candidateOnly = [...candidate.exports].filter((symbol) => !stock.exports.has(symbol)).sort();
 const pristineLibrary = path.join(work, 'pristine/libviro_renderer.so');
-const reference =
-  !pristine && existsSync(pristineLibrary) ? elf(pristineLibrary) : null;
+const reference = !pristine && existsSync(pristineLibrary) ? elf(pristineLibrary) : null;
 const summary = (info) => ({
   sha256: info.sha256,
   bytes: info.bytes,
@@ -289,7 +293,13 @@ const report = {
     : null,
 };
 writeFileSync(path.join(variantDir, 'report.json'), JSON.stringify(report, null, 2) + '\n');
-console.log(JSON.stringify({ ...report, exportsOnlyInStock: stockOnly.length, exportsOnlyInBuilt: candidateOnly.length }, null, 2));
+console.log(
+  JSON.stringify(
+    { ...report, exportsOnlyInStock: stockOnly.length, exportsOnlyInBuilt: candidateOnly.length },
+    null,
+    2
+  )
+);
 
 // A different .so hash is recorded in report.json. It is not, by itself, an ABI mismatch.
 // The published 3.0.3 binary also links proprietary ReactVisionCCA and ARCore image-tracker
@@ -331,6 +341,9 @@ const inputJni = [
   'nativeRigSyncVersion',
   'nativePublishRigState',
   'nativeClearRigState',
+  'nativeHandsVersion',
+  'nativeSetHandsEnabled',
+  'nativeReadGrip',
 ].map((name) => `Java_expo_modules_questinput_QuestInputModule_${name}`);
 const missingInputJni = pristine ? [] : inputJni.filter((symbol) => !candidate.exports.has(symbol));
 if (missingInputJni.length)
@@ -339,7 +352,9 @@ if (reference) {
   const pristineMissingJni = [...declared].filter((symbol) => !reference.exports.has(symbol));
   const jniRegression = missingJni.filter((symbol) => !pristineMissingJni.includes(symbol));
   if (jniRegression.length)
-    problems.push(`${jniRegression.length} JNI methods are not exported: ${jniRegression.join(', ')}`);
+    problems.push(
+      `${jniRegression.length} JNI methods are not exported: ${jniRegression.join(', ')}`
+    );
   const neededRegression = reference.needed.filter((name) => !candidate.needed.includes(name));
   if (neededRegression.length)
     problems.push(`NEEDED libraries missing versus pristine: ${neededRegression.join(', ')}`);

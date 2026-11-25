@@ -29,6 +29,10 @@ export interface QuestInputBatch {
   capturedNs?: number[];
   ints?: number[];
   floats?: number[];
+  /** Additive grip poses, same seq/timestamps as v1 aim; never inferred from squeeze or aim. */
+  gripVersion?: number;
+  gripInts?: number[];
+  gripFloats?: number[];
 }
 
 export interface QuestInputNative {
@@ -42,6 +46,9 @@ export interface QuestInputNative {
   drawDiagnostics?(owner: number, specJson: string): void;
   patchDiagnostics?(owner: number, patchJson: string): void;
   hideDiagnostics?(owner: number): void;
+  handsVersion?(): number;
+  handsVisualNodesReady?(): boolean;
+  setHandsEnabled?(enabled: boolean): boolean;
   rigSyncVersion?(): number;
   publishRigState?(active: boolean, values: number[]): boolean;
   clearRigState?(): boolean;
