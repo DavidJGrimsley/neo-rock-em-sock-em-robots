@@ -33,6 +33,11 @@ export interface AnalogMovement {
   advance: number;
   strafe: number;
 }
+export interface HeadEvasionInput {
+  duck: boolean;
+  weave: boolean;
+  outOfBounds?: boolean;
+}
 /**
  * Hook for future general dash stamina (Stage 06+).
  * Stage 05 keeps `dashStaminaCost = 0`; `guardStamina` belongs exclusively to blocking and is never charged here.
@@ -109,6 +114,9 @@ export const ARENA_RULES = {
   dashDuration: 0.24,
   dashRecovery: 0.25,
   dashStaminaCost: 0,
+  headEvasionEnabled: false,
+  evadeDuration: 0.75,
+  evadeCooldown: 0.35,
   settleDuration: 0.1,
   cpuGuardReaction: 0.15,
   spawn: 0.095,
@@ -216,6 +224,11 @@ interface Fighter {
     elapsed: number;
     clip: string;
   } | null;
+  evadingPose: boolean;
+  evadeOutOfBounds: boolean;
+  evadeArmed: boolean;
+  evadeUntil: number;
+  evadeCooldownUntil: number;
   motionInitialLift: number;
 }
 
@@ -347,6 +360,20 @@ export class ArenaController {
   hasNormalTracking = () => this.tracking;
   isVirtualReady = () => this.virtualReady;
   isDashing = (id: FighterId = 'blue') => this.fighters[id].dash !== null;
+  isEvading = (id: FighterId = 'blue') => {
+    const f = this.fighters[id];
+    return (
+      this.rules.headEvasionEnabled &&
+      this.phase === 'fighting' &&
+      f.evadingPose &&
+      !f.evadeOutOfBounds &&
+      f.evadeUntil > 0 &&
+      this.clock < f.evadeUntil + epsilon &&
+      !['hit', 'launch', 'landing', 'hop', 'settling', 'guard', 'guard-break'].includes(f.mode) &&
+      !f.guardHeld &&
+      f.guardState === 'off'
+    );
+  };
   setDashStaminaHook = (hook?: DashStaminaHook) => {
     this.dashStaminaHook = hook;
   };
@@ -769,6 +796,70 @@ export class ArenaController {
     return true;
   };
 
+  setHeadEvasion = (
+    input: HeadEvasionInput | null,
+    roundId = this.roundId,
+    id: FighterId = 'blue'
+  ) => {
+    if (roundId !== this.roundId) return;
+    const f = this.fighters[id];
+    if (
+      !this.rules.headEvasionEnabled ||
+      input === null ||
+      this.phase !== 'fighting' ||
+      !this.prerequisites()
+    ) {
+      const wasActive = f.evadeUntil > 0;
+      f.evadingPose = false;
+      f.evadeOutOfBounds = false;
+      f.evadeUntil = 0;
+      f.evadeArmed = false;
+      if (wasActive) {
+        f.evadeCooldownUntil = Math.max(
+          f.evadeCooldownUntil,
+          this.clock + this.rules.evadeCooldown
+        );
+      }
+      return;
+    }
+    const outOfBounds = input.outOfBounds === true;
+    const wantPose = !outOfBounds && (Boolean(input.duck) || Boolean(input.weave));
+    f.evadingPose = wantPose;
+    f.evadeOutOfBounds = outOfBounds;
+    if (outOfBounds) {
+      if (f.evadeUntil > 0) {
+        f.evadeUntil = 0;
+        f.evadeCooldownUntil = Math.max(
+          f.evadeCooldownUntil,
+          this.clock + this.rules.evadeCooldown
+        );
+      }
+      f.evadeArmed = false;
+      return;
+    }
+    if (!wantPose) {
+      if (f.evadeUntil > 0) {
+        f.evadeUntil = 0;
+        f.evadeCooldownUntil = Math.max(
+          f.evadeCooldownUntil,
+          this.clock + this.rules.evadeCooldown
+        );
+      }
+      if (this.clock + epsilon >= f.evadeCooldownUntil) {
+        f.evadeArmed = true;
+      }
+      return;
+    }
+    const canEvadeMode =
+      !['hit', 'launch', 'landing', 'hop', 'settling', 'guard', 'guard-break'].includes(f.mode) &&
+      !f.guardHeld &&
+      f.guardState === 'off';
+    if (f.evadeArmed && canEvadeMode && this.clock + epsilon >= f.evadeCooldownUntil) {
+      f.evadeArmed = false;
+      f.evadeUntil = this.clock + this.rules.evadeDuration;
+    }
+  };
+
   previewClip = (fighter: FighterId, clip: string) => {
     if (this.phase !== 'setup' || !this.prerequisites() || !ARENA_CLIPS.includes(clip))
       return false;
@@ -845,6 +936,22 @@ export class ArenaController {
     for (const id of ids) {
       const fighter = this.fighters[id];
       fighter.elapsed += dt;
+      if (fighter.evadeUntil > 0 && this.clock + epsilon >= fighter.evadeUntil) {
+        fighter.evadeUntil = 0;
+        fighter.evadeCooldownUntil = Math.max(
+          fighter.evadeCooldownUntil,
+          this.clock + this.rules.evadeCooldown
+        );
+      }
+      if (
+        !fighter.evadingPose &&
+        !fighter.evadeOutOfBounds &&
+        !fighter.evadeArmed &&
+        fighter.evadeUntil === 0 &&
+        this.clock + epsilon >= fighter.evadeCooldownUntil
+      ) {
+        fighter.evadeArmed = true;
+      }
       if (fighter.uppercutWindowUntil > 0 && this.clock + epsilon >= fighter.uppercutWindowUntil)
         this.clearReward(fighter);
       if (fighter.mode === 'hit' && this.clock + epsilon >= fighter.staggerUntil) {
@@ -917,23 +1024,25 @@ export class ArenaController {
           : null;
         if (point) {
           attack.hitChecked = true;
-          hits.push({
-            attacker: id,
-            defender,
-            kind: attack.kind,
-            hand: attack.hand,
-            point,
-            recovery: Math.max(0, attack.duration - attack.elapsed),
-            blocked:
-              attack.kind === 'punch' &&
-              this.fighters[defender].guardState === 'holding' &&
-              inCone(
-                this.fighters[defender],
-                this.fighters[id],
-                this.fighters[defender].yaw,
-                this.rules.guardCone
-              ),
-          });
+          if (attack.kind !== 'punch' || !this.isEvading(defender)) {
+            hits.push({
+              attacker: id,
+              defender,
+              kind: attack.kind,
+              hand: attack.hand,
+              point,
+              recovery: Math.max(0, attack.duration - attack.elapsed),
+              blocked:
+                attack.kind === 'punch' &&
+                this.fighters[defender].guardState === 'holding' &&
+                inCone(
+                  this.fighters[defender],
+                  this.fighters[id],
+                  this.fighters[defender].yaw,
+                  this.rules.guardCone
+                ),
+            });
+          }
         }
         if (attack.elapsed + epsilon >= activeEnd) attack.hitChecked = true;
       }
@@ -1088,6 +1197,11 @@ export class ArenaController {
       hop: null,
       dashReadyAt: 0,
       dash: null,
+      evadingPose: false,
+      evadeOutOfBounds: false,
+      evadeArmed: true,
+      evadeUntil: 0,
+      evadeCooldownUntil: 0,
       motionInitialLift: 0,
     };
   }
@@ -1138,6 +1252,10 @@ export class ArenaController {
       this.fighters[id].buffered = null;
       this.fighters[id].counterpunchBuffered = false;
       this.fighters[id].dash = null;
+      this.fighters[id].evadingPose = false;
+      this.fighters[id].evadeOutOfBounds = false;
+      this.fighters[id].evadeUntil = 0;
+      this.fighters[id].evadeArmed = false;
       if (this.fighters[id].mode !== 'hop') this.fighters[id].hop = null;
     });
   }
@@ -1157,6 +1275,7 @@ export class ArenaController {
       fighter.impact = null;
       fighter.guardHeld = false;
       fighter.guardNeedsRelease = false;
+      fighter.evadeCooldownUntil = 0;
       if (fighter.guardState !== 'exhausted') fighter.guardState = 'off';
       if (['attack', 'hit', 'walk', 'guard', 'guard-exit'].includes(fighter.mode))
         this.setAnimation(fighter, 'idle', 'IdleAggro');
@@ -1222,7 +1341,9 @@ export class ArenaController {
     const fighter = this.fighters[id];
     fighter.counterpunchBuffered = false;
     fighter.counterpunchUntil = 0;
-    fighter.yaw = facing(fighter, this.fighters[id === 'blue' ? 'red' : 'blue']);
+    if (!(this.rules.stableFacing && id === 'blue')) {
+      fighter.yaw = facing(fighter, this.fighters[id === 'blue' ? 'red' : 'blue']);
+    }
     const hand =
       kind === 'punch'
         ? this.random() < 0.5

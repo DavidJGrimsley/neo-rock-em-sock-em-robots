@@ -5,22 +5,28 @@ import {
   type Vec3 as HeadVec3,
 } from './quest-head-rig.ts';
 import type { QuestHand, QuestHandSample, QuestInputSample, Vec3 } from './quest-input.ts';
-import type { QuestInputStatus } from './quest-input-source.ts';
+import { QUEST_INPUT_STALE_NS, type QuestInputStatus } from './quest-input-source.ts';
 
 /**
  * Offline gesture preparation for Quest 06.
  *
- * Samples are OpenXR aim poses in LOCAL metres (`quest-input.ts`), not grip poses
- * and not body-local axes. Body forward matches `forward(yaw)` and
- * `gameplayHeadPose`: yaw 0 faces +Z, yaw 180 (the default calibration) faces -Z.
- * Motion time uses `capturedNs` only. `displayTimeNs` is XrTime and is ignored.
+ * Supports both OpenXR aim poses (`poseSource: 'aim'`, used by the authored
+ * synthetic corpus) and OpenXR grip poses (`poseSource: 'grip'`, added in Stage
+ * 05B via `sample.left.grip` / `sample.right.grip`). In `'grip'` mode, missing
+ * or untracked grip poses never fall back to aim poses. Body forward matches
+ * `forward(yaw)` and `gameplayHeadPose`: yaw 0 faces +Z, yaw 180 (the default
+ * calibration) faces -Z. Motion time uses `capturedNs` only. `displayTimeNs` is
+ * XrTime and is ignored.
  *
  * An upward gesture is always an `uppercut` attempt. This module does not read
  * `uppercutReady` and does not turn that attempt into a punch. `ArenaMatch`
- * remains the eligibility and recovery authority. Nothing here is wired to a
- * live session, and none of the distances or durations were measured on a Quest.
+ * remains the eligibility and recovery authority. Stage 06 `QuestArenaSession`
+ * wires `poseSource: 'grip'` into Quest solo fights; none of the distances or
+ * durations were measured on a Quest.
  */
 export const QUEST_GESTURE_THRESHOLD_BASIS = 'provisional-unmeasured' as const;
+
+export type QuestGesturePoseSource = 'aim' | 'grip';
 
 export interface QuestGestureThresholds {
   punchForwardM: number;
@@ -33,6 +39,7 @@ export interface QuestGestureThresholds {
   settleSpeedMps: number;
   discontinuityM: number;
   maxCaptureGapNs: number;
+  maxSampleAgeNs: number;
   rearmRetreatRatio: number;
   guardHoldNs: number;
   guardMaxSpeedMps: number;
@@ -57,6 +64,7 @@ export const PROVISIONAL_QUEST_GESTURE_THRESHOLDS: QuestGestureThresholds = {
   settleSpeedMps: 0.25,
   discontinuityM: 0.45,
   maxCaptureGapNs: 250_000_000,
+  maxSampleAgeNs: QUEST_INPUT_STALE_NS,
   rearmRetreatRatio: 0.5,
   guardHoldNs: 120_000_000,
   guardMaxSpeedMps: 0.3,
@@ -88,6 +96,10 @@ export interface QuestGestureObservation {
   status: QuestInputStatus;
   head?: HeadSample | null;
   calibration?: Calibration | null;
+  headRefEpoch?: number | null;
+  recentering?: boolean;
+  /** Same monotonic origin as capturedNs. Optional for synthetic callers without a clock. */
+  nowNs?: number | null;
 }
 
 export interface BodyPoint {
@@ -116,6 +128,7 @@ export interface QuestGestureSnapshot {
   guard: boolean;
   generation: number | null;
   refEpoch: number | null;
+  poseSource: QuestGesturePoseSource;
   head: {
     duck: boolean;
     weave: boolean;
@@ -197,14 +210,29 @@ function resolveFrame(frame?: QuestBodyFrame): QuestBodyFrame {
   return { yaw: frame.yaw, origin: [frame.origin[0], frame.origin[1], frame.origin[2]] };
 }
 
+function extractHandPosition(
+  hand: QuestHand,
+  sample: QuestHandSample | null | undefined,
+  poseSource: QuestGesturePoseSource
+): Vec3 | null {
+  if (!sample || sample.hand !== hand) return null;
+  const pose = poseSource === 'grip' ? sample.grip : sample;
+  if (!pose || pose.tracking !== 'tracked' || !finiteVec(pose.position, 3)) {
+    return null;
+  }
+  return pose.position as Vec3;
+}
+
 export function createQuestGestureClassifier(options?: {
   thresholds?: Partial<QuestGestureThresholds>;
   frame?: QuestBodyFrame;
   hands?: QuestGestureHandFilter;
+  poseSource?: QuestGesturePoseSource;
 }) {
   let thresholds = resolveThresholds(options?.thresholds);
   let frame = resolveFrame(options?.frame);
-  let hands = options?.hands ?? 'both';
+  const hands = options?.hands ?? 'both';
+  const poseSource: QuestGesturePoseSource = options?.poseSource ?? 'aim';
   let generation: number | null = null;
   let refEpoch: number | null = null;
   let lastCapturedNs = 0;
@@ -267,19 +295,19 @@ export function createQuestGestureClassifier(options?: {
 
   function consumeHand(
     hand: QuestHand,
-    sample: QuestHandSample,
+    sample: QuestHandSample | null | undefined,
     capturedNs: number,
     strikes: QuestGestureIntent[]
   ) {
     const state = memory[hand];
     state.usable = false;
     state.speed = Number.POSITIVE_INFINITY;
-    if (sample.tracking !== 'tracked' || !finiteVec(sample.position, 3)) {
+    const position = extractHandPosition(hand, sample, poseSource);
+    if (!position) {
       state.excursion = null;
       state.prev = null;
       return;
     }
-    const position = sample.position as Vec3;
     const body = questGestureBodyPoint(position, frame);
     const prev = state.prev;
     state.prev = { capturedNs, position, body };
@@ -289,8 +317,13 @@ export function createQuestGestureClassifier(options?: {
       return;
     }
     const dtNs = capturedNs - prev.capturedNs;
+    if (dtNs <= 0) {
+      state.prev = null;
+      state.excursion = null;
+      return;
+    }
     const distance = worldDistance(position, prev.position);
-    if (dtNs <= 0 || dtNs > thresholds.maxCaptureGapNs || distance > thresholds.discontinuityM) {
+    if (dtNs > thresholds.maxCaptureGapNs || distance > thresholds.discontinuityM) {
       state.excursion = null;
       return;
     }
@@ -353,9 +386,19 @@ export function createQuestGestureClassifier(options?: {
   }
 
   function observeHead(obs: QuestGestureObservation, out: QuestGestureIntent[]) {
+    if (obs.recentering === true) return;
     const sample = obs.head;
     const calibration = obs.calibration;
-    if (!sample || !calibration || !finiteVec(sample.position, 3)) return;
+    if (
+      !sample ||
+      !calibration ||
+      !Number.isFinite(sample.t) ||
+      !finiteVec(sample.position, 3) ||
+      !finiteVec(calibration.origin, 3) ||
+      !Number.isFinite(calibration.yaw)
+    ) {
+      return;
+    }
     const pose = gameplayHeadPose(calibration, {
       t: sample.t,
       position: sample.position as HeadVec3,
@@ -379,23 +422,70 @@ export function createQuestGestureClassifier(options?: {
     out.push({ type: 'head', ...head, t: sample.t });
   }
 
+  function isSampleStale(sample: QuestInputSample, nowNs: number | null | undefined): boolean {
+    if (poseSource === 'grip' && nowNs === null) return true;
+    if (typeof nowNs !== 'number') return false;
+    if (!Number.isFinite(nowNs) || nowNs < sample.capturedNs) return true;
+    return nowNs - sample.capturedNs > thresholds.maxSampleAgeNs;
+  }
+
   return {
-    thresholds,
+    get thresholds() {
+      return { ...thresholds };
+    },
     thresholdBasis: QUEST_GESTURE_THRESHOLD_BASIS,
+    poseSource,
     push(observation: QuestGestureObservation): QuestGestureIntent[] {
       const out: QuestGestureIntent[] = [];
       observeHead(observation, out);
       const sample = observation.sample;
-      if (!sample || observation.status !== 'live' || !sample.focused || !sample.actionsReady) {
-        releaseGuard(out, sample?.capturedNs ?? lastCapturedNs);
+      const validCapturedNs = sample ? Number.isFinite(sample.capturedNs) : false;
+      const monotonicNs =
+        sample &&
+        validCapturedNs &&
+        (generation === null ||
+          sample.generation !== generation ||
+          sample.capturedNs > lastCapturedNs);
+      const safeNs = monotonicNs ? sample.capturedNs : lastCapturedNs;
+      if (observation.recentering === true) {
+        releaseGuard(out, safeNs);
+        resetHands();
+        return out;
+      }
+      if (
+        !sample ||
+        !validCapturedNs ||
+        observation.status !== 'live' ||
+        !sample.focused ||
+        !sample.actionsReady
+      ) {
+        releaseGuard(out, safeNs);
+        dropContinuity();
+        return out;
+      }
+      if (isSampleStale(sample, observation.nowNs)) {
+        releaseGuard(out, lastCapturedNs);
         dropContinuity();
         return out;
       }
       if (
-        generation !== null &&
-        (sample.generation !== generation || sample.refEpoch !== refEpoch)
+        typeof sample.refEpoch === 'number' &&
+        typeof observation.headRefEpoch === 'number' &&
+        sample.refEpoch !== observation.headRefEpoch
       ) {
-        releaseGuard(out, sample.capturedNs);
+        releaseGuard(out, safeNs);
+        resetHands();
+        return out;
+      }
+      const sessionReset =
+        generation !== null && (sample.generation !== generation || sample.refEpoch !== refEpoch);
+      if (!sessionReset && generation !== null && sample.capturedNs <= lastCapturedNs) {
+        releaseGuard(out, lastCapturedNs);
+        dropContinuity();
+        return out;
+      }
+      if (sessionReset) {
+        releaseGuard(out, sample.generation === generation ? safeNs : lastCapturedNs);
         resetHands();
       }
       generation = sample.generation;
@@ -418,7 +508,7 @@ export function createQuestGestureClassifier(options?: {
       thresholds = { ...thresholds, ...next };
     },
     snapshot(): QuestGestureSnapshot {
-      return { guard, generation, refEpoch, head };
+      return { guard, generation, refEpoch, poseSource, head };
     },
   };
 }

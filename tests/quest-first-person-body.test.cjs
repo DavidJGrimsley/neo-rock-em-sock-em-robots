@@ -545,7 +545,7 @@ test('stepQuestFirstPersonBodyClip maps all 8 directions with angular hysteresis
 test('QuestArenaSession drives diagonal translation and all 8 bodyClip directions under head yaw while stopping on block/release/focus loss', (t) => {
   const { clock, advanceBy, pendingCount, clearAll } = makeHarnessClock();
   const mocks = makeQuestHeadSource(0);
-  const session = createQuestArenaSession(clock, mocks.headSource);
+  const session = createQuestArenaSession(clock, mocks.headSource, { cpuEnabled: false });
   t.after(() => {
     session.dispose();
     clearAll();

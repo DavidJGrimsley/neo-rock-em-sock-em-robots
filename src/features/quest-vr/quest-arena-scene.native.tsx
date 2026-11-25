@@ -1574,7 +1574,7 @@ export default function QuestArenaScene() {
       return false;
     };
     const stopInput = input.onSample((sample, status, batch) =>
-      session.setInputState(sample, status, batch)
+      session.setInputState(sample, status, batch, input.getLiveState?.().nowNs)
     );
     const stopFrames = session.onFrame((dtSeconds) =>
       syncQuestRingTransforms(

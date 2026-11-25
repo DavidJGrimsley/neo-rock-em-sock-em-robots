@@ -1,25 +1,32 @@
 import { ArenaMatch } from '../arena-fighter/arena-match.ts';
 import { forward } from '../arena-fighter/arena-combat-motion.ts';
-import type {
-  AnalogMovement,
-  ArenaAsset,
-  FighterId,
-  FighterTransform,
+import {
+  ARENA_RULES,
+  type AnalogMovement,
+  type ArenaAsset,
+  type FighterId,
+  type FighterTransform,
 } from '../arena-fighter/arena-controller.ts';
 import {
   createQuestFirstPersonBodyTrackerState,
   stepQuestFirstPersonBodyClip,
   type QuestFirstPersonBodyClip,
 } from './quest-first-person-body.ts';
-import { DEFAULT_CALIBRATION, type Calibration } from './quest-head-rig.ts';
+import {
+  createQuestGestureClassifier,
+  PROVISIONAL_QUEST_GESTURE_THRESHOLDS,
+  type QuestBodyFrame,
+} from './quest-gesture.ts';
+import { DEFAULT_CALIBRATION, gameplayHeadPose, type Calibration } from './quest-head-rig.ts';
 import {
   questHeadTracker,
   type QuestHeadLiveEvent,
   type QuestLiveHeadState,
 } from './quest-head-tracker.ts';
 import type { QuestInputSample } from './quest-input.ts';
-import type { QuestInputStatus } from './quest-input-source.ts';
+import { QUEST_INPUT_STALE_NS, type QuestInputStatus } from './quest-input-source.ts';
 import {
+  QUEST_HEAD_SAMPLE_STALE_MS,
   evaluateQuestDashInput,
   questLocomotionFromInput,
   type QuestDashTriggerState,
@@ -29,8 +36,7 @@ import {
 import type { QuestMenuPage } from './quest-menu-layout.ts';
 
 export const QUEST_ASSET_TIMEOUT_MS = 30_000;
-export const QUEST_READY_SAVED =
-  'Ready saved. Both robots stay idle. Combat controls are not in this stage.';
+export const QUEST_READY_SAVED = 'Ready saved. Enter the ring to fight.';
 export const QUEST_LEAVING = 'Leaving the headset…';
 /**
  * Quest-only locomotion, ring boundary, and separation rules:
@@ -53,6 +59,8 @@ export const QUEST_ARENA_RULES = {
   boundary: 0.205,
   separation: 0.065,
   reach: 0.095,
+  uppercutReach: 0.073,
+  uppercutActiveEnd: 0.68,
   cpuPreferredRange: 0.075,
   cpuMinimumRange: 0.068,
   stableFacing: true,
@@ -62,14 +70,10 @@ export const QUEST_ARENA_RULES = {
   dashDuration: 0.24,
   dashRecovery: 0.25,
   dashStaminaCost: 0,
+  headEvasionEnabled: true,
+  evadeDuration: 0.75,
+  evadeCooldown: 0.35,
 } as const;
-/**
- * Temporary Stage 05 locomotion-test override: keeps the Quest solo opponent
- * stationary and non-attacking (`cpuEnabled: false`) without changing
- * `ArenaMatch` or `ArenaController` defaults for phone AR or other modes.
- * Remove when Quest Stage 06 combat/AI is integrated.
- */
-export const QUEST_STAGE_05_IDLE_OPPONENT_RULES = { cpuEnabled: false } as const;
 const sessionLease = 1;
 const MAX_STEP_DT_S = 0.05;
 const MAX_FRAME_DT_S = 0.1;
@@ -170,7 +174,7 @@ function menuLines(
   if (stage === 'finished') return ['Match finished. Select Ready for a rematch.'];
   if (stage === 'fighting')
     return [
-      'Fight active. Left thumbstick moves relative to where you look; press A while moving to dash.',
+      'Fight active. Punch, uppercut when ready, raise both hands to guard, duck or weave, and use the left thumbstick + A to move or dash.',
     ];
   if (stage === 'countdown' || acknowledged) return ['Match starting. Left thumbstick moves.'];
   return ['Both robots are in the ring.', 'Select Ready when loaded to start.'];
@@ -184,7 +188,8 @@ export interface QuestArenaHeadSource {
 
 export function createQuestArenaSession(
   clock: QuestClock = defaultClock,
-  headSource: QuestArenaHeadSource = questHeadTracker
+  headSource: QuestArenaHeadSource = questHeadTracker,
+  rulesOverride?: Partial<typeof ARENA_RULES>
 ) {
   const nowFn = clock.now ?? (() => Date.now());
   const scheduleFrame = clock.scheduleFrame ?? ((cb) => clock.schedule(cb, 16));
@@ -225,7 +230,12 @@ export function createQuestArenaSession(
   const listeners = new Set<() => void>();
   const frameListeners = new Set<(dtSeconds: number) => void>();
 
-  function readHeadState(): QuestHeadLocomotionState & { referenceResets?: number } {
+  type QuestHeadStateSnapshot = QuestHeadLocomotionState & {
+    referenceResets?: number;
+    calibration?: Partial<Calibration> | null;
+  };
+
+  function readHeadState(): QuestHeadStateSnapshot {
     if (typeof headSource.getLiveHeadState === 'function') {
       return headSource.getLiveHeadState();
     }
@@ -234,11 +244,59 @@ export function createQuestArenaSession(
     };
   }
 
+  function frameFromHeadState(head: QuestHeadStateSnapshot): QuestBodyFrame {
+    const cal = head.calibration;
+    const yaw =
+      typeof cal?.yaw === 'number' && Number.isFinite(cal.yaw) ? cal.yaw : DEFAULT_CALIBRATION.yaw;
+    const origin =
+      Array.isArray(cal?.origin) &&
+      cal.origin.length >= 3 &&
+      cal.origin.slice(0, 3).every(Number.isFinite)
+        ? ([cal.origin[0], cal.origin[1], cal.origin[2]] as const)
+        : DEFAULT_CALIBRATION.origin;
+    return { yaw, origin };
+  }
+
+  function fullCalibrationFromHeadState(head: QuestHeadStateSnapshot): Calibration | null {
+    const cal = head.calibration;
+    if (!cal || typeof cal.yaw !== 'number' || !Number.isFinite(cal.yaw)) return null;
+    if (
+      !Array.isArray(cal.origin) ||
+      cal.origin.length < 3 ||
+      !cal.origin.slice(0, 3).every(Number.isFinite)
+    ) {
+      return null;
+    }
+    return {
+      origin: [cal.origin[0], cal.origin[1], cal.origin[2]],
+      yaw: cal.yaw,
+      posture: cal.posture === 'seated' ? 'seated' : 'standing',
+      source: cal.source === 'solo' || cal.source === 'system' ? cal.source : 'default',
+      entry: typeof cal.entry === 'number' && Number.isFinite(cal.entry) ? cal.entry : 0,
+    };
+  }
+
   let lastReferenceResets = readHeadState().referenceResets ?? 0;
   let recenterNeutral = false;
   let recenterSampleT: number | null = null;
   let recenterInputSeq: number | null = null;
   let bodyTracker = createQuestFirstPersonBodyTrackerState();
+  let activeGestureFrame: QuestBodyFrame = frameFromHeadState(readHeadState());
+  const gestureClassifier = createQuestGestureClassifier({
+    poseSource: 'grip',
+    frame: activeGestureFrame,
+  });
+  let desiredGuardHeld = false;
+  let guardNeedsPhysicalRelease = false;
+  let latestInputNowNs: number | null | undefined = undefined;
+  let lastProcessedLiveKey: {
+    generation: number;
+    refEpoch: number;
+    seq: number;
+    capturedNs: number;
+  } | null = null;
+  let dispatchedGuardHeld = false;
+  let dispatchedGuardRoundId: number | null = null;
 
   function emptyView(): QuestArenaView {
     return {
@@ -278,7 +336,7 @@ export function createQuestArenaSession(
 
   function isBodyLocomotionActive(
     snapshot: ReturnType<ArenaMatch['getSnapshot']> | undefined,
-    head: QuestHeadLocomotionState & { referenceResets?: number }
+    head: QuestHeadStateSnapshot
   ) {
     if (presentation !== 'eyes' || !snapshot) return false;
     if (
@@ -299,6 +357,225 @@ export function createQuestArenaSession(
       return false;
     }
     return true;
+  }
+
+  function isInputFreshForCombat(
+    sample: QuestInputSample | null,
+    nowNs: number | null | undefined
+  ) {
+    if (!sample || !Number.isFinite(sample.capturedNs)) return false;
+    if (nowNs === null) return false;
+    if (typeof nowNs !== 'number') return true;
+    if (!Number.isFinite(nowNs) || nowNs < sample.capturedNs) return false;
+    return nowNs - sample.capturedNs <= QUEST_INPUT_STALE_NS;
+  }
+
+  function hasTrackedCombatGrip(sample: QuestInputSample) {
+    return sample.left.grip?.tracking === 'tracked' || sample.right.grip?.tracking === 'tracked';
+  }
+
+  function isCombatInputGateOpen(
+    snapshot: ReturnType<ArenaMatch['getSnapshot']> | undefined,
+    head: QuestHeadStateSnapshot,
+    sample: QuestInputSample | null,
+    status: QuestInputStatus,
+    nowNs: number | null | undefined = latestInputNowNs
+  ) {
+    if (!match || !snapshot || presentation !== 'eyes') return false;
+    if (snapshot.stage !== 'fighting' || !snapshot.animationsRunning) return false;
+    if (!appActive || menuFocused || recenterNeutral || head.recentering) return false;
+    if (status !== 'live' || !sample || !sample.focused || !sample.actionsReady) return false;
+    if (!isInputFreshForCombat(sample, nowNs)) return false;
+    if (!hasTrackedCombatGrip(sample)) return false;
+    if (
+      typeof sample.refEpoch === 'number' &&
+      typeof head.refEpoch === 'number' &&
+      sample.refEpoch !== head.refEpoch
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  function dispatchSessionGuard(held: boolean, roundId: number) {
+    if (!held) {
+      if (dispatchedGuardRoundId === roundId && !dispatchedGuardHeld) return;
+      dispatchedGuardHeld = false;
+      dispatchedGuardRoundId = roundId;
+      match?.block(false, roundId);
+      return;
+    }
+    dispatchedGuardHeld = true;
+    dispatchedGuardRoundId = roundId;
+    match?.block(true, roundId);
+  }
+
+  function releaseSessionGuard(roundId?: number) {
+    const snap = match?.getSnapshot();
+    const targetRound = roundId ?? snap?.roundId;
+    const roundGuardHeld = snap !== undefined && (snap.blue.guardHeld || snap.blue.pendingBlock);
+    const trackedHeldInRound =
+      targetRound !== undefined && dispatchedGuardHeld && dispatchedGuardRoundId === targetRound;
+    if (desiredGuardHeld || guardNeedsPhysicalRelease || roundGuardHeld || trackedHeldInRound) {
+      desiredGuardHeld = false;
+      guardNeedsPhysicalRelease = false;
+      if (
+        targetRound !== undefined &&
+        (trackedHeldInRound || roundGuardHeld) &&
+        !(dispatchedGuardRoundId === targetRound && !dispatchedGuardHeld)
+      ) {
+        dispatchedGuardHeld = false;
+        dispatchedGuardRoundId = targetRound;
+        match?.block(false, targetRound);
+      }
+    }
+  }
+
+  function syncGestureFrame(head: QuestHeadStateSnapshot) {
+    const nextFrame = frameFromHeadState(head);
+    if (
+      nextFrame.yaw !== activeGestureFrame.yaw ||
+      nextFrame.origin[0] !== activeGestureFrame.origin[0] ||
+      nextFrame.origin[1] !== activeGestureFrame.origin[1] ||
+      nextFrame.origin[2] !== activeGestureFrame.origin[2]
+    ) {
+      activeGestureFrame = nextFrame;
+      const intents = gestureClassifier.setFrame(nextFrame);
+      if (intents.some((intent) => intent.type === 'guard' && !intent.held)) {
+        releaseSessionGuard();
+      }
+    }
+  }
+
+  function neutralizeCombatGestures(head = readHeadState()) {
+    lastProcessedLiveKey = null;
+    releaseSessionGuard();
+    match?.setHeadEvasion(null);
+    gestureClassifier.push({
+      sample: latestInput.sample,
+      status: 'unfocused',
+      recentering: recenterNeutral || head.recentering === true,
+      headRefEpoch: head.refEpoch ?? null,
+    });
+  }
+
+  function isHeadSampleFresh(head: QuestHeadStateSnapshot) {
+    const sample = head.sample;
+    if (!sample || !Number.isFinite(sample.t)) return false;
+    if (head.nowMs === undefined) return true;
+    const staleMs =
+      typeof head.staleMs === 'number' && Number.isFinite(head.staleMs) && head.staleMs > 0
+        ? head.staleMs
+        : QUEST_HEAD_SAMPLE_STALE_MS;
+    return Number.isFinite(head.nowMs) && head.nowMs - sample.t <= staleMs;
+  }
+
+  function syncHeadEvasion(head: QuestHeadStateSnapshot) {
+    if (!match) return;
+    const snap = match.getSnapshot();
+    if (
+      !isCombatInputGateOpen(snap, head, latestInput.sample, latestInput.status, latestInputNowNs)
+    ) {
+      match.setHeadEvasion(null, snap.roundId);
+      return;
+    }
+    const cal = fullCalibrationFromHeadState(head);
+    if (!cal || !head.sample || !isHeadSampleFresh(head)) {
+      match.setHeadEvasion(null, snap.roundId);
+      return;
+    }
+    const pose = gameplayHeadPose(cal, head.sample);
+    match.setHeadEvasion(
+      {
+        duck: pose.vertical <= -PROVISIONAL_QUEST_GESTURE_THRESHOLDS.duckEnterM,
+        weave: Math.abs(pose.lateral) >= PROVISIONAL_QUEST_GESTURE_THRESHOLDS.weaveEnterM,
+        outOfBounds: pose.outOfBounds,
+      },
+      snap.roundId
+    );
+  }
+
+  function evaluateCombatForSample(
+    sample: QuestInputSample | null,
+    status: QuestInputStatus,
+    head: QuestHeadStateSnapshot,
+    nowNs?: number | null,
+    isDuplicateLiveSample = false
+  ) {
+    syncGestureFrame(head);
+    const snap = match?.getSnapshot();
+    const combatOpen = isCombatInputGateOpen(snap, head, sample, status, nowNs);
+    if (isDuplicateLiveSample && combatOpen && match && snap) {
+      if (snap.blue.guardState === 'exhausted') {
+        guardNeedsPhysicalRelease = true;
+      }
+      if (
+        desiredGuardHeld &&
+        !guardNeedsPhysicalRelease &&
+        !snap.blue.guardHeld &&
+        snap.blue.canBlock &&
+        !snap.blue.pendingBlock
+      ) {
+        dispatchSessionGuard(true, snap.roundId);
+      }
+      syncHeadEvasion(head);
+      return;
+    }
+    if (!combatOpen || !sample) {
+      lastProcessedLiveKey = null;
+    } else {
+      lastProcessedLiveKey = {
+        generation: sample.generation,
+        refEpoch: sample.refEpoch,
+        seq: sample.seq,
+        capturedNs: sample.capturedNs,
+      };
+    }
+    const intents = gestureClassifier.push({
+      sample,
+      status: combatOpen ? status : 'unfocused',
+      head: null,
+      calibration: null,
+      headRefEpoch: head.refEpoch ?? null,
+      recentering: recenterNeutral || head.recentering === true,
+      nowNs,
+    });
+    if (!match || !snap || !combatOpen) {
+      releaseSessionGuard(snap?.roundId);
+      match?.setHeadEvasion(null, snap?.roundId);
+      return;
+    }
+    if (snap.blue.guardState === 'exhausted') {
+      guardNeedsPhysicalRelease = true;
+    }
+    for (const intent of intents) {
+      if (intent.type === 'guard') {
+        desiredGuardHeld = intent.held;
+        if (!intent.held) {
+          guardNeedsPhysicalRelease = false;
+          dispatchSessionGuard(false, snap.roundId);
+        } else if (!guardNeedsPhysicalRelease) {
+          dispatchSessionGuard(true, snap.roundId);
+        }
+      } else if (intent.type === 'punch') {
+        match.attack('punch', snap.roundId);
+      } else if (intent.type === 'uppercut') {
+        match.attack('uppercut', snap.roundId);
+      }
+    }
+    if (desiredGuardHeld && !guardNeedsPhysicalRelease) {
+      const latestSnap = match.getSnapshot();
+      if (latestSnap.blue.guardState === 'exhausted') {
+        guardNeedsPhysicalRelease = true;
+      } else if (
+        !latestSnap.blue.guardHeld &&
+        latestSnap.blue.canBlock &&
+        !latestSnap.blue.pendingBlock
+      ) {
+        dispatchSessionGuard(true, latestSnap.roundId);
+      }
+    }
+    syncHeadEvasion(head);
   }
 
   function applyLocomotionToMatch() {
@@ -382,7 +659,15 @@ export function createQuestArenaSession(
       });
     }
     applyLocomotionToMatch();
-    if (!isBodyLocomotionActive(match?.getSnapshot(), head) && bodyTracker.clip !== 'IdleAggro') {
+    syncGestureFrame(head);
+    const snapshot = match?.getSnapshot();
+    if (!isCombatInputGateOpen(snapshot, head, latestInput.sample, latestInput.status)) {
+      releaseSessionGuard(snapshot?.roundId);
+      match?.setHeadEvasion(null, snapshot?.roundId);
+    } else {
+      syncHeadEvasion(head);
+    }
+    if (!isBodyLocomotionActive(snapshot, head) && bodyTracker.clip !== 'IdleAggro') {
       bodyTracker = createQuestFirstPersonBodyTrackerState();
       publish();
     }
@@ -392,11 +677,16 @@ export function createQuestArenaSession(
   const stopHeadLive = headSource.subscribeLive?.((event) => {
     if (disposed) return;
     const head = readHeadState();
-    if (event === 'recenter') {
+    if (event === 'recenter' || event === 'jump-pending') {
       lastReferenceResets = head.referenceResets ?? lastReferenceResets;
-      recenterNeutral = true;
-      recenterSampleT = head.sample?.t ?? null;
-      recenterInputSeq = latestInput.sample?.seq ?? null;
+      if (event === 'recenter') {
+        recenterNeutral = true;
+        recenterSampleT = head.sample?.t ?? null;
+        recenterInputSeq = latestInput.sample?.seq ?? null;
+      }
+      neutralizeCombatGestures(head);
+    } else if (event === 'calibrate') {
+      syncGestureFrame(head);
     } else if (event === 'sample' && recenterNeutral && !head.recentering) {
       if (head.sample?.t !== recenterSampleT) {
         recenterNeutral = false;
@@ -652,6 +942,13 @@ export function createQuestArenaSession(
     recenterInputSeq = null;
     locomotion = { advance: 0, strafe: 0, active: false, magnitude: 0 };
     dashTriggerState = { armed: false };
+    desiredGuardHeld = false;
+    guardNeedsPhysicalRelease = false;
+    dispatchedGuardHeld = false;
+    dispatchedGuardRoundId = null;
+    lastProcessedLiveKey = null;
+    latestInputNowNs = undefined;
+    gestureClassifier.setFrame(frameFromHeadState(readHeadState()));
     bodyTracker = createQuestFirstPersonBodyTrackerState();
     notifyFrame(0);
   }
@@ -745,11 +1042,13 @@ export function createQuestArenaSession(
         : null,
     getLocomotion: (): QuestLocomotionCommand => ({ ...locomotion }),
     isDashing: (): boolean => match?.round.isDashing('blue') ?? false,
+    isEvading: (): boolean => match?.round.isEvading('blue') ?? false,
+    getMatchSnapshot: () => match?.getSnapshot() ?? null,
     solo() {
       if (disposed || leaving || page === 'ring') return false;
       const created = new ArenaMatch('solo', 3, undefined, {
         ...QUEST_ARENA_RULES,
-        ...QUEST_STAGE_05_IDLE_OPPONENT_RULES,
+        ...rulesOverride,
       });
       unsubscribe = created.subscribe(() => publish());
       const token = created.attachSession(sessionLease);
@@ -790,9 +1089,12 @@ export function createQuestArenaSession(
     setInputState(
       sample: QuestInputSample | null,
       status: QuestInputStatus,
-      batch?: readonly QuestInputSample[]
+      batch?: readonly QuestInputSample[],
+      nowNs?: number | null
     ) {
-      const samples = batch && batch.length > 0 && status === 'live' ? batch : [sample];
+      const isBatchLive = Boolean(batch && batch.length > 0 && status === 'live');
+      const samples = isBatchLive ? batch! : [sample];
+      latestInputNowNs = nowNs;
       for (const nextSample of samples) {
         if (recenterNeutral) {
           const head = readHeadState();
@@ -800,15 +1102,28 @@ export function createQuestArenaSession(
             recenterNeutral = false;
           }
         }
+        const isDuplicateLiveSample =
+          !isBatchLive &&
+          status === 'live' &&
+          nextSample !== null &&
+          lastProcessedLiveKey !== null &&
+          nextSample.generation === lastProcessedLiveKey.generation &&
+          nextSample.refEpoch === lastProcessedLiveKey.refEpoch &&
+          nextSample.seq === lastProcessedLiveKey.seq &&
+          nextSample.capturedNs === lastProcessedLiveKey.capturedNs;
         latestInput = { sample: nextSample, status };
         const head = recomputeLocomotion();
         evaluateDashForSample(nextSample, status, head);
+        evaluateCombatForSample(nextSample, status, head, nowNs, isDuplicateLiveSample);
       }
     },
     setMenuFocus(focused: boolean) {
       if (menuFocused === focused) return;
       menuFocused = focused;
-      if (focused) neutralizeDash();
+      if (focused) {
+        neutralizeDash();
+        neutralizeCombatGestures();
+      }
       recomputeLocomotion();
       if (focused) notifyFrame(0);
     },
@@ -819,6 +1134,7 @@ export function createQuestArenaSession(
       if (!active) {
         intro = null;
         neutralizeDash();
+        neutralizeCombatGestures();
       }
       recomputeLocomotion();
       if (!match) {

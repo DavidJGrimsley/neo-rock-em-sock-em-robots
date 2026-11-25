@@ -6,6 +6,7 @@ import {
   type FighterId,
   type Movement,
   type AnalogMovement,
+  type HeadEvasionInput,
   type AttackKind,
   type CombatCommand,
   type FighterTransform,
@@ -554,6 +555,14 @@ export class ArenaMatch {
     return this.round.dash(direction, roundId, this.localFighter);
   };
   cancelDash = () => this.round.cancelDash(this.localFighter);
+  setHeadEvasion = (input: HeadEvasionInput | null, roundId = this.snapshot.roundId) => {
+    if (this.mode !== 'solo' || roundId !== this.snapshot.roundId) return;
+    if (input === null || this.stage !== 'fighting' || !this.snapshot.animationsRunning) {
+      this.round.setHeadEvasion(null, roundId, this.localFighter);
+      return;
+    }
+    this.round.setHeadEvasion(input, roundId, this.localFighter);
+  };
   private command(kind: CombatCommand, roundId: number) {
     if (
       roundId !== this.snapshot.roundId ||

@@ -508,3 +508,93 @@ test('simultaneous Uppercuts test contact after both lunges even across a long s
   assert.equal(h.snapshot().blue.mode, 'launch');
   assert.equal(h.snapshot().red.mode, 'launch');
 });
+
+test('phone AR keeps head evasion disabled and preserves default uppercut rules', () => {
+  assert.equal(ARENA_RULES.headEvasionEnabled, false);
+  assert.equal(ARENA_RULES.uppercutActiveEnd, 0.547);
+  assert.equal(ARENA_RULES.uppercutReach, 0.06);
+  const h = harness();
+  h.controller.setHeadEvasion({ duck: true, weave: true, outOfBounds: false });
+  assert.equal(h.controller.isEvading('blue'), false);
+  assert.equal(h.controller.attack('punch', 'red'), true);
+  h.tick(0.35);
+  assert.equal(h.snapshot().blue.health, 92);
+});
+
+test('bounded head evasion slips punches within window, expires on hold, requires neutral cooldown, and never evades uppercuts or out-of-bounds', () => {
+  const h = harness({
+    separation: 0.065,
+    spawn: 0.0325,
+    reach: 0.095,
+    uppercutReach: 0.073,
+    uppercutActiveEnd: 0.68,
+    headEvasionEnabled: true,
+    evadeDuration: 0.75,
+    evadeCooldown: 0.35,
+  });
+
+  // Ducking opens a bounded evasion window that slips a straight punch cleanly.
+  h.controller.setHeadEvasion({ duck: true, weave: false, outOfBounds: false });
+  assert.equal(h.controller.isEvading('blue'), true);
+  assert.equal(h.controller.attack('punch', 'red'), true);
+  h.tick(0.4);
+  assert.equal(h.snapshot().blue.health, 100);
+  assert.equal(h.snapshot().red.punchProgress, 0);
+
+  // Holding duck continuously past evadeDuration expires evasion so the next punch lands.
+  h.tick(0.5);
+  assert.equal(h.controller.isEvading('blue'), false);
+  assert.equal(h.controller.attack('punch', 'red'), true);
+  h.tick(0.4);
+  assert.equal(h.snapshot().blue.health, 92);
+
+  // Returning upright early requires evadeCooldown before re-arming weave, while waiting out cooldown upright re-arms cleanly.
+  h.controller.setHeadEvasion({ duck: false, weave: false, outOfBounds: false });
+  h.tick(0.4);
+  h.controller.setHeadEvasion({ duck: true, weave: false, outOfBounds: false });
+  assert.equal(h.controller.isEvading('blue'), true);
+  h.tick(0.1);
+  h.controller.setHeadEvasion({ duck: false, weave: false, outOfBounds: false });
+  h.controller.setHeadEvasion({ duck: false, weave: true, outOfBounds: false });
+  assert.equal(h.controller.isEvading('blue'), false);
+  h.controller.setHeadEvasion({ duck: false, weave: false, outOfBounds: false });
+  h.tick(0.4);
+  h.controller.setHeadEvasion({ duck: false, weave: true, outOfBounds: false });
+  assert.equal(h.controller.isEvading('blue'), true);
+
+  // Out-of-bounds disables evasion immediately.
+  h.controller.setHeadEvasion({ duck: false, weave: true, outOfBounds: true });
+  assert.equal(h.controller.isEvading('blue'), false);
+
+  // Earned uppercut still launches a ducking defender at Quest separation (0.065).
+  h.controller.setHeadEvasion({ duck: false, weave: false, outOfBounds: false });
+  h.tick(0.4);
+  h.controller.setHeadEvasion({ duck: true, weave: false, outOfBounds: false });
+  assert.equal(h.controller.isEvading('blue'), true);
+  h.controller.fighters.red.punchProgress = ARENA_RULES.punchStringLength;
+  h.controller.fighters.red.uppercutWindowUntil = h.controller.clock + 2;
+  assert.equal(h.controller.attack('uppercut', 'red'), true);
+  h.tick(0.68);
+  assert.equal(h.snapshot().blue.health, 77);
+  assert.equal(h.snapshot().blue.mode, 'launch');
+});
+
+test('stableFacing keeps player yaw locked through attacks after strafing', () => {
+  const h = harness({
+    separation: 0.065,
+    spawn: 0.0325,
+    reach: 0.095,
+    stableFacing: true,
+    cpuEnabled: false,
+  });
+  const startYaw = h.controller.fighters.blue.yaw;
+  assert.equal(startYaw, 90);
+  h.controller.setAnalogMovement({ advance: 0, strafe: 1 });
+  h.tick(0.5);
+  h.controller.setAnalogMovement({ advance: 0, strafe: 0 });
+  assert.notEqual(h.controller.fighters.blue.z, 0);
+  assert.equal(h.controller.fighters.blue.yaw, startYaw);
+  assert.equal(h.controller.attack('punch', 'blue'), true);
+  h.tick(0.05);
+  assert.equal(h.controller.fighters.blue.yaw, startYaw);
+});

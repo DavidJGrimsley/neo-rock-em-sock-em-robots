@@ -17,7 +17,6 @@ const {
 const { createQuestInputSource } = require('../src/features/quest-vr/quest-input-source.ts');
 const {
   QUEST_ARENA_RULES,
-  QUEST_STAGE_05_IDLE_OPPONENT_RULES,
   createQuestArenaSession,
 } = require('../src/features/quest-vr/quest-arena-session.ts');
 const {
@@ -591,8 +590,8 @@ test('QuestArenaSession drives real-time substepped locomotion, neutralizes clea
   session.dispose();
 });
 
-test('Quest Stage 05 temporary idle opponent stays stationary and non-attacking while player moves close, leaving default ArenaMatch solo CPU active', () => {
-  assert.deepEqual(QUEST_STAGE_05_IDLE_OPPONENT_RULES, { cpuEnabled: false });
+test('Quest Stage 06 restores active CPU combat in solo while preserving ring constraints and default phone ArenaMatch solo CPU', () => {
+  assert.equal(QUEST_ARENA_RULES.headEvasionEnabled, true);
 
   const fc = makeFrameClock();
   const session = createQuestArenaSession(fc.clock);
@@ -610,70 +609,34 @@ test('Quest Stage 05 temporary idle opponent stays stationary and non-attacking 
   assert.equal(session.getSnapshot().stage, 'fighting');
 
   const redSpawn = { ...session.getLiveTransforms().red };
-  const assertRedStationaryAndIdle = (label) => {
+  let cpuMoved = false;
+  let cpuAttacked = false;
+  let playerDamaged = false;
+
+  for (let i = 0; i < 180; i++) {
+    fc.stepFrame(33.3333);
     const snap = session.getSnapshot();
+    const matchSnap = session.getMatchSnapshot();
     const live = session.getLiveTransforms();
-    assert.equal(snap.stage, 'fighting', `${label}: stage stays fighting`);
-    assert.equal(snap.outcome, null, `${label}: no knockout/outcome`);
-    assert.equal(snap.fighters.red.clip, 'IdleAggro', `${label}: red stays in IdleAggro`);
-    assert.equal(snap.animationsRunning, true, `${label}: animations stay running`);
-    near(live.red.x, redSpawn.x, 1e-6, `${label}: red X stationary`);
-    near(live.red.z, redSpawn.z, 1e-6, `${label}: red Z stationary`);
-    near(live.red.lift, 0, 1e-6, `${label}: red lift stays 0`);
+    if (distance(live.red, redSpawn) > 0.01) cpuMoved = true;
+    if (snap.fighters?.red.clip.startsWith('Combo_')) cpuAttacked = true;
+    if (matchSnap && matchSnap.blue.health < ARENA_RULES.health) playerDamaged = true;
     assert.ok(
       distance(live.blue, live.red) >= QUEST_ARENA_RULES.separation - 1e-6,
-      `${label}: Quest separation constraint enforced`
+      `step ${i}: Quest separation constraint enforced`
     );
     assert.ok(
       Math.hypot(live.blue.x, live.blue.z) <= QUEST_ARENA_RULES.boundary + 1e-6,
-      `${label}: Quest ring boundary constraint enforced`
+      `step ${i}: Quest ring boundary constraint enforced`
     );
-  };
-
-  // Push straight forward up to minimum separation and hold close well past cpuFirstDelay/cpuRecovery.
-  session.setInputState(makeSample({ stick: [0, 1] }), 'live');
-  for (let i = 0; i < 180; i++) {
-    fc.stepFrame(33.3333); // 6 seconds total while pressing into close range
-    assertRedStationaryAndIdle(`close-forward-${i}`);
+    assert.ok(
+      Math.hypot(live.red.x, live.red.z) <= QUEST_ARENA_RULES.boundary + 1e-6,
+      `step ${i}: CPU ring boundary constraint enforced`
+    );
   }
-  const atClose = session.getLiveTransforms();
-  assert.ok(
-    distance(atClose.blue, atClose.red) <= QUEST_ARENA_RULES.separation + 0.002,
-    'player reached Quest close separation limit'
-  );
-
-  // Remain idle right in front of the opponent (inside reach) for 3 seconds: CPU still never moves or attacks.
-  session.setInputState(makeSample({ stick: [0, 0] }), 'live');
-  for (let i = 0; i < 90; i++) {
-    fc.stepFrame(33.3333);
-    assertRedStationaryAndIdle(`close-idle-${i}`);
-  }
-
-  // Orbit left and right around the stationary opponent; red faces player in place without translating.
-  session.setInputState(makeSample({ stick: [-1, 0] }), 'live');
-  for (let i = 0; i < 45; i++) {
-    fc.stepFrame(33.3333);
-    assertRedStationaryAndIdle(`orbit-left-${i}`);
-  }
-  const orbitedLeft = session.getLiveTransforms();
-  assert.notEqual(Math.round(orbitedLeft.red.yaw), Math.round(redSpawn.yaw), 'red turns to face');
-
-  session.setInputState(makeSample({ stick: [1, -0.5] }), 'live');
-  for (let i = 0; i < 45; i++) {
-    fc.stepFrame(33.3333);
-    assertRedStationaryAndIdle(`orbit-right-retreat-${i}`);
-  }
-
-  // Pause & resume preserves stationary idle opponent behavior.
-  session.setAppActive(false);
-  assert.equal(session.getSnapshot().stage, 'paused');
-  session.setAppActive(true);
-  assert.equal(session.ready().reason, 'resumed');
-  session.setInputState(makeSample({ stick: [0, 1] }), 'live');
-  for (let i = 0; i < 60; i++) {
-    fc.stepFrame(33.3333);
-    assertRedStationaryAndIdle(`post-resume-${i}`);
-  }
+  assert.equal(cpuMoved, true, 'Quest CPU closes distance in Stage 06');
+  assert.equal(cpuAttacked, true, 'Quest CPU throws attacks in Stage 06');
+  assert.equal(playerDamaged, true, 'Quest CPU lands hits on undefended player');
   session.dispose();
 
   // Default ArenaMatch('solo') (used by phone AR solo) keeps active CPU movement and combat enabled.
@@ -884,7 +847,7 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
     },
     './quest-arena-session.ts': {
       createQuestArenaSession: () => {
-        const raw = createQuestArenaSession(fc.clock);
+        const raw = createQuestArenaSession(fc.clock, undefined, { cpuEnabled: false });
         sessionInstance = {
           ...raw,
           setMenuFocus(focused) {
@@ -1238,7 +1201,7 @@ test('Quest view-relative locomotion moves on horizontal plane along live head l
     entries: () => 1,
     refSpaceEpoch: () => refEpoch,
   });
-  const session = createQuestArenaSession(fc.clock, tracker);
+  const session = createQuestArenaSession(fc.clock, tracker, { cpuEnabled: false });
 
   // Feed initial stable head pose at differing calibration yaw (135 deg) before Solo.
   for (let i = 0; i < 10; i++) {
@@ -1623,7 +1586,7 @@ test('QuestArenaSession external render-loop stepping stays smooth across left/r
     entries: () => 1,
     refSpaceEpoch: () => 1,
   });
-  const session = createQuestArenaSession(fc.clock, tracker);
+  const session = createQuestArenaSession(fc.clock, tracker, { cpuEnabled: false });
   for (let i = 0; i < 10; i++) {
     tracker.onCameraTransform(makeHeadViroPose(180, 0, 0, [0, 1.5, 0]));
     fc.clock.now();
@@ -2142,7 +2105,7 @@ test('QuestArenaSession executes Quest A-button directional dash across cardinal
     entries: () => 1,
     refSpaceEpoch: () => refEpoch,
   });
-  const session = createQuestArenaSession(fc.clock, tracker);
+  const session = createQuestArenaSession(fc.clock, tracker, { cpuEnabled: false });
 
   // Calibrate looking along 180 deg (+Z? wait: yawFromForward([0,0,-1])=180; worldForwardXZ(180)=[0,-1]).
   for (let i = 0; i < 10; i++) {
