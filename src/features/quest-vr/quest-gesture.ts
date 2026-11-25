@@ -37,11 +37,13 @@ export interface QuestGestureThresholds {
   uppercutMaxLateralM: number;
   startSpeedMps: number;
   settleSpeedMps: number;
+  peakReversalM?: number;
   discontinuityM: number;
   maxCaptureGapNs: number;
   maxSampleAgeNs: number;
   rearmRetreatRatio: number;
   guardHoldNs: number;
+  guardExitGraceNs?: number;
   guardMaxSpeedMps: number;
   guardForwardMinM: number;
   guardForwardMaxM: number;
@@ -75,6 +77,29 @@ export const PROVISIONAL_QUEST_GESTURE_THRESHOLDS: QuestGestureThresholds = {
   guardLateralMaxM: 0.4,
   duckEnterM: 0.15,
   weaveEnterM: 0.12,
+};
+
+/** Responsive Quest headset combat thresholds used by live play sessions. */
+export const QUEST_COMBAT_GESTURE_THRESHOLDS: QuestGestureThresholds = {
+  ...PROVISIONAL_QUEST_GESTURE_THRESHOLDS,
+  punchForwardM: 0.16,
+  punchMaxUpRatio: 0.6,
+  punchMaxLateralM: 0.28,
+  uppercutUpM: 0.12,
+  uppercutMinUpRatio: 1.0,
+  uppercutMaxLateralM: 0.22,
+  startSpeedMps: 0.45,
+  settleSpeedMps: 0.32,
+  peakReversalM: 0.035,
+  rearmRetreatRatio: 0.45,
+  guardHoldNs: 55_000_000,
+  guardExitGraceNs: 75_000_000,
+  guardMaxSpeedMps: 0.65,
+  guardForwardMinM: 0.12,
+  guardForwardMaxM: 0.52,
+  guardUpMinM: -0.26,
+  guardUpMaxM: 0.28,
+  guardLateralMaxM: 0.19,
 };
 
 export type QuestGestureHandFilter = 'both' | 'left' | 'right';
@@ -142,12 +167,24 @@ export interface QuestGestureSnapshot {
 
 interface HandMemory {
   prev: { capturedNs: number; position: Vec3; body: BodyPoint } | null;
-  excursion: { start: BodyPoint; maxForward: BodyPoint; maxUp: BodyPoint } | null;
+  excursion: {
+    start: BodyPoint;
+    startWorld: Vec3;
+    yaw: number;
+    maxForward: BodyPoint;
+    maxForwardWorld: Vec3;
+    maxUp: BodyPoint;
+    maxUpWorld: Vec3;
+  } | null;
   usable: boolean;
   speed: number;
   armed: boolean;
   strikeStart: BodyPoint | null;
+  strikeStartWorld: Vec3 | null;
+  strikePeak: BodyPoint | null;
+  strikePeakWorld: Vec3 | null;
   rearmDistance: number;
+  rearmRetreatM: number;
 }
 
 const NS_PER_S = 1_000_000_000;
@@ -179,8 +216,21 @@ function blankHand(): HandMemory {
     speed: Number.POSITIVE_INFINITY,
     armed: true,
     strikeStart: null,
+    strikeStartWorld: null,
+    strikePeak: null,
+    strikePeakWorld: null,
     rearmDistance: 0,
+    rearmRetreatM: 0,
   };
+}
+
+function yawFromForward(fwd: readonly number[] | null | undefined): number | null {
+  if (!fwd || fwd.length < 3) return null;
+  const x = fwd[0];
+  const z = fwd[2];
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+  if (Math.hypot(x, z) < 0.25) return null;
+  return (Math.atan2(x, z) * 180) / Math.PI;
 }
 
 function blankPeak(): BodyPoint {
@@ -228,16 +278,20 @@ export function createQuestGestureClassifier(options?: {
   frame?: QuestBodyFrame;
   hands?: QuestGestureHandFilter;
   poseSource?: QuestGesturePoseSource;
+  followLiveHead?: boolean;
 }) {
   let thresholds = resolveThresholds(options?.thresholds);
   let frame = resolveFrame(options?.frame);
+  let activeFrame = frame;
   const hands = options?.hands ?? 'both';
   const poseSource: QuestGesturePoseSource = options?.poseSource ?? 'aim';
+  const followLiveHead = options?.followLiveHead === true;
   let generation: number | null = null;
   let refEpoch: number | null = null;
   let lastCapturedNs = 0;
   let guard = false;
   let holdStart: number | null = null;
+  let dropStart: number | null = null;
   let duck = false;
   let weave = false;
   let head: QuestGestureSnapshot['head'] = null;
@@ -251,10 +305,12 @@ export function createQuestGestureClassifier(options?: {
     memory.left = blankHand();
     memory.right = blankHand();
     holdStart = null;
+    dropStart = null;
   }
 
   function releaseGuard(out: QuestGestureIntent[], capturedNs: number) {
     holdStart = null;
+    dropStart = null;
     if (!guard) return;
     guard = false;
     out.push({ type: 'guard', held: false, capturedNs });
@@ -308,7 +364,7 @@ export function createQuestGestureClassifier(options?: {
       state.prev = null;
       return;
     }
-    const body = questGestureBodyPoint(position, frame);
+    const body = questGestureBodyPoint(position, activeFrame);
     const prev = state.prev;
     state.prev = { capturedNs, position, body };
     if (!prev) {
@@ -331,7 +387,20 @@ export function createQuestGestureClassifier(options?: {
     state.usable = true;
     state.speed = speed;
     if (!state.armed) {
-      if (state.strikeStart && bodyDistance(body, state.strikeStart) <= state.rearmDistance) {
+      const refStart =
+        followLiveHead && state.strikeStartWorld
+          ? questGestureBodyPoint(state.strikeStartWorld, activeFrame)
+          : state.strikeStart;
+      const refPeak =
+        followLiveHead && state.strikePeakWorld
+          ? questGestureBodyPoint(state.strikePeakWorld, activeFrame)
+          : state.strikePeak;
+      const nearStart = refStart !== null && bodyDistance(body, refStart) <= state.rearmDistance;
+      const retreatedFromPeak =
+        refPeak !== null &&
+        (refPeak.forward - body.forward >= state.rearmRetreatM ||
+          refPeak.up - body.up >= state.rearmRetreatM);
+      if (nearStart || retreatedFromPeak) {
         state.armed = true;
         state.excursion = null;
       }
@@ -339,32 +408,61 @@ export function createQuestGestureClassifier(options?: {
     }
     if (!state.excursion) {
       if (speed < thresholds.startSpeedMps) return;
-      state.excursion = { start: prev.body, maxForward: blankPeak(), maxUp: blankPeak() };
+      state.excursion = {
+        start: prev.body,
+        startWorld: prev.position,
+        yaw: activeFrame.yaw,
+        maxForward: blankPeak(),
+        maxForwardWorld: prev.position,
+        maxUp: blankPeak(),
+        maxUpWorld: prev.position,
+      };
     }
     const excursion = state.excursion;
-    const delta = sub(body, excursion.start);
-    if (delta.forward > excursion.maxForward.forward) excursion.maxForward = delta;
-    if (delta.up > excursion.maxUp.up) excursion.maxUp = delta;
-    if (speed >= thresholds.settleSpeedMps) return;
+    const delta = followLiveHead
+      ? questGestureBodyPoint(position, { yaw: excursion.yaw, origin: excursion.startWorld })
+      : sub(body, excursion.start);
+    if (delta.forward > excursion.maxForward.forward) {
+      excursion.maxForward = delta;
+      excursion.maxForwardWorld = position;
+    }
+    if (delta.up > excursion.maxUp.up) {
+      excursion.maxUp = delta;
+      excursion.maxUpWorld = position;
+    }
+    const reversalM = thresholds.peakReversalM ?? 0;
+    const reversedFromPeak =
+      reversalM > 0 &&
+      ((excursion.maxForward.forward >= thresholds.punchForwardM &&
+        delta.forward <= excursion.maxForward.forward - reversalM) ||
+        (excursion.maxUp.up >= thresholds.uppercutUpM &&
+          delta.up <= excursion.maxUp.up - reversalM));
+    if (speed >= thresholds.settleSpeedMps && !reversedFromPeak) return;
     const intent = classify(hand, excursion, capturedNs);
     state.excursion = null;
     if (!intent) return;
     state.armed = false;
     state.strikeStart = excursion.start;
-    const travel =
-      intent.type === 'uppercut'
-        ? bodyDistance(excursion.maxUp, { forward: 0, lateral: 0, up: 0 })
-        : bodyDistance(excursion.maxForward, { forward: 0, lateral: 0, up: 0 });
+    state.strikeStartWorld = excursion.startWorld;
+    const peakDelta = intent.type === 'uppercut' ? excursion.maxUp : excursion.maxForward;
+    state.strikePeakWorld =
+      intent.type === 'uppercut' ? excursion.maxUpWorld : excursion.maxForwardWorld;
+    state.strikePeak = {
+      forward: excursion.start.forward + peakDelta.forward,
+      lateral: excursion.start.lateral + peakDelta.lateral,
+      up: excursion.start.up + peakDelta.up,
+    };
+    const travel = bodyDistance(peakDelta, { forward: 0, lateral: 0, up: 0 });
     state.rearmDistance = travel * (1 - thresholds.rearmRetreatRatio);
+    state.rearmRetreatM = Math.max(0.06, travel * thresholds.rearmRetreatRatio);
     if (allows(hand)) strikes.push(intent);
   }
 
-  function inGuardVolume(hand: QuestHand): boolean {
+  function inGuardBox(hand: QuestHand): boolean {
     const state = memory[hand];
     if (!state.usable || !state.prev) return false;
     const { forward, lateral, up } = state.prev.body;
     return (
-      state.speed <= thresholds.guardMaxSpeedMps &&
       forward >= thresholds.guardForwardMinM &&
       forward <= thresholds.guardForwardMaxM &&
       up >= thresholds.guardUpMinM &&
@@ -373,8 +471,13 @@ export function createQuestGestureClassifier(options?: {
     );
   }
 
+  function inGuardVolume(hand: QuestHand): boolean {
+    return memory[hand].speed <= thresholds.guardMaxSpeedMps && inGuardBox(hand);
+  }
+
   function consumeGuard(capturedNs: number, out: QuestGestureIntent[]) {
     if (inGuardVolume('left') && inGuardVolume('right')) {
+      dropStart = null;
       if (holdStart === null) holdStart = capturedNs;
       if (!guard && capturedNs - holdStart >= thresholds.guardHoldNs) {
         guard = true;
@@ -382,7 +485,17 @@ export function createQuestGestureClassifier(options?: {
       }
       return;
     }
-    releaseGuard(out, capturedNs);
+    holdStart = null;
+    if (!guard) return;
+    const graceNs = thresholds.guardExitGraceNs ?? 0;
+    if (graceNs <= 0) {
+      releaseGuard(out, capturedNs);
+      return;
+    }
+    if (dropStart === null) dropStart = capturedNs;
+    if (capturedNs - dropStart >= graceNs) {
+      releaseGuard(out, capturedNs);
+    }
   }
 
   function observeHead(obs: QuestGestureObservation, out: QuestGestureIntent[]) {
@@ -438,6 +551,21 @@ export function createQuestGestureClassifier(options?: {
     push(observation: QuestGestureObservation): QuestGestureIntent[] {
       const out: QuestGestureIntent[] = [];
       observeHead(observation, out);
+      if (followLiveHead) {
+        const liveYaw = yawFromForward(observation.head?.forward);
+        if (observation.head && finiteVec(observation.head.position, 3)) {
+          activeFrame = {
+            yaw: liveYaw ?? activeFrame.yaw,
+            origin: [
+              observation.head.position[0],
+              observation.head.position[1],
+              observation.head.position[2],
+            ],
+          };
+        }
+      } else {
+        activeFrame = frame;
+      }
       const sample = observation.sample;
       const validCapturedNs = sample ? Number.isFinite(sample.capturedNs) : false;
       const monotonicNs =
@@ -491,16 +619,45 @@ export function createQuestGestureClassifier(options?: {
       generation = sample.generation;
       refEpoch = sample.refEpoch;
       lastCapturedNs = sample.capturedNs;
-      const strikes: QuestGestureIntent[] = [];
+      const wasGuarding = guard;
+      const strikes: Extract<QuestGestureIntent, { hand: QuestHand }>[] = [];
       consumeHand('left', sample.left, sample.capturedNs, strikes);
       consumeHand('right', sample.right, sample.capturedNs, strikes);
       consumeGuard(sample.capturedNs, out);
+      if (followLiveHead && strikes.length > 0) {
+        const keptStrikes: Extract<QuestGestureIntent, { hand: QuestHand }>[] = [];
+        for (const strike of strikes) {
+          const otherHand: QuestHand = strike.hand === 'left' ? 'right' : 'left';
+          const settledForward = memory[strike.hand].prev?.body.forward ?? Number.POSITIVE_INFINITY;
+          const settledIntoGuard =
+            !wasGuarding &&
+            memory[strike.hand].speed <= thresholds.settleSpeedMps &&
+            inGuardVolume(strike.hand) &&
+            inGuardBox(otherHand) &&
+            settledForward <= Math.min(thresholds.guardForwardMaxM, 0.36);
+          if (settledIntoGuard) {
+            const mem = memory[strike.hand];
+            mem.armed = true;
+            mem.strikeStart = null;
+            mem.strikeStartWorld = null;
+            mem.strikePeak = null;
+            mem.strikePeakWorld = null;
+          } else {
+            keptStrikes.push(strike);
+          }
+        }
+        if (keptStrikes.length > 0 && guard) {
+          releaseGuard(out, sample.capturedNs);
+        }
+        return out.concat(keptStrikes);
+      }
       return out.concat(strikes);
     },
     setFrame(next: QuestBodyFrame): QuestGestureIntent[] {
       const out: QuestGestureIntent[] = [];
       releaseGuard(out, lastCapturedNs);
       frame = resolveFrame(next);
+      activeFrame = frame;
       resetHands();
       return out;
     },

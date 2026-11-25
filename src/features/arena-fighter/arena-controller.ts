@@ -229,7 +229,33 @@ interface Fighter {
   evadeArmed: boolean;
   evadeUntil: number;
   evadeCooldownUntil: number;
+  bufferedHand: 'L' | 'R' | null;
+  evadeHits: { id: number; attacker: FighterId; kind: AttackKind; hand: 'L' | 'R' }[];
   motionInitialLift: number;
+}
+
+export interface QuestCombatTelemetry {
+  distance: number;
+  reach: number;
+  uppercutReach: number;
+  maxHealth: number;
+  guardCapacity: number;
+  headEvasionEnabled: boolean;
+  blueCombatYaw: number;
+  bearingToRed: number;
+  evadeActive: boolean;
+  evadeRemaining: number;
+  evadeCooldownRemaining: number;
+  evadeOutOfBounds: boolean;
+  evadingPose: boolean;
+  evadeArmed: boolean;
+  redAttacking: {
+    kind: AttackKind;
+    hand: 'L' | 'R';
+    elapsed: number;
+    hitAt: number;
+    hitChecked: boolean;
+  } | null;
 }
 
 export interface FighterView {
@@ -495,6 +521,7 @@ export class ArenaController {
     this.phase = 'fighting';
     this.roundId++;
     this.cpuAttackAt = null;
+    this.combatYaw = { blue: null, red: null };
     this.publish();
     return true;
   };
@@ -503,6 +530,7 @@ export class ArenaController {
     if (this.phase !== 'paused' || !this.prerequisites()) return false;
     this.phase = this.resumePhase;
     this.cpuAttackAt = null;
+    this.combatYaw = { blue: null, red: null };
     this.publish();
     return true;
   };
@@ -527,6 +555,7 @@ export class ArenaController {
     this.phase = 'fighting';
     this.roundId++;
     this.cpuAttackAt = null;
+    this.combatYaw = { blue: null, red: null };
     this.publish();
     return true;
   };
@@ -583,14 +612,68 @@ export class ArenaController {
     this.analog[id] = eligible ? sanitizeAnalogMovement(input) : { advance: 0, strafe: 0 };
   };
 
-  attack = (kind: AttackKind, id: FighterId = 'blue', roundId = this.roundId) =>
-    roundId === this.roundId && this.requestAttack(id, kind);
+  private evadeSequence = 0;
+  private combatYaw: Record<FighterId, number | null> = { blue: null, red: null };
 
-  command = (kind: CombatCommand, id: FighterId = 'blue', roundId = this.roundId) => {
+  private effectiveCombatYaw(id: FighterId) {
+    if (this.rules.stableFacing && this.combatYaw[id] !== null) return this.combatYaw[id]!;
+    return this.fighters[id].yaw;
+  }
+
+  setCombatYaw = (yaw: number | null, roundId = this.roundId, id: FighterId = 'blue') => {
+    if (roundId !== this.roundId) return;
+    this.combatYaw[id] = yaw !== null && Number.isFinite(yaw) ? yaw : null;
+  };
+
+  attack = (
+    kind: AttackKind,
+    id: FighterId = 'blue',
+    roundId = this.roundId,
+    preferredHand?: 'L' | 'R'
+  ) => roundId === this.roundId && this.requestAttack(id, kind, preferredHand);
+
+  command = (
+    kind: CombatCommand,
+    id: FighterId = 'blue',
+    roundId = this.roundId,
+    preferredHand?: 'L' | 'R'
+  ) => {
     if (roundId !== this.roundId) return false;
     if (kind === 'block-down' || kind === 'block-up') return this.block(kind === 'block-down', id);
     if (kind === 'jump-back') return this.jumpBack(id);
-    return this.requestAttack(id, kind);
+    return this.requestAttack(id, kind, preferredHand);
+  };
+
+  takeEvadedHits = (id: FighterId = 'blue') => this.fighters[id].evadeHits.splice(0);
+
+  getQuestCombatTelemetry = (): QuestCombatTelemetry => {
+    const blue = this.fighters.blue;
+    const red = this.fighters.red;
+    return {
+      distance: distance(blue, red),
+      reach: this.rules.reach,
+      uppercutReach: this.rules.uppercutReach,
+      maxHealth: this.rules.health,
+      guardCapacity: this.rules.guardCapacity,
+      headEvasionEnabled: this.rules.headEvasionEnabled,
+      blueCombatYaw: this.effectiveCombatYaw('blue'),
+      bearingToRed: facing(blue, red),
+      evadeActive: this.isEvading('blue'),
+      evadeRemaining: Math.max(0, blue.evadeUntil - this.clock),
+      evadeCooldownRemaining: Math.max(0, blue.evadeCooldownUntil - this.clock),
+      evadeOutOfBounds: blue.evadeOutOfBounds,
+      evadingPose: blue.evadingPose,
+      evadeArmed: blue.evadeArmed,
+      redAttacking: red.attack
+        ? {
+            kind: red.attack.kind,
+            hand: red.attack.hand,
+            elapsed: red.attack.elapsed,
+            hitAt: red.attack.hitAt,
+            hitChecked: red.attack.hitChecked,
+          }
+        : null,
+    };
   };
 
   private canRaiseGuard(f: Fighter) {
@@ -611,6 +694,7 @@ export class ArenaController {
   }
   private raiseGuard(f: Fighter) {
     f.buffered = null;
+    f.bufferedHand = null;
     f.counterpunchBuffered = false;
     f.guardState = 'raising';
     f.guardElapsed = 0;
@@ -623,6 +707,7 @@ export class ArenaController {
       if (!this.canAcceptBlock(f) || f.guardHeld) return false;
       f.guardHeld = true;
       f.buffered = null;
+      f.bufferedHand = null;
       f.counterpunchBuffered = false;
       if (this.canRaiseGuard(f)) this.raiseGuard(f);
     } else {
@@ -962,14 +1047,17 @@ export class ArenaController {
       if (fighter.counterpunchBuffered) {
         if (fighter.guardHeld || this.clock > fighter.counterpunchUntil + epsilon) {
           fighter.buffered = null;
+          fighter.bufferedHand = null;
           fighter.counterpunchBuffered = false;
         } else if (
           this.clock + epsilon >= fighter.punchReadyAt &&
           ['idle', 'walk'].includes(fighter.mode)
         ) {
+          const nextHand = fighter.bufferedHand ?? undefined;
           fighter.buffered = null;
+          fighter.bufferedHand = null;
           fighter.counterpunchBuffered = false;
-          this.startAttack(id, 'punch');
+          this.startAttack(id, 'punch', nextHand);
         }
       }
     }
@@ -1024,7 +1112,14 @@ export class ArenaController {
           : null;
         if (point) {
           attack.hitChecked = true;
-          if (attack.kind !== 'punch' || !this.isEvading(defender)) {
+          if (attack.kind === 'punch' && this.isEvading(defender)) {
+            this.fighters[defender].evadeHits.push({
+              id: ++this.evadeSequence,
+              attacker: id,
+              kind: attack.kind,
+              hand: attack.hand,
+            });
+          } else {
             hits.push({
               attacker: id,
               defender,
@@ -1038,7 +1133,7 @@ export class ArenaController {
                 inCone(
                   this.fighters[defender],
                   this.fighters[id],
-                  this.fighters[defender].yaw,
+                  this.effectiveCombatYaw(defender),
                   this.rules.guardCone
                 ),
             });
@@ -1071,6 +1166,7 @@ export class ArenaController {
       );
       fighter.attack = null;
       fighter.buffered = null;
+      fighter.bufferedHand = null;
       fighter.counterpunchBuffered = false;
       this.clearReward(fighter);
       fighter.impact = {
@@ -1131,7 +1227,10 @@ export class ArenaController {
         attacker.rewardAt = this.clock;
         attacker.uppercutWindowUntil = this.clock + hit.recovery + this.rules.uppercutWindow;
         attacker.punchRestUntil = this.clock + hit.recovery + this.rules.punchRest;
-        if (attacker.buffered === 'punch') attacker.buffered = null;
+        if (attacker.buffered === 'punch') {
+          attacker.buffered = null;
+          attacker.bufferedHand = null;
+        }
       }
     }
     if (ids.some((id) => this.fighters[id].health === 0)) {
@@ -1141,13 +1240,15 @@ export class ArenaController {
         const fighter = this.fighters[id];
         if (fighter.attack && fighter.attack.elapsed + epsilon >= fighter.attack.duration) {
           const next = fighter.buffered;
+          const nextHand = fighter.bufferedHand ?? undefined;
           fighter.attack = null;
           fighter.buffered = null;
+          fighter.bufferedHand = null;
           this.setAnimation(fighter, 'idle', 'IdleAggro');
           if (id === 'red') this.recoverCPU();
           // A buffered Uppercut already consumed its earned opportunity.
           if (next === 'jump-back') this.jumpBack(id);
-          else if (next) this.startAttack(id, next);
+          else if (next) this.startAttack(id, next, nextHand);
         } else if (fighter.mode === 'launch') {
           this.advanceLaunch(fighter, false);
         } else if (
@@ -1202,6 +1303,8 @@ export class ArenaController {
       evadeArmed: true,
       evadeUntil: 0,
       evadeCooldownUntil: 0,
+      bufferedHand: null,
+      evadeHits: [],
       motionInitialLift: 0,
     };
   }
@@ -1233,7 +1336,7 @@ export class ArenaController {
       x: f.x,
       z: f.z,
       lift: f.lift,
-      yaw: f.yaw,
+      yaw: this.effectiveCombatYaw(id),
       clip: f.clip,
       elapsed: f.attack?.elapsed ?? f.elapsed,
     };
@@ -1250,6 +1353,7 @@ export class ArenaController {
     this.clearHeldMovement();
     ids.forEach((id) => {
       this.fighters[id].buffered = null;
+      this.fighters[id].bufferedHand = null;
       this.fighters[id].counterpunchBuffered = false;
       this.fighters[id].dash = null;
       this.fighters[id].evadingPose = false;
@@ -1273,6 +1377,7 @@ export class ArenaController {
       fighter.punchReadyAt = 0;
       this.clearReward(fighter);
       fighter.impact = null;
+      fighter.evadeHits = [];
       fighter.guardHeld = false;
       fighter.guardNeedsRelease = false;
       fighter.evadeCooldownUntil = 0;
@@ -1298,12 +1403,14 @@ export class ArenaController {
       this.clock + epsilon < fighter.uppercutWindowUntil
     );
   }
-  private requestAttack(id: FighterId, kind: AttackKind) {
+  private requestAttack(id: FighterId, kind: AttackKind, preferredHand?: 'L' | 'R') {
     if (this.phase !== 'fighting' || !this.prerequisites()) return false;
+    const safeHand = preferredHand === 'L' || preferredHand === 'R' ? preferredHand : undefined;
     const fighter = this.fighters[id];
     if (!this.canAcceptAttack(fighter, kind)) return false;
     if (kind === 'punch' && this.clock + epsilon < fighter.punchReadyAt) {
       fighter.buffered = 'punch';
+      fighter.bufferedHand = safeHand ?? null;
       fighter.counterpunchBuffered = true;
       fighter.counterpunchUntil = fighter.punchReadyAt + this.rules.counterpunchBuffer;
       this.publish();
@@ -1312,12 +1419,13 @@ export class ArenaController {
     if (fighter.attack || fighter.mode === 'guard-exit') {
       if (fighter.buffered && !(kind === 'uppercut' && fighter.buffered === 'punch')) return false;
       fighter.buffered = kind;
+      fighter.bufferedHand = safeHand ?? null;
       if (kind === 'uppercut') this.clearReward(fighter);
       this.publish();
       return true;
     }
     if (kind === 'uppercut') this.clearReward(fighter);
-    this.startAttack(id, kind);
+    this.startAttack(id, kind, safeHand);
     this.publish();
     return true;
   }
@@ -1337,21 +1445,23 @@ export class ArenaController {
       return false;
     return !f.buffered || (kind === 'uppercut' && f.buffered === 'punch');
   }
-  private startAttack(id: FighterId, kind: AttackKind) {
+  private startAttack(id: FighterId, kind: AttackKind, preferredHand?: 'L' | 'R') {
     const fighter = this.fighters[id];
     fighter.counterpunchBuffered = false;
     fighter.counterpunchUntil = 0;
     if (!(this.rules.stableFacing && id === 'blue')) {
       fighter.yaw = facing(fighter, this.fighters[id === 'blue' ? 'red' : 'blue']);
     }
+    const safeHand = preferredHand === 'L' || preferredHand === 'R' ? preferredHand : undefined;
     const hand =
-      kind === 'punch'
+      safeHand ??
+      (kind === 'punch'
         ? this.random() < 0.5
           ? 'L'
           : 'R'
         : fighter.uppercutIndex++ % 2 === 0
           ? 'L'
-          : 'R';
+          : 'R');
     const clip = `Combo_${kind === 'punch' ? 'Punch' : 'Uppercut'}${hand}`;
     const timing = attackTiming(clip);
     fighter.attack = {
@@ -1362,7 +1472,7 @@ export class ArenaController {
       hitChecked: false,
       hand,
       step: 0,
-      direction: forward(fighter.yaw),
+      direction: forward(this.effectiveCombatYaw(id)),
     };
     this.setAnimation(fighter, 'attack', clip, true);
   }
@@ -1608,11 +1718,15 @@ export class ArenaController {
       if (f.guardElapsed + epsilon >= this.rules.guardExit) {
         f.guardState = 'off';
         const next = f.buffered;
+        const nextHand = f.bufferedHand ?? undefined;
         f.buffered = null;
+        f.bufferedHand = null;
         this.setAnimation(f, 'idle', 'IdleAggro');
         if (next === 'jump-back') this.jumpBack(id);
-        else if (next === 'punch' && this.clock + epsilon < f.punchReadyAt) f.buffered = 'punch';
-        else if (next) this.startAttack(id, next);
+        else if (next === 'punch' && this.clock + epsilon < f.punchReadyAt) {
+          f.buffered = 'punch';
+          f.bufferedHand = nextHand ?? null;
+        } else if (next) this.startAttack(id, next, nextHand);
       }
     } else if (f.mode === 'guard-break' && f.guardRecoveryRemaining <= epsilon) {
       f.guardState = 'off';

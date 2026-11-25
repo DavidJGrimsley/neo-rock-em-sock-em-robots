@@ -1542,3 +1542,402 @@ test('Stage 06 QuestArenaSession requires physical hand exit after guard-exhaust
   session.dispose();
   ctx.tracker.dispose();
 });
+
+test('QUEST_COMBAT_GESTURE_THRESHOLDS with followLiveHead detects snap-punches, chin/chest guard, and rotated stance', () => {
+  const { QUEST_COMBAT_GESTURE_THRESHOLDS } = require('../src/features/quest-vr/quest-gesture.ts');
+  const classifier = createQuestGestureClassifier({
+    poseSource: 'grip',
+    thresholds: QUEST_COMBAT_GESTURE_THRESHOLDS,
+    followLiveHead: true,
+    frame: { yaw: 180, origin: [0, 1.5, 0] },
+  });
+
+  // Wearer turned 60 deg left toward -X (matching observed physical Quest playtest yaw).
+  const rad60 = (60 * Math.PI) / 180;
+  const fwd = [-Math.sin(rad60), 0, -Math.cos(rad60)];
+  const head = (t) => ({ t, position: [0, 1.5, 0], forward: fwd, up: [0, 1, 0] });
+  const push = (n, leftPos, rightPos, dtMs = 14) => {
+    const ns = (n + 1) * dtMs * 1_000_000;
+    const sample = makeGripCombatSample({
+      seq: 7000 + n,
+      capturedNs: ns,
+      leftGripPos: leftPos,
+      rightGripPos: rightPos,
+    });
+    return classifier.push({ sample, status: 'live', head: head(n * dtMs), nowNs: ns + 1_000_000 });
+  };
+
+  // 1. Chin/chest guard at ~0.24m below eyes and 0.14m forward, even with slight jitter.
+  const rightVec = [-fwd[2], 0, fwd[0]];
+  const pt = (f, lat, u) => [
+    fwd[0] * f + rightVec[0] * lat,
+    1.5 + u,
+    fwd[2] * f + rightVec[2] * lat,
+  ];
+  let guardHeld = false;
+  for (let i = 0; i < 8; i++) {
+    const jitter = i % 2 === 0 ? 0.004 : -0.004;
+    const out = push(i, pt(0.14 + jitter, -0.14, -0.24), pt(0.14 - jitter, 0.14, -0.24));
+    if (out.some((x) => x.type === 'guard' && x.held)) guardHeld = true;
+  }
+  assert.equal(guardHeld, true, 'chin/chest guard activates reliably while turned 60 degrees');
+
+  // Drop guard to wide ready stance and wait for exit grace (>75ms).
+  let guardDropped = false;
+  for (let i = 8; i < 20; i++) {
+    const out = push(i, pt(0.04, -0.22, -0.2), pt(0.04, 0.22, -0.2));
+    if (out.some((x) => x.type === 'guard' && !x.held)) guardDropped = true;
+  }
+  assert.equal(guardDropped, true);
+
+  // 2. Fast snap-punch forward along turned gaze and immediate retraction WITHOUT zero-speed stall!
+  push(20, pt(0.05, -0.22, -0.2), pt(0.05, 0.2, -0.2));
+  push(21, pt(0.05, -0.22, -0.2), pt(0.05, 0.2, -0.2));
+  const snapOffsets = [0.12, 0.22, 0.28, 0.21, 0.12, 0.05];
+  const snapIntents = [];
+  for (let j = 0; j < snapOffsets.length; j++) {
+    const out = push(22 + j, pt(0.05, -0.22, -0.2), pt(snapOffsets[j], 0.2, -0.2));
+    snapIntents.push(...out);
+  }
+  assert.equal(
+    snapIntents.some((x) => x.type === 'punch' && x.hand === 'right'),
+    true,
+    'fast snap-punch fires on peak reversal without hovering'
+  );
+
+  // 3. Second snap-punch shifted laterally re-arms cleanly via peak retreat.
+  push(29, pt(0.05, -0.22, -0.2), pt(0.05, 0.28, -0.2));
+  const snap2Intents = [];
+  for (let j = 0; j < snapOffsets.length; j++) {
+    const out = push(30 + j, pt(0.05, -0.22, -0.2), pt(snapOffsets[j], 0.28, -0.2));
+    snap2Intents.push(...out);
+  }
+  assert.equal(
+    snap2Intents.some((x) => x.type === 'punch' && x.hand === 'right'),
+    true,
+    'rearms on retreat even when stance shifts laterally'
+  );
+
+  // 4. H1 + M2: Raise both hands synchronously (or 1-frame staggered) into guard, hold, then punch straight out of guard.
+  const raiseGuardClassifier = createQuestGestureClassifier({
+    poseSource: 'grip',
+    thresholds: QUEST_COMBAT_GESTURE_THRESHOLDS,
+    followLiveHead: true,
+    frame: { yaw: 180, origin: [0, 1.5, 0] },
+  });
+  const rgPush = (n, l, rg, hPos = [0, 1.5, 0]) => {
+    const ns = (n + 1) * 14 * 1_000_000;
+    return raiseGuardClassifier.push({
+      sample: makeGripCombatSample({ seq: 8000 + n, capturedNs: ns, leftGripPos: l, rightGripPos: rg }),
+      status: 'live',
+      head: { t: n * 14, position: hPos, forward: [0, 0, -1], up: [0, 1, 0] },
+      nowNs: ns + 1_000_000,
+    });
+  };
+  rgPush(0, [-0.14, 1.15, -0.05], [0.14, 1.15, -0.05]);
+  // 1-frame async settle: left arrives inside guard 1 frame before right.
+  const async1 = rgPush(1, [-0.14, 1.38, -0.26], [0.14, 1.34, -0.22]);
+  const async2 = rgPush(2, [-0.14, 1.38, -0.26], [0.14, 1.38, -0.26]);
+  assert.equal(async1.some((x) => x.type === 'punch' || x.type === 'uppercut'), false);
+  assert.equal(async2.some((x) => x.type === 'punch' || x.type === 'uppercut'), false);
+  for (let k = 3; k <= 7; k++) rgPush(k, [-0.14, 1.38, -0.26], [0.14, 1.38, -0.26]);
+  assert.equal(raiseGuardClassifier.snapshot().guard, true);
+  // Fast snap-punch straight out of held guard (<75ms) immediately drops guard and fires punch (H1+M2).
+  const outFromGuard = [];
+  let rgStep = 8;
+  for (const z of [-0.36, -0.46, -0.39, -0.26]) {
+    outFromGuard.push(...rgPush(rgStep++, [-0.14, 1.38, -0.26], [0.14, 1.38, z]));
+  }
+  assert.equal(outFromGuard.some((x) => x.type === 'guard' && !x.held), true);
+  assert.equal(outFromGuard.some((x) => x.type === 'punch' && x.hand === 'right'), true);
+
+  // 5. M3: Leaning forward 12cm at full extension must NOT falsely rearm while hand stays extended in world space.
+  rgPush(20, [-0.14, 1.38, -0.26], [0.14, 1.38, -0.26], [0, 1.5, 0]);
+  rgPush(21, [-0.14, 1.38, -0.26], [0.14, 1.38, -0.4], [0, 1.5, 0]);
+  rgPush(22, [-0.14, 1.38, -0.26], [0.14, 1.38, -0.48], [0, 1.5, 0]);
+  const firstPunch = rgPush(23, [-0.14, 1.38, -0.26], [0.14, 1.38, -0.48], [0, 1.5, 0]);
+  assert.equal(firstPunch.some((x) => x.type === 'punch'), true);
+  // Lean forward 12cm without retracting right fist, then shift forward slightly: must stay disarmed until fist retracts.
+  const leanNoRetract = rgPush(24, [-0.14, 1.38, -0.26], [0.14, 1.38, -0.48], [0, 1.5, -0.12]);
+  const afterLean = rgPush(25, [-0.14, 1.38, -0.26], [0.14, 1.38, -0.58], [0, 1.5, -0.12]);
+  const stopAfterLean = rgPush(26, [-0.14, 1.38, -0.26], [0.14, 1.38, -0.58], [0, 1.5, -0.12]);
+  assert.equal([...leanNoRetract, ...afterLean, ...stopAfterLean].some((x) => x.type === 'punch'), false);
+
+  // 6. Medium #2: Non-reversing uppercut settled within close guard bounds out of an active guard must NOT be suppressed.
+  const guardUpp = createQuestGestureClassifier({
+    poseSource: 'grip',
+    thresholds: QUEST_COMBAT_GESTURE_THRESHOLDS,
+    followLiveHead: true,
+    frame: { yaw: 180, origin: [0, 1.5, 0] },
+  });
+  const guPush = (n, rPos) => {
+    const ns = (n + 1) * 14 * 1_000_000;
+    return guardUpp.push({
+      sample: makeGripCombatSample({
+        seq: 8500 + n,
+        capturedNs: ns,
+        leftGripPos: [-0.14, 1.32, -0.22],
+        rightGripPos: rPos,
+      }),
+      status: 'live',
+      head: { t: n * 14, position: [0, 1.5, 0], forward: [0, 0, -1], up: [0, 1, 0] },
+      nowNs: ns + 1_000_000,
+    });
+  };
+  for (let k = 0; k <= 6; k++) guPush(k, [0.14, 1.32, -0.22]);
+  assert.equal(guardUpp.snapshot().guard, true);
+  const uppOut = [];
+  for (const [k, y] of [
+    [7, 1.42],
+    [8, 1.58],
+    [9, 1.66],
+    [10, 1.66],
+  ]) {
+    uppOut.push(...guPush(k, [0.14, y, -0.22]));
+  }
+  assert.equal(uppOut.some((x) => x.type === 'guard' && !x.held), true);
+  assert.equal(uppOut.some((x) => x.type === 'uppercut' && x.hand === 'right'), true);
+});
+
+test('QuestArenaSession dispatches targeted OpenXR haptics, live combatHud, dodge feedback, and handles haptic errors safely', () => {
+  const hapticsLog = [];
+  let shouldThrowHaptic = false;
+  const fakeInputNowNs = 10_000_000_000;
+
+  const {
+    buildQuestCombatHud,
+    questCombatHudLocalPose,
+    questCombatHudPose,
+  } = require('../src/features/quest-vr/quest-combat-hud.ts');
+  const fc = makeStage06Clock();
+  const calYaw = 180;
+  const calOrigin = [0, 1.5, 0];
+  let headT = 0;
+  const refEpoch = 1;
+  const currentHead = {
+    t: 0,
+    position: [...calOrigin],
+    forward: [0, 0, -1],
+    up: [0, 1, 0],
+  };
+  let liveHeadState = {
+    sample: currentHead,
+    calibration: { origin: [...calOrigin], yaw: calYaw, posture: 'standing', source: 'solo', entry: 1 },
+    recentering: false,
+    refEpoch,
+    referenceResets: 0,
+    nowMs: 0,
+    staleMs: 250,
+  };
+  const headSource = {
+    getLiveHeadState: () => liveHeadState,
+    getSnapshot: () => ({ calibration: liveHeadState.calibration }),
+    subscribeLive: () => () => {},
+  };
+
+  const session = createQuestArenaSession(
+    fc.clock,
+    headSource,
+    {
+      cpuEnabled: true,
+      spawn: QUEST_ARENA_RULES.separation / 2,
+      cpuFirstDelay: 5.0,
+      punchHitstop: 0,
+      uppercutHitstop: 0,
+      blockHitstop: 0,
+    },
+    (handMask, amplitude, durationMs) => {
+      if (shouldThrowHaptic) throw new Error('haptic boom');
+      hapticsLog.push({ handMask, amplitude, durationMs });
+      return true;
+    }
+  );
+  session.solo();
+  const s = session.getSnapshot();
+  for (const a of ['arena', 'blue', 'red']) session.assetLoaded(s.lease, s.token, s.placementVersion, a);
+  session.ready();
+  for (let i = 0; i < 120; i++) fc.stepFrame(20);
+  assert.equal(session.getSnapshot().presentation, 'eyes');
+  assert.ok(session.getSnapshot().combatHud, 'eyes presentation exposes live combatHud');
+
+  let seq = 100;
+  let nowNs = fakeInputNowNs;
+  const pushGrips = (leftPos, rightPos, stepMs = 14) => {
+    headT += stepMs;
+    nowNs += stepMs * 1_000_000;
+    liveHeadState = { ...liveHeadState, sample: { ...currentHead, t: headT }, nowMs: headT };
+    const sample = makeGripCombatSample({
+      seq: seq++,
+      capturedNs: nowNs,
+      refEpoch,
+      leftGripPos: leftPos,
+      rightGripPos: rightPos,
+    });
+    session.setInputState(sample, 'live', undefined, nowNs + 1_000_000);
+    fc.stepFrame(stepMs);
+  };
+
+  // Throw left-hand snap punch -> Red takes hit & Left haptic fires (mask 1).
+  const snapZ = [-0.15, -0.25, -0.4, -0.45, -0.35, -0.22, -0.15];
+  for (const z of snapZ) pushGrips([-0.2, 1.28, z], [0.2, 1.28, -0.15]);
+  for (let i = 0; i < 45; i++) pushGrips([-0.2, 1.28, -0.15], [0.2, 1.28, -0.15]);
+  assert.ok(hapticsLog.some((h) => h.handMask === 1), 'left hand haptic actuated on left hit');
+  assert.ok(session.getSnapshot().combatHud.opponentHealth < 100);
+
+  // Throw right-hand snap punch -> Right haptic fires (mask 2).
+  for (const z of snapZ) pushGrips([-0.2, 1.28, -0.15], [0.2, 1.28, z]);
+  for (let i = 0; i < 45; i++) pushGrips([-0.2, 1.28, -0.15], [0.2, 1.28, -0.15]);
+  assert.ok(hapticsLog.some((h) => h.handMask === 2), 'right hand haptic actuated on right hit');
+
+  // Verify HUD builder output is within QuestPanel compositor bounds across combat/presenting/finished stages (H3, L1).
+  const spec = buildQuestCombatHud(session.getSnapshot().combatHud);
+  assert.ok(spec.ops.length >= 1 && spec.ops.length <= 160);
+  assert.ok(spec.widthM <= 2 && spec.heightM <= 2);
+  const pose = questCombatHudPose(liveHeadState.calibration, session.getSnapshot().combatHud.redBearingOffsetDeg);
+  assert.equal(pose.pose.length, 7);
+  // Medium #1: local pose agrees with calibrated world pose when rotated 180 deg, and clamps bearing to +-75 deg.
+  const localClamped = questCombatHudLocalPose(120);
+  assert.equal(localClamped.clampedOffset, 75);
+  assert.deepEqual(localClamped.rotation, [0, 75, 0]);
+  const worldRotated = questCombatHudPose(
+    { ...liveHeadState.calibration, yaw: 0, origin: [0, 1.5, 0] },
+    120
+  );
+  assert.ok(Math.abs(worldRotated.yaw - -105) < 1e-6);
+  const presentingKo = buildQuestCombatHud({
+    ...session.getSnapshot().combatHud,
+    stage: 'presenting',
+    outcome: null,
+    playerHealth: 70,
+    opponentHealth: 0,
+  });
+  assert.ok(presentingKo.ops.some((op) => op.op === 'text' && /KNOCKOUT/.test(op.text)));
+  assert.equal(presentingKo.ops.some((op) => op.op === 'text' && /DRAW/.test(op.text)), false);
+  const countdownHud = buildQuestCombatHud({
+    ...session.getSnapshot().combatHud,
+    stage: 'countdown',
+    evadeStatus: 'armed',
+    event: null,
+  });
+  assert.ok(countdownHud.ops.some((op) => op.op === 'text' && /GET READY/.test(op.text)));
+
+  // Haptic callback throwing must never crash session frame advance.
+  shouldThrowHaptic = true;
+  for (const z of snapZ) pushGrips([-0.2, 1.28, z], [0.2, 1.28, -0.15]);
+  for (let i = 0; i < 45; i++) pushGrips([-0.2, 1.28, -0.15], [0.2, 1.28, -0.15]);
+  assert.equal(session.getSnapshot().stage, 'fighting');
+  session.dispose();
+
+  // Separate live CPU fight verifying bilateral took-hit (handMask === 3) and duck DODGED! feedback (L2).
+  const cpuSession = createQuestArenaSession(
+    fc.clock,
+    headSource,
+    {
+      cpuEnabled: true,
+      spawn: QUEST_ARENA_RULES.separation / 2,
+      cpuFirstDelay: 0.2,
+      cpuRecovery: 0.3,
+      punchHitstop: 0,
+      uppercutHitstop: 0,
+      blockHitstop: 0,
+    },
+    (handMask, amplitude, durationMs) => {
+      hapticsLog.push({ handMask, amplitude, durationMs });
+      return true;
+    }
+  );
+  hapticsLog.length = 0;
+  cpuSession.solo();
+  const cs = cpuSession.getSnapshot();
+  for (const a of ['arena', 'blue', 'red']) cpuSession.assetLoaded(cs.lease, cs.token, cs.placementVersion, a);
+  cpuSession.ready();
+  for (let i = 0; i < 120; i++) fc.stepFrame(20);
+  const stepCpuFight = (yHead = 1.5, dtMs = 20) => {
+    headT += dtMs;
+    nowNs += dtMs * 1_000_000;
+    liveHeadState = {
+      ...liveHeadState,
+      sample: { ...currentHead, t: headT, position: [0, yHead, 0] },
+      nowMs: headT,
+    };
+    cpuSession.setInputState(
+      makeGripCombatSample({
+        seq: seq++,
+        capturedNs: nowNs,
+        refEpoch,
+        leftGripPos: [-0.2, 1.25, -0.1],
+        rightGripPos: [0.2, 1.25, -0.1],
+      }),
+      'live',
+      undefined,
+      nowNs + 1_000_000
+    );
+    fc.stepFrame(dtMs);
+  };
+  let sawTookHit = false;
+  for (let i = 0; i < 60; i++) {
+    stepCpuFight(1.5, 20);
+    if (cpuSession.getSnapshot().combatHud?.event?.kind === 'took-hit') {
+      sawTookHit = true;
+      break;
+    }
+  }
+  assert.equal(sawTookHit, true, 'CPU punch landing fires took-hit HUD event');
+  assert.ok(hapticsLog.some((h) => h.handMask === 3), 'incoming CPU hit fires bilateral mask=3 haptic');
+
+  // Wait for hitstun/stagger to clear, then smoothly duck beneath incoming CPU punch and verify DODGED! event.
+  for (let i = 0; i < 35; i++) stepCpuFight(1.5, 20);
+  let sawDodged = false;
+  for (let i = 0; i < 5; i++) stepCpuFight(1.5 - (i + 1) * 0.04, 20);
+  for (let i = 0; i < 45; i++) {
+    stepCpuFight(1.28, 20);
+    if (cpuSession.getSnapshot().combatHud?.event?.kind === 'dodged') {
+      sawDodged = true;
+      break;
+    }
+  }
+  assert.equal(sawDodged, true, 'ducking CPU punch emits DODGED! HUD feedback event');
+
+  // H2 + Low #1: During guard drain and menuFocus, stamina quantizes to 5-unit buckets and evadeStatus never shows false cooldown 0.0s.
+  let subPublishes = 0;
+  const unsubH2 = cpuSession.subscribe(() => {
+    subPublishes += 1;
+  });
+  for (let i = 0; i < 6; i++) stepCpuFight(1.5, 20);
+  // Hold hands in guard for 40 ticks (800 ms) while guard stamina drains at 15/s -> ~12 stamina units.
+  const observedStamina = new Set();
+  for (let g = 0; g < 40; g++) {
+    headT += 20;
+    nowNs += 20_000_000;
+    liveHeadState = {
+      ...liveHeadState,
+      sample: { ...currentHead, t: headT, position: [0, 1.5, 0] },
+      nowMs: headT,
+    };
+    cpuSession.setInputState(
+      makeGripCombatSample({
+        seq: seq++,
+        capturedNs: nowNs,
+        refEpoch,
+        leftGripPos: [-0.14, 1.38, -0.26],
+        rightGripPos: [0.14, 1.38, -0.26],
+      }),
+      'live',
+      undefined,
+      nowNs + 1_000_000
+    );
+    fc.stepFrame(20);
+    const st = cpuSession.getSnapshot().combatHud?.playerGuardStamina;
+    if (typeof st === 'number') observedStamina.add(st);
+  }
+  unsubH2();
+  assert.ok(subPublishes < 18, `HUD quantization keeps publishes sparse (${subPublishes} across 46 ticks)`);
+  for (const val of observedStamina) {
+    assert.ok(val % 5 === 0 || val < 5, `stamina ${val} must be quantized to 5-unit buckets`);
+  }
+  cpuSession.setMenuFocus(true);
+  fc.stepFrame(20);
+  assert.equal(cpuSession.getSnapshot().combatHud?.evadeStatus, 'armed');
+
+  cpuSession.dispose();
+});

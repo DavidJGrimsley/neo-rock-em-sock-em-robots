@@ -344,6 +344,9 @@ const inputJni = [
   'nativeHandsVersion',
   'nativeSetHandsEnabled',
   'nativeReadGrip',
+  'nativeHapticsVersion',
+  'nativeTriggerHaptic',
+  'nativeHapticsStatus',
 ].map((name) => `Java_expo_modules_questinput_QuestInputModule_${name}`);
 const missingInputJni = pristine ? [] : inputJni.filter((symbol) => !candidate.exports.has(symbol));
 if (missingInputJni.length)

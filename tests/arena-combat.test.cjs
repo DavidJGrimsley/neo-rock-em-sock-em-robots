@@ -598,3 +598,76 @@ test('stableFacing keeps player yaw locked through attacks after strafing', () =
   h.tick(0.05);
   assert.equal(h.controller.fighters.blue.yaw, startYaw);
 });
+
+test('preferredHand, stableFacing combatYaw, and evade telemetry preserve rules while enabling Quest combat', () => {
+  const h = harness({
+    separation: 0.065,
+    spawn: 0.0325,
+    reach: 0.095,
+    stableFacing: true,
+    headEvasionEnabled: true,
+    cpuEnabled: false,
+  });
+
+  // Left and right preferred hands control clip & reported impact hand cleanly.
+  assert.equal(h.controller.attack('punch', 'blue', h.snapshot().roundId, 'L'), true);
+  h.tick(0.05);
+  assert.equal(h.snapshot().blue.clip, 'Combo_PunchL');
+  h.tick(0.6);
+  assert.equal(h.snapshot().red.impact.hand, 'L');
+
+  assert.equal(h.controller.attack('punch', 'blue', h.snapshot().roundId, 'R'), true);
+  h.tick(0.05);
+  assert.equal(h.snapshot().blue.clip, 'Combo_PunchR');
+  h.tick(0.6);
+  assert.equal(h.snapshot().red.impact.hand, 'R');
+
+  // Strafe sideways and aim via combatYaw toward Red while fighters.blue.yaw stays visually locked at 90.
+  const startYaw = h.controller.fighters.blue.yaw;
+  h.controller.setAnalogMovement({ advance: 0, strafe: 1 });
+  h.tick(0.25);
+  h.controller.setAnalogMovement({ advance: 0, strafe: 0 });
+  const redBearing = h.controller.getQuestCombatTelemetry().bearingToRed;
+  h.controller.setCombatYaw(redBearing);
+  assert.equal(h.controller.fighters.blue.yaw, startYaw);
+  const redHealthBefore = h.snapshot().red.health;
+  assert.equal(h.controller.attack('punch', 'blue', h.snapshot().roundId, 'L'), true);
+  h.tick(0.65);
+  assert.ok(h.snapshot().red.health < redHealthBefore);
+
+  // Guard oriented via combatYaw blocks Red's incoming punch even when strafed.
+  assert.equal(h.controller.command('block-down', 'blue'), true);
+  h.tick(0.15);
+  assert.equal(h.controller.attack('punch', 'red'), true);
+  h.tick(0.5);
+  assert.equal(h.snapshot().blue.impact.outcome, 'blocked');
+  assert.equal(h.controller.command('block-up', 'blue'), true);
+  h.tick(0.2);
+
+  // Active head duck records confirmed evade whiff.
+  h.controller.setHeadEvasion({ duck: false, weave: false });
+  h.controller.setHeadEvasion({ duck: true, weave: false });
+  assert.equal(h.controller.getQuestCombatTelemetry().evadeActive, true);
+  assert.equal(h.controller.attack('punch', 'red'), true);
+  h.tick(0.5);
+  const evaded = h.controller.takeEvadedHits('blue');
+  assert.equal(evaded.length, 1);
+  assert.equal(evaded[0].kind, 'punch');
+
+  // Clear evasion and test M1 buffered counterpunch preferredHand + M4 invalid command hand defense.
+  h.controller.setHeadEvasion({ duck: false, weave: false });
+  h.tick(0.4);
+  assert.equal(h.controller.attack('punch', 'red'), true);
+  h.tick(0.55); // Blue now inside counterpunch buffer window during HitFrontFast stagger.
+  assert.equal(h.controller.attack('punch', 'blue', h.snapshot().roundId, 'L'), true);
+  assert.equal(h.snapshot().blue.counterpunchBuffered, true);
+  h.tick(0.2);
+  assert.equal(h.snapshot().blue.clip, 'Combo_PunchL');
+  h.tick(0.6);
+
+  // Invalid preferredHand injected via protocol command never throws on host.
+  const round = h.snapshot().roundId;
+  assert.equal(h.controller.command('punch', 'red', round, 'INVALID'), true);
+  h.tick(0.1);
+  assert.match(h.snapshot().red.clip, /^Combo_Punch[LR]$/);
+});

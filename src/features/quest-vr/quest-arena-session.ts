@@ -8,13 +8,19 @@ import {
   type FighterTransform,
 } from '../arena-fighter/arena-controller.ts';
 import {
+  type QuestCombatHudEvent,
+  type QuestCombatHudEventKind,
+  type QuestCombatHudState,
+  type QuestEvadeHudStatus,
+} from './quest-combat-hud.ts';
+import {
   createQuestFirstPersonBodyTrackerState,
   stepQuestFirstPersonBodyClip,
   type QuestFirstPersonBodyClip,
 } from './quest-first-person-body.ts';
 import {
   createQuestGestureClassifier,
-  PROVISIONAL_QUEST_GESTURE_THRESHOLDS,
+  QUEST_COMBAT_GESTURE_THRESHOLDS,
   type QuestBodyFrame,
 } from './quest-gesture.ts';
 import { DEFAULT_CALIBRATION, gameplayHeadPose, type Calibration } from './quest-head-rig.ts';
@@ -29,6 +35,7 @@ import {
   QUEST_HEAD_SAMPLE_STALE_MS,
   evaluateQuestDashInput,
   questLocomotionFromInput,
+  resolveQuestHeadHeading,
   type QuestDashTriggerState,
   type QuestHeadLocomotionState,
   type QuestLocomotionCommand,
@@ -73,6 +80,11 @@ export const QUEST_ARENA_RULES = {
   headEvasionEnabled: true,
   evadeDuration: 0.75,
   evadeCooldown: 0.35,
+  guardStartup: 0.05,
+  cpuFirstDelay: 1.0,
+  cpuRecovery: 0.4,
+  cpuReaction: 0.4,
+  cpuGuardReaction: 0.25,
 } as const;
 const sessionLease = 1;
 const MAX_STEP_DT_S = 0.05;
@@ -121,7 +133,14 @@ export interface QuestArenaView {
   /** menu before Solo, side until Ready, eyes after the intro. */
   presentation: 'menu' | 'side' | 'eyes';
   introActive: boolean;
+  combatHud: QuestCombatHudState | null;
 }
+
+export type QuestHapticTrigger = (
+  handMask: number,
+  amplitude: number,
+  durationMs: number
+) => boolean;
 
 export interface QuestClock {
   schedule: (callback: () => void, delayMs: number) => unknown;
@@ -161,7 +180,8 @@ function menuLines(
   page: QuestMenuPage,
   stage: string | null,
   acknowledged: boolean,
-  leaving: boolean
+  leaving: boolean,
+  outcome: FighterId | 'draw' | null = null
 ) {
   if (leaving) return [QUEST_LEAVING];
   if (page === 'menu') {
@@ -171,7 +191,12 @@ function menuLines(
     ];
   }
   if (stage === 'paused') return ['Match paused. Select Ready to resume.'];
-  if (stage === 'finished') return ['Match finished. Select Ready for a rematch.'];
+  if (stage === 'finished') {
+    if (outcome === 'blue') return ['You won! Select Ready for a rematch.'];
+    if (outcome === 'red') return ['Red Mike won. Select Ready for a rematch.'];
+    if (outcome === 'draw') return ['Draw! Select Ready for a rematch.'];
+    return ['Match finished. Select Ready for a rematch.'];
+  }
   if (stage === 'fighting')
     return [
       'Fight active. Punch, uppercut when ready, raise both hands to guard, duck or weave, and use the left thumbstick + A to move or dash.',
@@ -186,11 +211,17 @@ export interface QuestArenaHeadSource {
   subscribeLive?: (listener: (event: QuestHeadLiveEvent) => void) => () => void;
 }
 
+function noopHapticTrigger() {
+  return false;
+}
+
 export function createQuestArenaSession(
   clock: QuestClock = defaultClock,
   headSource: QuestArenaHeadSource = questHeadTracker,
-  rulesOverride?: Partial<typeof ARENA_RULES>
+  rulesOverride?: Partial<typeof ARENA_RULES>,
+  initialHapticTrigger: QuestHapticTrigger = noopHapticTrigger
 ) {
+  let activeHapticTrigger: QuestHapticTrigger = initialHapticTrigger;
   const nowFn = clock.now ?? (() => Date.now());
   const scheduleFrame = clock.scheduleFrame ?? ((cb) => clock.schedule(cb, 16));
   const cancelFrame = clock.cancelFrame ?? ((handle) => clock.cancel(handle));
@@ -285,6 +316,8 @@ export function createQuestArenaSession(
   const gestureClassifier = createQuestGestureClassifier({
     poseSource: 'grip',
     frame: activeGestureFrame,
+    thresholds: QUEST_COMBAT_GESTURE_THRESHOLDS,
+    followLiveHead: true,
   });
   let desiredGuardHeld = false;
   let guardNeedsPhysicalRelease = false;
@@ -297,6 +330,92 @@ export function createQuestArenaSession(
   } | null = null;
   let dispatchedGuardHeld = false;
   let dispatchedGuardRoundId: number | null = null;
+  let hudClockS = 0;
+  let hudEventSeq = 0;
+  let activeHudEvent: QuestCombatHudEvent | null = null;
+  let hudEventExpiresAt = 0;
+  let lastEvadeKind: 'duck' | 'weave' | null = null;
+
+  function emitHudEvent(
+    kind: QuestCombatHudEventKind,
+    label: string,
+    tone: QuestCombatHudEvent['tone'],
+    ttlSeconds = 1.05
+  ) {
+    activeHudEvent = { id: ++hudEventSeq, kind, label, tone };
+    hudEventExpiresAt = hudClockS + ttlSeconds;
+  }
+
+  function triggerHapticSafe(handMask: number, amplitude: number, durationMs: number) {
+    if (!appActive || menuFocused || presentation !== 'eyes' || (handMask & 3) === 0) return;
+    try {
+      activeHapticTrigger(handMask, amplitude, durationMs);
+    } catch {
+      // Haptic failures must never interrupt combat simulation.
+    }
+  }
+
+  function buildCombatHud(
+    snapshot: ReturnType<ArenaMatch['getSnapshot']>
+  ): QuestCombatHudState | null {
+    if (!match || presentation !== 'eyes') return null;
+    const telemetry = match.getQuestCombatTelemetry();
+    const blue = snapshot.blue;
+    const red = snapshot.red;
+    const evadeStatus: QuestEvadeHudStatus = !telemetry.headEvasionEnabled
+      ? 'unavailable'
+      : telemetry.evadeOutOfBounds
+        ? 'oob'
+        : telemetry.evadeActive
+          ? 'active'
+          : telemetry.evadeCooldownRemaining > 0
+            ? 'cooldown'
+            : telemetry.evadingPose && !telemetry.evadeArmed
+              ? 'recenter-to-rearm'
+              : 'armed';
+
+    const incomingAttack =
+      telemetry.redAttacking && !telemetry.redAttacking.hitChecked
+        ? { kind: telemetry.redAttacking.kind, hand: telemetry.redAttacking.hand }
+        : null;
+    const spawnYaw = spawnTransforms?.blue.yaw ?? 90;
+    const rawBearingOffset =
+      ((((telemetry.bearingToRed - spawnYaw + 180) % 360) + 360) % 360) - 180;
+    const quantizedStamina =
+      blue.guardStamina <= 0
+        ? 0
+        : blue.guardStamina < 5
+          ? Math.ceil(blue.guardStamina)
+          : Math.min(telemetry.guardCapacity, Math.round(blue.guardStamina / 5) * 5);
+
+    return {
+      stage: snapshot.stage,
+      outcome: snapshot.outcome,
+      playerHealth: blue.health,
+      playerMaxHealth: telemetry.maxHealth,
+      playerMode: blue.mode,
+      playerGuardStamina: quantizedStamina,
+      playerGuardMaxStamina: telemetry.guardCapacity,
+      playerGuardState: blue.guardState,
+      playerGuardHeld: blue.guardHeld,
+      playerPunchProgress: blue.punchProgress,
+      playerUppercutReady: blue.uppercutReady,
+      playerUppercutWindowRemaining: Math.ceil(Math.max(0, blue.uppercutWindowRemaining) * 4) / 4,
+      opponentHealth: red.health,
+      opponentMaxHealth: telemetry.maxHealth,
+      opponentGuardState: red.guardState,
+      opponentMode: red.mode,
+      inPunchRange: telemetry.distance <= telemetry.reach + 0.002,
+      inUppercutRange: telemetry.distance <= telemetry.uppercutReach + 0.002,
+      evadeStatus,
+      evadeKind: lastEvadeKind,
+      evadeRemaining: Math.ceil(telemetry.evadeRemaining * 4) / 4,
+      evadeCooldownRemaining: Math.ceil(telemetry.evadeCooldownRemaining * 4) / 4,
+      incomingAttack,
+      event: activeHudEvent,
+      redBearingOffsetDeg: Math.round(rawBearingOffset / 5) * 5,
+    };
+  }
 
   function emptyView(): QuestArenaView {
     return {
@@ -323,9 +442,10 @@ export function createQuestArenaSession(
       animationsRunning: false,
       outcome: null,
       lastReady,
-      lines: menuLines(page, null, acknowledged, leaving),
+      lines: menuLines(page, null, acknowledged, leaving, null),
       presentation,
       introActive: intro !== null,
+      combatHud: null,
     };
   }
 
@@ -481,14 +601,18 @@ export function createQuestArenaSession(
     }
     const cal = fullCalibrationFromHeadState(head);
     if (!cal || !head.sample || !isHeadSampleFresh(head)) {
+      lastEvadeKind = null;
       match.setHeadEvasion(null, snap.roundId);
       return;
     }
     const pose = gameplayHeadPose(cal, head.sample);
+    const duck = pose.vertical <= -QUEST_COMBAT_GESTURE_THRESHOLDS.duckEnterM;
+    const weave = Math.abs(pose.lateral) >= QUEST_COMBAT_GESTURE_THRESHOLDS.weaveEnterM;
+    lastEvadeKind = duck ? 'duck' : weave ? 'weave' : null;
     match.setHeadEvasion(
       {
-        duck: pose.vertical <= -PROVISIONAL_QUEST_GESTURE_THRESHOLDS.duckEnterM,
-        weave: Math.abs(pose.lateral) >= PROVISIONAL_QUEST_GESTURE_THRESHOLDS.weaveEnterM,
+        duck,
+        weave,
         outOfBounds: pose.outOfBounds,
       },
       snap.roundId
@@ -531,10 +655,11 @@ export function createQuestArenaSession(
         capturedNs: sample.capturedNs,
       };
     }
+    const freshHead = head.sample && isHeadSampleFresh(head) ? head.sample : null;
     const intents = gestureClassifier.push({
       sample,
       status: combatOpen ? status : 'unfocused',
-      head: null,
+      head: freshHead,
       calibration: null,
       headRefEpoch: head.refEpoch ?? null,
       recentering: recenterNeutral || head.recentering === true,
@@ -557,10 +682,40 @@ export function createQuestArenaSession(
         } else if (!guardNeedsPhysicalRelease) {
           dispatchSessionGuard(true, snap.roundId);
         }
-      } else if (intent.type === 'punch') {
-        match.attack('punch', snap.roundId);
-      } else if (intent.type === 'uppercut') {
-        match.attack('uppercut', snap.roundId);
+      } else if (intent.type === 'punch' || intent.type === 'uppercut') {
+        const hand: 'L' | 'R' = intent.hand === 'left' ? 'L' : 'R';
+        const latest = match.getSnapshot();
+        const telemetry = match.getQuestCombatTelemetry();
+        const accepted = match.attack(intent.type, latest.roundId, hand);
+        if (accepted) {
+          const reqReach = intent.type === 'uppercut' ? telemetry.uppercutReach : telemetry.reach;
+          if (telemetry.distance > reqReach + 0.004) {
+            emitHudEvent('out-of-range', 'OUT OF RANGE — STEP CLOSER', 'warning', 0.9);
+          }
+        } else if (intent.type === 'uppercut' && !latest.blue.uppercutReady) {
+          emitHudEvent(
+            'uppercut-not-ready',
+            `UPPERCUT LOCKED (${latest.blue.punchProgress}/3 HITS)`,
+            'warning',
+            0.9
+          );
+        } else if (
+          desiredGuardHeld ||
+          ((latest.blue.guardHeld ||
+            latest.blue.guardState === 'holding' ||
+            latest.blue.guardState === 'raising') &&
+            dispatchedGuardHeld)
+        ) {
+          emitHudEvent('drop-guard', 'LOWER HANDS TO PUNCH', 'warning', 0.85);
+        } else if (
+          latest.blue.defenseLockRemaining > 0 ||
+          latest.blue.guardRecoveryRemaining > 0 ||
+          latest.blue.punchRecoveryRemaining > 0 ||
+          latest.blue.punchRestRemaining > 0
+        ) {
+          emitHudEvent('recovering', 'STAGGERED / RECOVERING', 'warning', 0.75);
+        }
+        publish();
       }
     }
     if (desiredGuardHeld && !guardNeedsPhysicalRelease) {
@@ -578,12 +733,22 @@ export function createQuestArenaSession(
     syncHeadEvasion(head);
   }
 
-  function applyLocomotionToMatch() {
+  function applyLocomotionToMatch(head?: QuestHeadStateSnapshot) {
     if (!match) return;
     const snapshot = match.getSnapshot();
     const analog =
       snapshot.stage === 'fighting' && appActive ? currentAnalog() : { advance: 0, strafe: 0 };
     match.setAnalogMovement(analog, snapshot.roundId);
+    if (head && snapshot.stage === 'fighting') {
+      const heading = resolveQuestHeadHeading(head);
+      if (heading.ok) {
+        const baseYaw = spawnTransforms?.blue.yaw ?? 90;
+        const lookYaw = ((((baseYaw + heading.yawRelative + 180) % 360) + 360) % 360) - 180;
+        const bearing = match.getQuestCombatTelemetry().bearingToRed;
+        const bearingDelta = ((((bearing - lookYaw + 180) % 360) + 360) % 360) - 180;
+        match.setCombatYaw(Math.abs(bearingDelta) <= 45 ? bearing : lookYaw, snapshot.roundId);
+      }
+    }
   }
 
   function neutralizeDash() {
@@ -658,7 +823,7 @@ export function createQuestArenaSession(
         head,
       });
     }
-    applyLocomotionToMatch();
+    applyLocomotionToMatch(head);
     syncGestureFrame(head);
     const snapshot = match?.getSnapshot();
     if (!isCombatInputGateOpen(snapshot, head, latestInput.sample, latestInput.status)) {
@@ -755,9 +920,10 @@ export function createQuestArenaSession(
             animationsRunning: snapshot.animationsRunning && snapshot.impactPauseRemaining === 0,
             outcome: snapshot.outcome,
             lastReady,
-            lines: menuLines(page, snapshot.stage, acknowledged, leaving),
+            lines: menuLines(page, snapshot.stage, acknowledged, leaving, snapshot.outcome),
             presentation,
             introActive: intro !== null,
+            combatHud: buildCombatHud(snapshot),
           }
         : emptyView();
 
@@ -844,9 +1010,58 @@ export function createQuestArenaSession(
     while (remaining > 1e-6) {
       const stepDt = Math.min(MAX_STEP_DT_S, remaining);
       remaining -= stepDt;
+      hudClockS += stepDt;
+      if (activeHudEvent && hudClockS >= hudEventExpiresAt) {
+        activeHudEvent = null;
+      }
       const head = recomputeLocomotion();
       const before = match?.getTransform('blue') ?? null;
       match?.tick(token, stepDt);
+      if (match) {
+        const impacts = match.takeImpacts();
+        for (const { fighter, impact } of impacts) {
+          if (fighter === 'red') {
+            const handMask = impact.hand === 'L' ? 1 : 2;
+            if (impact.outcome === 'hit') {
+              const isUppercut = impact.kind === 'uppercut';
+              emitHudEvent(
+                isUppercut ? 'uppercut-hit' : 'hit',
+                isUppercut ? `UPPERCUT HIT (${impact.hand})!` : `CLEAN HIT (${impact.hand})!`,
+                'positive',
+                1.05
+              );
+              triggerHapticSafe(handMask, isUppercut ? 1.0 : 0.85, isUppercut ? 140 : 75);
+            } else if (impact.outcome === 'guard-break') {
+              emitHudEvent('guard-break', 'CPU GUARD BROKEN!', 'positive', 1.1);
+              triggerHapticSafe(handMask, 0.95, 115);
+            } else {
+              emitHudEvent('cpu-blocked', 'CPU BLOCKED — NO DAMAGE', 'warning', 0.95);
+              triggerHapticSafe(handMask, 0.35, 40);
+            }
+          } else {
+            if (impact.outcome === 'hit') {
+              const isUppercut = impact.kind === 'uppercut';
+              emitHudEvent(
+                'took-hit',
+                isUppercut ? 'HIT BY UPPERCUT!' : 'TOOK HIT!',
+                'danger',
+                1.0
+              );
+              triggerHapticSafe(3, isUppercut ? 1.0 : 0.9, isUppercut ? 160 : 110);
+            } else if (impact.outcome === 'guard-break') {
+              emitHudEvent('player-guard-break', 'GUARD BROKEN!', 'danger', 1.15);
+              triggerHapticSafe(3, 1.0, 150);
+            } else {
+              emitHudEvent('blocked-cpu', 'BLOCKED!', 'info', 0.85);
+              triggerHapticSafe(3, 0.5, 45);
+            }
+          }
+        }
+        const evaded = match.takeEvadedHits();
+        if (evaded.length > 0) {
+          emitHudEvent('dodged', 'DODGED!', 'info', 0.95);
+        }
+      }
       const after = match?.getTransform('blue') ?? null;
       const snapshot = match?.getSnapshot();
       const bodyActive = isBodyLocomotionActive(snapshot, head);
@@ -874,7 +1089,7 @@ export function createQuestArenaSession(
       }
       bodyTracker = nextBodyTracker;
     }
-    if (bodyClipChanged) publish();
+    if (bodyClipChanged || presentation === 'eyes') publish();
     notifyFrame(clampedDt);
   }
 
@@ -948,6 +1163,11 @@ export function createQuestArenaSession(
     dispatchedGuardRoundId = null;
     lastProcessedLiveKey = null;
     latestInputNowNs = undefined;
+    hudClockS = 0;
+    hudEventSeq = 0;
+    activeHudEvent = null;
+    hudEventExpiresAt = 0;
+    lastEvadeKind = null;
     gestureClassifier.setFrame(frameFromHeadState(readHeadState()));
     bodyTracker = createQuestFirstPersonBodyTrackerState();
     notifyFrame(0);
@@ -1173,6 +1393,9 @@ export function createQuestArenaSession(
     },
     animationApplied(id: FighterId, animationId: number) {
       match?.animationApplied(id, animationId);
+    },
+    setHapticTrigger(trigger: QuestHapticTrigger | null) {
+      activeHapticTrigger = trigger ?? noopHapticTrigger;
     },
     back() {
       if (disposed || leaving || page !== 'ring') return 'menu' as const;

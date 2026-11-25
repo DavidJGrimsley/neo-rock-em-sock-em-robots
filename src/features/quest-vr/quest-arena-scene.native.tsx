@@ -56,6 +56,13 @@ import {
 } from './quest-input-visualizer.native.tsx';
 import { questDiagLayerMaterials } from './quest-diagnostics-layout.ts';
 import {
+  buildQuestCombatHud,
+  questCombatHudLocalPose,
+  questCombatHudPose,
+  QUEST_COMBAT_HUD_SIZE,
+  type QuestCombatHudState,
+} from './quest-combat-hud.ts';
+import {
   createQuestMenuCompositor,
   questMenuLayerMaterials,
   questMenuLayerNotice,
@@ -1253,6 +1260,7 @@ function QuestMenu({
   lines,
   layer,
   titleLayer,
+  combatHud,
   hover,
   onPress,
   onHover,
@@ -1264,6 +1272,7 @@ function QuestMenu({
   lines: string[];
   layer: QuestMenuLayerSnapshot;
   titleLayer: QuestMenuLayerSnapshot;
+  combatHud: QuestCombatHudState | null;
   hover: QuestMenuAction | null;
   onPress: (action: QuestMenuAction, clickState: number, source: unknown) => void;
   onHover: (action: QuestMenuAction, hovering: boolean, source: unknown) => void;
@@ -1295,7 +1304,44 @@ function QuestMenu({
   const titleSize = QUEST_TITLE_SIZE[page];
   return (
     <ViroNode position={[...frame.position]} rotation={[0, frame.rotationY, 0]}>
-      {!titleOn ? (
+      {!titleOn && combatHud ? (
+        (() => {
+          const localHudPose = questCombatHudLocalPose(combatHud.redBearingOffsetDeg);
+          return (
+            <ViroNode
+              position={[...localHudPose.position]}
+              rotation={[...localHudPose.rotation]}
+              ignoreEventHandling>
+              <ViroText
+                text={`YOU ${Math.ceil(combatHud.playerHealth)}/${combatHud.playerMaxHealth} | GUARD ${Math.round(
+                  (combatHud.playerGuardStamina / Math.max(1, combatHud.playerGuardMaxStamina)) *
+                    100
+                )}% | RED ${Math.ceil(combatHud.opponentHealth)}/${combatHud.opponentMaxHealth}`}
+                position={[0, 0.12, 0]}
+                scale={textScale}
+                width={1.28 / TEXT_SCALE}
+                height={0.14 / TEXT_SCALE}
+                style={fallbackTitleNeoStyle}
+                ignoreEventHandling
+              />
+              <ViroText
+                text={
+                  combatHud.event?.label ??
+                  (combatHud.incomingAttack
+                    ? `INCOMING ${combatHud.incomingAttack.kind.toUpperCase()} (${combatHud.incomingAttack.hand})`
+                    : `UPP ${combatHud.playerPunchProgress}/3 | ${combatHud.evadeStatus.toUpperCase()}`)
+                }
+                position={[0, -0.04, 0]}
+                scale={textScale}
+                width={1.28 / TEXT_SCALE}
+                height={0.14 / TEXT_SCALE}
+                style={fallbackTitleMainStyle}
+                ignoreEventHandling
+              />
+            </ViroNode>
+          );
+        })()
+      ) : !titleOn ? (
         <ViroNode position={titlePose.position} rotation={titlePose.rotation}>
           <ViroText
             text="Neo"
@@ -1564,7 +1610,27 @@ export default function QuestArenaScene() {
     [fonts, menuLines, posture, view.acknowledged, view.page]
   );
   const titleModel = useMemo(() => buildQuestMenuTitle({ titles, fonts }), [fonts, titles]);
+  const combatHudModel = useMemo(
+    () =>
+      view.presentation === 'eyes' && view.combatHud
+        ? buildQuestCombatHud(view.combatHud, fonts)
+        : null,
+    [fonts, view.combatHud, view.presentation]
+  );
   const panelLabel = `${view.page} ack=${view.acknowledged} ${posture}`;
+
+  useEffect(() => {
+    session.setHapticTrigger?.((handMask, amplitude, durationMs) => {
+      try {
+        return questInputNative?.triggerHaptic?.(handMask, amplitude, durationMs) === true;
+      } catch {
+        return false;
+      }
+    });
+    return () => {
+      session.setHapticTrigger?.(null);
+    };
+  }, [session]);
 
   useEffect(() => {
     const hasMenuHover = () => {
@@ -1901,6 +1967,18 @@ export default function QuestArenaScene() {
       titleCompositor.hide();
       return;
     }
+    if (view.presentation === 'eyes' && view.combatHud && combatHudModel) {
+      titleCompositor.present({
+        label: 'combat hud',
+        pose: questCombatHudPose(calibration, view.combatHud.redBearingOffsetDeg).pose,
+        ops: combatHudModel.ops,
+        widthPx: combatHudModel.widthPx,
+        heightPx: combatHudModel.heightPx,
+        widthM: QUEST_COMBAT_HUD_SIZE.widthM,
+        heightM: QUEST_COMBAT_HUD_SIZE.heightM,
+      });
+      return;
+    }
     const titleSize = QUEST_TITLE_SIZE[view.page];
     titleCompositor.present({
       label: `title ${view.page}`,
@@ -1911,7 +1989,34 @@ export default function QuestArenaScene() {
       widthM: titleSize.widthM,
       heightM: titleSize.heightM,
     });
-  }, [calibration, titleCompositor, titleModel, view.introActive, view.page]);
+  }, [
+    calibration,
+    combatHudModel,
+    titleCompositor,
+    titleModel,
+    view.combatHud,
+    view.introActive,
+    view.page,
+    view.presentation,
+  ]);
+
+  const lastCombatLogKeyRef = useRef<string>('');
+  useEffect(() => {
+    if (view.presentation !== 'eyes' || !view.combatHud) return;
+    const h = view.combatHud;
+    const logKey = `${h.stage}:${h.event?.id ?? 0}:${Math.ceil(h.playerHealth)}:${Math.ceil(
+      h.opponentHealth
+    )}:${h.playerGuardState}:${h.evadeStatus}`;
+    if (logKey === lastCombatLogKeyRef.current) return;
+    lastCombatLogKeyRef.current = logKey;
+    const hs = questInputNative?.hapticsStatus?.();
+    const hapticsText = hs
+      ? `v=${hs.version} live=${hs.live} act=${hs.actionsReady} app=${hs.applied} fail=${hs.failed} drop=${hs.dropped} xr=${hs.lastResult}`
+      : `v=${questInputNative?.hapticsVersion?.() ?? 0}`;
+    console.warn(
+      `[QuestCombat] stage=${h.stage} blue=${h.playerHealth} red=${h.opponentHealth} guard=${h.playerGuardState}:${h.playerGuardStamina} evade=${h.evadeStatus} range=${h.inPunchRange} evt=${h.event?.kind ?? 'none'} haptics=(${hapticsText})`
+    );
+  }, [view.combatHud, view.presentation]);
 
   const onAction = (action: QuestMenuAction) => {
     logMenu('info', `action ${action} on ${view.page}`);
@@ -2004,6 +2109,7 @@ export default function QuestArenaScene() {
         lines={menuLines}
         layer={layer}
         titleLayer={titleLayer}
+        combatHud={view.presentation === 'eyes' ? view.combatHud : null}
         hover={visibleHover}
         onPress={(action, clickState, source) => {
           if (inputKeyRef.current !== inputKey) {

@@ -1246,6 +1246,7 @@ test('QuestArenaScene body animation effect handles cancelled-rAF pause and sub-
       questPanelNative: noopPanel,
     },
     './quest-arena-session.ts': { createQuestArenaSession: () => mockSession },
+    './quest-combat-hud.ts': require('../src/features/quest-vr/quest-combat-hud.ts'),
     './quest-head-rig.ts': require('../src/features/quest-vr/quest-head-rig.ts'),
     './quest-head-tracker.ts': { questHeadTracker: mockTracker },
     './quest-menu-asset-uri.ts': require('../src/features/quest-vr/quest-menu-asset-uri.ts'),

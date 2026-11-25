@@ -380,6 +380,7 @@ test('QuestPanelModule and the renderer patch agree on the JNI contract', () => 
     '0004-openxr-quest-rig-sync.patch',
     '0005-openxr-controller-attached-hands.patch',
     '0006-openxr-skeletal-crossfade.patch',
+    '0007-openxr-quest-haptics.patch',
   ]);
   assert.match(kotlin, /^package expo\.modules\.questpanel$/m);
   assert.match(kotlin, /class QuestPanelModule : Module\(\)/);

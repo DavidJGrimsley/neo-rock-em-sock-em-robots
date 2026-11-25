@@ -145,3 +145,15 @@ test('the skeletal crossfade patch blends clip switches smoothly without affecti
   assert.match(patch, /isClipSwitch/);
   assert.doesNotMatch(patch, /Java_|JNIEXPORT/);
 });
+
+test('the OpenXR haptics patch uses the existing action set with bounded focused actuation', () => {
+  const lock = JSON.parse(read('tools/quest/viro-renderer/lock.json'));
+  assert.equal(lock.patches[6], '0007-openxr-quest-haptics.patch');
+  const patch = read(`tools/quest/viro-renderer/${lock.patches[6]}`);
+  assert.match(patch, /QuestHaptics\.h/);
+  assert.match(patch, /applyQuestHaptic/);
+  assert.match(patch, /xrApplyHapticFeedback/);
+  assert.match(patch, /kFocusedState\s*=\s*XR_SESSION_STATE_FOCUSED/);
+  assert.match(patch, /kMaxDurationMs = 500/);
+  assert.doesNotMatch(patch, /xrCreateSession|xrCreateActionSet|xrCreateAction/);
+});

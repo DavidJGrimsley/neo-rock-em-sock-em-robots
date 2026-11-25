@@ -742,6 +742,7 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
     vrActivityState: 'resumed',
   };
   const replayCounts = { menu: 0, title: 0 };
+  const titlePresents = [];
   let compositorCreates = 0;
 
   const mocks = {
@@ -872,6 +873,7 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
         dispose: () => {},
       },
     },
+    './quest-combat-hud.ts': require('../src/features/quest-vr/quest-combat-hud.ts'),
     './quest-head-rig.ts': require('../src/features/quest-vr/quest-head-rig.ts'),
     './quest-menu-asset-uri.ts': require('../src/features/quest-vr/quest-menu-asset-uri.ts'),
     './quest-menu-compositor.ts': {
@@ -881,8 +883,12 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
         return {
           subscribe: () => () => {},
           getSnapshot: () => ({ mode: 'shown', reason: null }),
-          present: () => {},
-          hide: () => {},
+          present: (spec) => {
+            if (slot === 'title') titlePresents.push(spec?.label ?? null);
+          },
+          hide: () => {
+            if (slot === 'title') titlePresents.push('hide');
+          },
           replay: () => {
             replayCounts[slot] += 1;
           },
@@ -961,6 +967,7 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
   };
 
   let all = render();
+  assert.equal(titlePresents.includes('title menu'), true, 'menu stage presents branded title');
   const findHit = (action) => all.find((n) => n.type === 'ViroQuad' && n.key === `hit-${action}`);
 
   // Solo -> attach ref mocks to blue/red models and transform ViroNodes -> load assets -> Ready.
@@ -1029,6 +1036,11 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
     if (sessionInstance.getSnapshot().stage === 'fighting') break;
   }
   all = render();
+  assert.equal(
+    titlePresents.at(-1),
+    'combat hud',
+    'eyes presentation switches titleCompositor slot to live combat HUD'
+  );
 
   // Controller ray hover (source 1) DOES set menu focus, and hover leave clears it promptly.
   findHit('back').props.onHover(true, [0, 0, 0], 1);
@@ -1810,6 +1822,7 @@ test('QuestRigSync path bypasses ViroGameLoop and ViroGameLoopUtils, tags rig/fi
         dispose: () => {},
       },
     },
+    './quest-combat-hud.ts': require('../src/features/quest-vr/quest-combat-hud.ts'),
     './quest-head-rig.ts': require('../src/features/quest-vr/quest-head-rig.ts'),
     './quest-menu-asset-uri.ts': require('../src/features/quest-vr/quest-menu-asset-uri.ts'),
     './quest-menu-compositor.ts': {
