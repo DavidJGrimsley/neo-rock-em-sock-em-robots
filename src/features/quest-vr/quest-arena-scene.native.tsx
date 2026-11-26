@@ -1545,7 +1545,9 @@ export default function QuestArenaScene() {
       read: () => questInputNative?.readMovementMode?.(),
       write: (mode) => {
         if (!questInputNative?.writeMovementMode?.(mode)) {
-          console.warn('[Quest] Movement preference could not be saved; native rebuild may be required.');
+          console.warn(
+            '[Quest] Movement preference could not be saved; native rebuild may be required.'
+          );
         }
       },
     })
@@ -1717,7 +1719,9 @@ export default function QuestArenaScene() {
     if (failureMessage) lines.push(failureMessage);
     if (tracker.outOfBounds) lines.push('Outside bounds: return toward the stance ring center.');
     if (view.page === 'settings') {
-      lines.push('Movement: View-relative follows your gaze. Opponent-relative approaches or circles your rival.');
+      lines.push(
+        'Movement: View-relative follows your gaze. Opponent-relative approaches or circles your rival.'
+      );
     } else if (view.page === 'pause' || view.stage === 'paused' || view.stage === 'finished') {
       lines.push(...view.lines);
     }

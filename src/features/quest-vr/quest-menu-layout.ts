@@ -295,7 +295,8 @@ export function questMenuButtons(
           },
           {
             action: 'movement-mode',
-            label: settings.movementMode === 'opponent-relative' ? 'Opponent-relative' : 'View-relative',
+            label:
+              settings.movementMode === 'opponent-relative' ? 'Opponent-relative' : 'View-relative',
           },
           { action: 'pause-done', label: 'Done' },
         ]

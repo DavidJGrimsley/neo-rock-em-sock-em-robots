@@ -2,7 +2,7 @@
 
 Stage 06 is merged in PR #7. The physical Quest gate for that stage and the retrospective project-memory gate are not independently verified.
 
-This branch retains the existing ArenaMatch countdown, round, pause, KO and rematch logic, adds a result card anchored in the current view at match end, and exposes a saved Quest movement preference. View-relative remains the default. Opponent-relative maps movement and dash into the current opponent bearing in the existing stable-facing linear solver; it does not auto-turn the headset or modify Phone AR rules. Ring and separation limits remain in the existing solver. The stick and dash must be released/rearmed when changing movement modes. Native Android SharedPreferences stores the mode; a native rebuild is required.
+This branch retains the existing ArenaMatch countdown, round, pause, KO and rematch logic, adds a result card anchored in the current view at match end, and exposes a saved Quest movement preference. View-relative remains the default. Opponent-relative maps movement and dash into the current opponent bearing in the existing stable-facing linear solver; it does not auto-turn the headset or modify Phone AR rules. Ring and separation limits remain in the existing solver. The stick and dash must be released/rearmed when changing movement modes. Native Android SharedPreferences stores the mode; a native rebuild is required. The final result countdown and announcer watchdog continue ticking until the existing match model unlocks Rematch; the render loop then stops.
 
 ## Verification
 - Run MDS Doctor and resolve the control-plane onboarding markers.
