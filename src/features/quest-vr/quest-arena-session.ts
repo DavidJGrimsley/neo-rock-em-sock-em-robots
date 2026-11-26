@@ -25,6 +25,7 @@ import {
 } from './quest-gesture.ts';
 import {
   DEFAULT_CALIBRATION,
+  wrap180,
   gameplayHeadPose,
   yawFromForward,
   type Calibration,
@@ -57,6 +58,8 @@ import {
 } from './quest-combat-feedback.ts';
 import {
   DEFAULT_QUEST_SETTINGS,
+  normalizeQuestMovementMode,
+  type QuestMovementPreference,
   QUEST_TUNING,
   questHapticPatternForFeedback,
   type QuestUserSettings,
@@ -238,6 +241,13 @@ function isActiveMatchStage(stage: string | null | undefined) {
   );
 }
 
+function requiresMatchTick(snapshot: ReturnType<ArenaMatch['getSnapshot']>) {
+  return (
+    isActiveMatchStage(snapshot.stage) ||
+    (snapshot.stage === 'finished' && (snapshot.countdown > 0 || snapshot.announcement !== null))
+  );
+}
+
 function menuLines(
   page: QuestMenuPage,
   stage: string | null,
@@ -262,10 +272,10 @@ function menuLines(
     ];
   }
   if (stage === 'finished') {
-    if (outcome === 'blue') return ['You won! Select Ready for a rematch.'];
-    if (outcome === 'red') return ['Red Mike won. Select Ready for a rematch.'];
-    if (outcome === 'draw') return ['Draw! Select Ready for a rematch.'];
-    return ['Match finished. Select Ready for a rematch.'];
+    if (outcome === 'blue') return ['You won! Select Rematch to fight again.'];
+    if (outcome === 'red') return ['Red Mike won. Select Rematch to fight again.'];
+    if (outcome === 'draw') return ['Draw! Select Rematch to fight again.'];
+    return ['Match finished. Select Rematch to fight again.'];
   }
   if (stage === 'fighting')
     return [
@@ -290,7 +300,8 @@ export function createQuestArenaSession(
   clock: QuestClock = defaultClock,
   headSource: QuestArenaHeadSource = questHeadTracker,
   rulesOverride?: Partial<typeof ARENA_RULES>,
-  initialHapticTrigger: QuestHapticTrigger = noopHapticTrigger
+  initialHapticTrigger: QuestHapticTrigger = noopHapticTrigger,
+  movementPreference?: QuestMovementPreference
 ) {
   let activeHapticTrigger: QuestHapticTrigger = initialHapticTrigger;
   const nowFn = clock.now ?? (() => Date.now());
@@ -339,6 +350,11 @@ export function createQuestArenaSession(
   let paused = false;
   let pauseCalibration: Calibration | null = null;
   let settings: QuestUserSettings = { ...DEFAULT_QUEST_SETTINGS };
+  try {
+    settings.movementMode = normalizeQuestMovementMode(movementPreference?.read());
+  } catch {
+    // Missing or corrupt native preferences must never prevent entering the arena.
+  }
   let damageTintOpacity = 0;
   let damageTintFadePerSecond = 0;
   const feedbackStream = new QuestCombatFeedbackStream();
@@ -904,6 +920,16 @@ export function createQuestArenaSession(
     }
   }
 
+  function movementReference() {
+    if (settings.movementMode === 'view-relative') return { mode: settings.movementMode };
+    const body = match?.getTransform('blue');
+    const bearing = match?.getQuestCombatTelemetry().bearingToRed;
+    return {
+      mode: settings.movementMode,
+      opponentYawRelative: body && bearing !== undefined ? wrap180(bearing - body.yaw) : undefined,
+    };
+  }
+
   function evaluateDashForSample(
     sample: QuestInputSample | null,
     status: QuestInputStatus,
@@ -919,6 +945,7 @@ export function createQuestArenaSession(
       appActive,
       recenterNeutral,
       head,
+      ...movementReference(),
     });
     dashTriggerState = evalResult.nextState;
     if (evalResult.neutralized) {
@@ -968,6 +995,7 @@ export function createQuestArenaSession(
         menuFocused,
         appActive,
         head,
+        ...movementReference(),
       });
     }
     applyLocomotionToMatch(head);
@@ -1015,6 +1043,13 @@ export function createQuestArenaSession(
 
   function publish() {
     const snapshot = match?.getSnapshot();
+    if (snapshot?.stage === 'finished' && page !== 'result') {
+      page = 'result';
+      pauseCalibration = capturePauseCalibration(readHeadState());
+      locomotionNeedsNeutral = true;
+      locomotion = { advance: 0, strafe: 0, active: false, magnitude: 0 };
+      dashTriggerState = { armed: false };
+    }
     if (snapshot?.stage === 'paused' && !paused) {
       paused = true;
       page = 'pause';
@@ -1087,14 +1122,19 @@ export function createQuestArenaSession(
             animationsRunning: snapshot.animationsRunning && snapshot.impactPauseRemaining === 0,
             outcome: snapshot.outcome,
             lastReady,
-            lines: menuLines(
-              page,
-              snapshot.stage,
-              acknowledged,
-              leaving,
-              snapshot.outcome,
-              pauseTriggerState.menuAvailable
-            ),
+            lines: [
+              ...menuLines(
+                page,
+                snapshot.stage,
+                acknowledged,
+                leaving,
+                snapshot.outcome,
+                pauseTriggerState.menuAvailable
+              ),
+              ...(snapshot.stage === 'finished' && !snapshot.canRematch && !leaving
+                ? ['Rematch unlocks after the result announcement.']
+                : []),
+            ],
             presentation,
             introActive: intro !== null,
             combatHud: paused || page === 'pause' ? null : buildCombatHud(snapshot),
@@ -1329,7 +1369,7 @@ export function createQuestArenaSession(
   function finishLoopStep() {
     if (!match) return;
     const snap = match.getSnapshot();
-    if (!isActiveMatchStage(snap.stage) || !appActive) {
+    if (!requiresMatchTick(snap) || !appActive) {
       stopLoop();
       if (intro) {
         intro = null;
@@ -1361,7 +1401,7 @@ export function createQuestArenaSession(
 
   function startLoop() {
     if (disposed || !match || !appActive || loopRunning) return;
-    if (!isActiveMatchStage(match.getSnapshot().stage)) return;
+    if (!requiresMatchTick(match.getSnapshot())) return;
     loopRunning = true;
     lastFrameMs = nowFn();
     if (!externalFrameDriver) {
@@ -1431,7 +1471,7 @@ export function createQuestArenaSession(
   }
 
   function tryStartReadyMatch(): QuestReadyResult {
-    if (disposed || !match || leaving) {
+    if (disposed || !match || leaving || !appActive) {
       return { called: false, started: false, reason: 'no-match' };
     }
     const snap = match.getSnapshot();
@@ -1464,6 +1504,9 @@ export function createQuestArenaSession(
         acknowledged = true;
         readyQueued = false;
         spawnRoundKey = '';
+        page = 'ring';
+        pauseCalibration = null;
+        neutralizePausedInput();
         beginViewpointIntro();
         startLoop();
         notifyFrame();
@@ -1525,7 +1568,22 @@ export function createQuestArenaSession(
     getSettings: () => ({ ...settings }),
     getDamageTintOpacity: () => damageTintOpacity,
     updateSettings(partial: Partial<QuestUserSettings>) {
-      settings = { ...settings, ...partial };
+      const previousMode = settings.movementMode;
+      settings = {
+        ...settings,
+        ...partial,
+        movementMode: normalizeQuestMovementMode(partial.movementMode ?? previousMode),
+      };
+      if (settings.movementMode !== previousMode) {
+        locomotionNeedsNeutral = true;
+        neutralizeDash();
+        recomputeLocomotion();
+        try {
+          movementPreference?.write(settings.movementMode);
+        } catch {
+          // Keep the current-session setting if native storage is unavailable.
+        }
+      }
       if (!settings.damageTintEnabled) damageTintOpacity = 0;
       if (partial.turnMode) turnTriggerState = { snapArmed: false };
       publish();
@@ -1637,6 +1695,7 @@ export function createQuestArenaSession(
           inputStatus === 'live' &&
           nextSample?.focused &&
           nextSample.actionsReady &&
+          nextSample.left.tracking !== 'lost' &&
           nextSample.left.thumbstick.active &&
           Math.hypot(nextSample.left.thumbstick.x, nextSample.left.thumbstick.y) <=
             QUEST_STICK_DEADZONE
@@ -1725,7 +1784,7 @@ export function createQuestArenaSession(
         notifyFrame(0);
       } else if (readyQueued && match.getSnapshot().canReady) {
         lastReady = tryStartReadyMatch();
-      } else if (isActiveMatchStage(match.getSnapshot().stage)) {
+      } else if (requiresMatchTick(match.getSnapshot())) {
         startLoop();
       }
       publish();
@@ -1755,7 +1814,8 @@ export function createQuestArenaSession(
       activeHapticTrigger = trigger ?? noopHapticTrigger;
     },
     back() {
-      if (disposed || leaving || (page !== 'ring' && page !== 'pause')) return 'menu' as const;
+      if (disposed || leaving || (page !== 'ring' && page !== 'pause' && page !== 'result'))
+        return 'menu' as const;
       releaseMatch();
       publish();
       return 'menu' as const;

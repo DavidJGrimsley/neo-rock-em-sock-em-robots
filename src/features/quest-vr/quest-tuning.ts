@@ -10,8 +10,19 @@
 import type { QuestCombatFeedbackEventKind } from './quest-combat-feedback.ts';
 
 export type QuestTurnMode = 'snap' | 'smooth';
+export type QuestMovementMode = 'view-relative' | 'opponent-relative';
+
+export interface QuestMovementPreference {
+  read(): unknown;
+  write(mode: QuestMovementMode): void;
+}
+
+export function normalizeQuestMovementMode(value: unknown): QuestMovementMode {
+  return value === 'opponent-relative' ? value : 'view-relative';
+}
 
 export interface QuestUserSettings {
+  movementMode: QuestMovementMode;
   turnMode: QuestTurnMode;
   snapTurnAngleDeg: number;
   smoothTurnDegPerSec: number;
@@ -22,6 +33,7 @@ export interface QuestUserSettings {
 }
 
 export const DEFAULT_QUEST_SETTINGS: QuestUserSettings = {
+  movementMode: 'view-relative',
   turnMode: 'snap',
   snapTurnAngleDeg: 30,
   smoothTurnDegPerSec: 120,

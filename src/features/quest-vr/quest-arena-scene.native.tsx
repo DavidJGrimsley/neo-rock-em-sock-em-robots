@@ -1540,7 +1540,18 @@ function QuestMenu({
 }
 
 export default function QuestArenaScene() {
-  const [session] = useState(() => createQuestArenaSession(undefined, questHeadTracker));
+  const [session] = useState(() =>
+    createQuestArenaSession(undefined, questHeadTracker, undefined, undefined, {
+      read: () => questInputNative?.readMovementMode?.(),
+      write: (mode) => {
+        if (!questInputNative?.writeMovementMode?.(mode)) {
+          console.warn(
+            '[Quest] Movement preference could not be saved; native rebuild may be required.'
+          );
+        }
+      },
+    })
+  );
   const view = useSyncExternalStore(session.subscribe, session.getSnapshot);
   const tracker = useSyncExternalStore(questHeadTracker.subscribe, questHeadTracker.getSnapshot);
   const [compositor] = useState(() =>
@@ -1633,7 +1644,7 @@ export default function QuestArenaScene() {
   const posture = tracker.calibration.posture;
   const calibration = tracker.calibration;
   const menuCalibration =
-    (view.page === 'pause' || view.paused) && view.pauseCalibration
+    (view.page === 'pause' || view.page === 'result' || view.paused) && view.pauseCalibration
       ? view.pauseCalibration
       : calibration;
 
@@ -1708,8 +1719,10 @@ export default function QuestArenaScene() {
     if (failureMessage) lines.push(failureMessage);
     if (tracker.outOfBounds) lines.push('Outside bounds: return toward the stance ring center.');
     if (view.page === 'settings') {
-      lines.push('Choose a volume, damage tint, or turning mode.');
-    } else if (view.page === 'pause' || view.stage === 'paused') {
+      lines.push(
+        'Movement: View-relative follows your gaze. Opponent-relative approaches or circles your rival.'
+      );
+    } else if (view.page === 'pause' || view.stage === 'paused' || view.stage === 'finished') {
       lines.push(...view.lines);
     }
     return lines;
@@ -2196,6 +2209,11 @@ export default function QuestArenaScene() {
     else if (action === 'turn-mode')
       session.updateSettings({
         turnMode: current.settings.turnMode === 'snap' ? 'smooth' : 'snap',
+      });
+    else if (action === 'movement-mode')
+      session.updateSettings({
+        movementMode:
+          current.settings.movementMode === 'view-relative' ? 'opponent-relative' : 'view-relative',
       });
     else if (action === 'music-volume' || action === 'sfx-volume') {
       const key = action === 'music-volume' ? 'musicVolume' : 'sfxVolume';

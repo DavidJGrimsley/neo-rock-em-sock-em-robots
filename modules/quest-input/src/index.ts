@@ -37,6 +37,8 @@ export interface QuestInputBatch {
 
 export interface QuestInputNative {
   isAvailable(): boolean;
+  readMovementMode?(): string | null;
+  writeMovementMode?(mode: 'view-relative' | 'opponent-relative'): boolean;
   setMarkersEnabled?(enabled: boolean): boolean;
   read(afterSeq: number): QuestInputBatch;
   /** OpenXR interaction profile paths, left then right; empty strings until bound. */

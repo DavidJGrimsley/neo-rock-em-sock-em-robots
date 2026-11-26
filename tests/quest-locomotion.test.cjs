@@ -2468,3 +2468,112 @@ test('createQuestInputSource delivers multi-sample live batches to onSample with
     [false, true, false]
   );
 });
+
+test('opponent-relative stick and dash share a normalized opponent bearing independent of gaze', () => {
+  const sample = makeSample({ stick: [1, 1], rightPrimary: true });
+  const input = {
+    sample,
+    status: 'live',
+    mode: 'opponent-relative',
+    opponentYawRelative: 90,
+    head: { calibration: { yaw: 170 } },
+  };
+  const move = questLocomotionFromInput(input);
+  near(move.advance, Math.SQRT1_2);
+  near(move.strafe, Math.SQRT1_2);
+  near(Math.hypot(move.advance, move.strafe), 1);
+  const dash = evaluateQuestDashInput({ armed: true }, { ...input, inActiveFight: true });
+  assert.equal(dash.triggered, true);
+  near(dash.direction.advance, move.advance);
+  near(dash.direction.strafe, move.strafe);
+  assert.equal(questLocomotionFromInput({ ...input, opponentYawRelative: undefined }).active, false);
+  assert.equal(questLocomotionFromInput({ ...input, menuFocused: true }).active, false);
+  assert.equal(questLocomotionFromInput({ ...input, status: 'stale' }).active, false);
+});
+
+test('movement preference is restored in a new session and invalid values default to view-relative', () => {
+  let saved = 'invalid';
+  const storage = {
+    read: () => saved,
+    write: (mode) => {
+      saved = mode;
+    },
+  };
+  const first = createQuestArenaSession(undefined, undefined, undefined, undefined, storage);
+  assert.equal(first.getSettings().movementMode, 'view-relative');
+  first.updateSettings({ movementMode: 'opponent-relative' });
+  assert.equal(saved, 'opponent-relative');
+  first.dispose();
+  const reopened = createQuestArenaSession(undefined, undefined, undefined, undefined, storage);
+  assert.equal(reopened.getSettings().movementMode, 'opponent-relative');
+  reopened.dispose();
+});
+
+test('switching movement modes requires a fresh tracked neutral stick and keeps the ring limits', () => {
+  const fc = makeFrameClock();
+  const session = createQuestArenaSession(fc.clock, undefined, { cpuEnabled: false });
+  assert.equal(session.solo(), true);
+  const opened = session.getSnapshot();
+  for (const asset of ['arena', 'blue', 'red'])
+    session.assetLoaded(opened.lease, opened.token, opened.placementVersion, asset);
+  assert.equal(session.ready().started, true);
+  for (let i = 0; i < 40 && session.getSnapshot().stage !== 'fighting'; i++) fc.stepFrame(120);
+  assert.equal(session.getSnapshot().stage, 'fighting');
+  session.setInputState(makeSample({ stick: [0, 1] }), 'live');
+  assert.equal(session.getLocomotion().active, true);
+  session.updateSettings({ movementMode: 'opponent-relative' });
+  assert.equal(session.getLocomotion().active, false);
+  session.setInputState(makeSample({ stick: [0, 1], rightPrimary: true }), 'live');
+  assert.equal(session.getLocomotion().active, false);
+  assert.equal(session.isDashing(), false);
+  session.setInputState(makeSample({ stick: [0, 0], leftTracking: 'lost' }), 'live');
+  session.setInputState(makeSample({ stick: [0, 1] }), 'live');
+  assert.equal(session.getLocomotion().active, false);
+  session.setInputState(makeSample({ stick: [0, 0] }), 'live');
+  session.setInputState(makeSample({ stick: [1, 1] }), 'live');
+  assert.equal(session.getLocomotion().active, true);
+  near(session.getLocomotion().magnitude, 1);
+  for (let i = 0; i < 80; i++) fc.stepFrame(33.33);
+  const transforms = session.getLiveTransforms();
+  assert.ok(distance(transforms.blue, transforms.red) >= QUEST_ARENA_RULES.separation - 1e-6);
+  assert.ok(Math.hypot(transforms.blue.x, transforms.blue.z) <= QUEST_ARENA_RULES.boundary + 1e-6);
+  session.dispose();
+});
+
+test('Quest solo ticks the result announcement to unlock a multi-round rematch', () => {
+  const fc = makeFrameClock();
+  const session = createQuestArenaSession(fc.clock, undefined, {
+    cpuEnabled: false,
+    health: 8,
+    spawn: 0.04,
+    punchHitstop: 0,
+  });
+  assert.equal(session.solo(), true);
+  const opened = session.getSnapshot();
+  for (const asset of ['arena', 'blue', 'red'])
+    session.assetLoaded(opened.lease, opened.token, opened.placementVersion, asset);
+  assert.equal(session.ready().started, true);
+  const match = session.getMatch();
+  const until = (predicate) => {
+    for (let i = 0; i < 1500 && !predicate(); i++) {
+      for (const id of ['blue', 'red'])
+        session.animationApplied(id, match.getSnapshot()[id].animationId);
+      session.stepExternalFrame(1 / 60);
+    }
+    assert.ok(predicate());
+  };
+  until(() => match.getSnapshot().stage === 'fighting');
+  assert.equal(match.attack('punch'), true);
+  until(() => match.getSnapshot().wins.blue === 1 && match.getSnapshot().stage === 'fighting');
+  assert.equal(match.attack('punch'), true);
+  until(() => session.getSnapshot().stage === 'finished');
+  assert.equal(session.getSnapshot().page, 'result');
+  assert.equal(session.getSnapshot().menuVisible, true);
+  assert.ok(session.getSnapshot().pauseCalibration);
+  until(() => match.getSnapshot().canRematch);
+  assert.equal(session.ready().reason, 'rematched');
+  assert.equal(session.getSnapshot().page, 'ring');
+  until(() => match.getSnapshot().stage === 'fighting');
+  assert.deepEqual(match.getSnapshot().wins, { blue: 0, red: 0 });
+  session.dispose();
+});

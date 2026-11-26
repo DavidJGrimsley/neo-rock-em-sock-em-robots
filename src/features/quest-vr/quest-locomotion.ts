@@ -8,7 +8,7 @@ import {
 } from './quest-head-rig.ts';
 import type { QuestInputSample } from './quest-input.ts';
 import type { QuestInputStatus } from './quest-input-source.ts';
-import { QUEST_TUNING, type QuestTurnMode } from './quest-tuning.ts';
+import { QUEST_TUNING, type QuestMovementMode, type QuestTurnMode } from './quest-tuning.ts';
 
 /** Radial deadzone rejecting Oculus Touch rest jitter while keeping smooth analog response. */
 export const QUEST_STICK_DEADZONE = 0.15;
@@ -196,8 +196,27 @@ export function mapViewRelativeThumbstick(
   };
 }
 
+export interface QuestMovementReference {
+  mode?: QuestMovementMode;
+  /** Opponent bearing minus the simulation body's yaw, in ring space. */
+  opponentYawRelative?: number;
+}
+
+function mapMovementReference(
+  x: number,
+  y: number,
+  heading: QuestResolvedHeadHeading,
+  reference: QuestMovementReference,
+  deadzone: number
+): QuestLocomotionCommand {
+  const yaw =
+    reference.mode === 'opponent-relative' ? reference.opponentYawRelative : heading.yawRelative;
+  if (typeof yaw !== 'number' || !Number.isFinite(yaw)) return NEUTRAL;
+  return mapViewRelativeThumbstick(x, y, yaw, deadzone);
+}
+
 /**
- * Derives view-relative horizontal locomotion from the left controller thumbstick,
+ * Derives horizontal locomotion from the left controller thumbstick,
  * live unthrottled headset heading, and safety/recenter gates.
  */
 export function questLocomotionFromInput(
@@ -207,7 +226,7 @@ export function questLocomotionFromInput(
     menuFocused?: boolean;
     appActive?: boolean;
     head?: QuestHeadLocomotionState | null;
-  },
+  } & QuestMovementReference,
   deadzone = QUEST_STICK_DEADZONE
 ): QuestLocomotionCommand {
   if (input.appActive === false || input.menuFocused === true) return NEUTRAL;
@@ -224,10 +243,11 @@ export function questLocomotionFromInput(
   }
   const heading = resolveQuestHeadHeading(input.head);
   if (!heading.ok) return NEUTRAL;
-  return mapViewRelativeThumbstick(
+  return mapMovementReference(
     sample.left.thumbstick.x,
     sample.left.thumbstick.y,
-    heading.yawRelative,
+    heading,
+    input,
     deadzone
   );
 }
@@ -259,7 +279,7 @@ export function evaluateQuestDashInput(
     appActive?: boolean;
     recenterNeutral?: boolean;
     head?: QuestHeadLocomotionState | null;
-  },
+  } & QuestMovementReference,
   deadzone = QUEST_STICK_DEADZONE
 ): QuestDashInputEvaluation {
   const neutralResult = (neutralized: boolean): QuestDashInputEvaluation => ({
@@ -314,10 +334,11 @@ export function evaluateQuestDashInput(
   if (!sample.left.thumbstick.active) {
     return neutralResult(false);
   }
-  const move = mapViewRelativeThumbstick(
+  const move = mapMovementReference(
     sample.left.thumbstick.x,
     sample.left.thumbstick.y,
-    heading.yawRelative,
+    heading,
+    input,
     deadzone
   );
   if (!move.active || move.magnitude <= 0) {
