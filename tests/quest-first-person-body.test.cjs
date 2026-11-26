@@ -114,7 +114,7 @@ function makeSample(overrides = {}) {
   return {
     seq: overrides.seq ?? 1,
     t: overrides.t ?? 100,
-    capturedNs: overrides.capturedNs ?? 1_000_000,
+    capturedNs: overrides.capturedNs ?? (overrides.t ?? 1) * 1_000_000,
     focused: overrides.focused ?? true,
     actionsReady: overrides.actionsReady ?? true,
     refEpoch: overrides.refEpoch ?? 1,
@@ -545,7 +545,7 @@ test('stepQuestFirstPersonBodyClip maps all 8 directions with angular hysteresis
 test('QuestArenaSession drives diagonal translation and all 8 bodyClip directions under head yaw while stopping on block/release/focus loss', (t) => {
   const { clock, advanceBy, pendingCount, clearAll } = makeHarnessClock();
   const mocks = makeQuestHeadSource(0);
-  const session = createQuestArenaSession(clock, mocks.headSource);
+  const session = createQuestArenaSession(clock, mocks.headSource, { cpuEnabled: false });
   t.after(() => {
     session.dispose();
     clearAll();
@@ -1246,6 +1246,7 @@ test('QuestArenaScene body animation effect handles cancelled-rAF pause and sub-
       questPanelNative: noopPanel,
     },
     './quest-arena-session.ts': { createQuestArenaSession: () => mockSession },
+    './quest-combat-hud.ts': require('../src/features/quest-vr/quest-combat-hud.ts'),
     './quest-head-rig.ts': require('../src/features/quest-vr/quest-head-rig.ts'),
     './quest-head-tracker.ts': { questHeadTracker: mockTracker },
     './quest-menu-asset-uri.ts': require('../src/features/quest-vr/quest-menu-asset-uri.ts'),
@@ -1290,6 +1291,8 @@ test('QuestArenaScene body animation effect handles cancelled-rAF pause and sub-
       QuestDiagnosticsPanel: 'QuestDiagnosticsPanel',
       QuestInputMarkers: 'QuestInputMarkers',
     },
+    './quest-arena-audio.native.ts': { useQuestArenaAudio: () => {} },
+    './quest-tuning.ts': require('../src/features/quest-vr/quest-tuning.ts'),
   };
   const compiled = ts.transpileModule(
     fs.readFileSync(

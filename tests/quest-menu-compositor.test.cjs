@@ -372,6 +372,7 @@ test('QuestPanelModule and the renderer patch agree on the JNI contract', () => 
     'modules/quest-panel/native/src/main/java/expo/modules/questpanel/QuestPanelModule.kt'
   );
   const patch = read('tools/quest/viro-renderer/0002-openxr-quest-panel-layer.patch');
+  const viewPatch = read('tools/quest/viro-renderer/0008-openxr-menu-pause-view-hud.patch');
   const lock = JSON.parse(read('tools/quest/viro-renderer/lock.json'));
   assert.deepEqual(lock.patches, [
     '0001-openxr-pointer-depth-origin-reticle.patch',
@@ -380,11 +381,13 @@ test('QuestPanelModule and the renderer patch agree on the JNI contract', () => 
     '0004-openxr-quest-rig-sync.patch',
     '0005-openxr-controller-attached-hands.patch',
     '0006-openxr-skeletal-crossfade.patch',
+    '0007-openxr-quest-haptics.patch',
+    '0008-openxr-menu-pause-view-hud.patch',
   ]);
   assert.match(kotlin, /^package expo\.modules\.questpanel$/m);
   assert.match(kotlin, /class QuestPanelModule : Module\(\)/);
   const kotlinVersion = /NATIVE_VERSION = (\d+)/.exec(kotlin)[1];
-  const nativeVersion = /constexpr int kVersion = (\d+);/.exec(patch)[1];
+  const nativeVersion = /^\+constexpr int kVersion = (\d+);/m.exec(viewPatch)[1];
   assert.equal(kotlinVersion, nativeVersion);
   const jni = {
     nativeVersion: ['jint', '(JNIEnv *, jobject)'],
@@ -395,15 +398,16 @@ test('QuestPanelModule and the renderer patch agree on the JNI contract', () => 
     nativeDraw: ['jboolean', 'jfloatArray pose'],
     nativeTitleStatus: ['jint', '(JNIEnv *, jobject)'],
     nativeTitleHide: ['void', '(JNIEnv *, jobject)'],
-    nativeTitlePose: ['jboolean', 'jfloatArray pose'],
-    nativeTitleDraw: ['jboolean', 'jfloatArray pose'],
+    nativeTitlePoseInSpace: ['jboolean', 'jboolean viewLocked'],
+    nativeTitleDrawInSpace: ['jboolean', 'jboolean viewLocked'],
   };
   for (const [name, [returns, args]] of Object.entries(jni)) {
     const symbol = `Java_expo_modules_questpanel_QuestPanelModule_${name}`;
-    const at = patch.indexOf(symbol);
+    const source = name.endsWith('InSpace') ? viewPatch : patch;
+    const at = source.indexOf(symbol);
     assert.ok(at > 0, symbol);
-    assert.match(patch.slice(at - 60, at), new RegExp(`JNIEXPORT ${returns} JNICALL`));
-    assert.ok(patch.slice(at, at + 220).includes(args), `${name} arguments`);
+    assert.match(source.slice(at - 60, at), new RegExp(`JNIEXPORT ${returns} JNICALL`));
+    assert.ok(source.slice(at, at + 320).includes(args), `${name} arguments`);
     assert.match(kotlin, new RegExp(`private external fun ${name}\\(`));
   }
   assert.match(kotlin, /Function\("refSpaceEpoch"\)/);
@@ -416,8 +420,11 @@ test('QuestPanelModule and the renderer patch agree on the JNI contract', () => 
     /external fun nativeDraw\(\s*rgba: ByteArray,\s*width: Int,\s*height: Int,\s*widthM: Float,\s*heightM: Float,\s*pose: FloatArray\s*\): Boolean/
   );
   assert.match(kotlin, /external fun nativePose\(pose: FloatArray\): Boolean/);
-  assert.match(kotlin, /external fun nativeTitleDraw\(/);
-  assert.match(kotlin, /external fun nativeTitlePose\(pose: FloatArray\): Boolean/);
+  assert.match(kotlin, /external fun nativeTitleDrawInSpace\(/);
+  assert.match(
+    kotlin,
+    /external fun nativeTitlePoseInSpace\(pose: FloatArray, viewLocked: Boolean\): Boolean/
+  );
   assert.match(
     read('modules/quest-panel/native/consumer-rules.pro'),
     /-keep class expo\.modules\.questpanel\.QuestPanelModule \{ \*; \}/

@@ -38,6 +38,10 @@ private const val FLOATS_PER_SAMPLE = 34
 private const val RIG_SYNC_VERSION = 1
 private const val RIG_SYNC_FLOATS = 32
 
+// QuestHaptics.h in tools/quest/viro-renderer/0007-openxr-quest-haptics.patch.
+private const val HAPTICS_VERSION = 1
+private const val HAPTICS_STATUS_LONGS = 7
+
 // A double holds every integer up to 2^53 exactly; Expo converts Long to Double.
 private const val MAX_EXACT = 9007199254740991L
 
@@ -81,6 +85,9 @@ class QuestInputModule : Module() {
   private external fun nativeRigSyncVersion(): Int
   private external fun nativePublishRigState(active: Boolean, values: FloatArray?): Boolean
   private external fun nativeClearRigState()
+  private external fun nativeHapticsVersion(): Int
+  private external fun nativeTriggerHaptic(handMask: Int, amplitude: Float, durationMs: Int): Boolean
+  private external fun nativeHapticsStatus(outStats: LongArray): Boolean
 
   // Phone builds and renderers without patch 0003 have no QuestInputSampler symbols.
   private val available: Boolean by lazy {
@@ -108,6 +115,17 @@ class QuestInputModule : Module() {
       nativeHandsVersion() == 1
     } catch (_: LinkageError) { false }
   }
+
+  // Renderers without patch 0007 have no QuestHaptics symbols.
+  private val hapticsReady: Boolean by lazy {
+    try {
+      System.loadLibrary("viro_renderer")
+      nativeHapticsVersion() == HAPTICS_VERSION
+    } catch (_: LinkageError) {
+      false
+    }
+  }
+  private val hapticsStatsBuf = LongArray(HAPTICS_STATUS_LONGS)
   private val gripInts = IntArray(CAPACITY * 8)
   private val gripFloats = FloatArray(CAPACITY * 26)
 
@@ -599,6 +617,31 @@ class QuestInputModule : Module() {
       if (!rigSyncReady) return@Function false
       nativeClearRigState()
       true
+    }
+
+    Function("hapticsVersion") { if (hapticsReady) HAPTICS_VERSION else 0 }
+
+    Function("triggerHaptic") { handMask: Int, amplitude: Double, durationMs: Int ->
+      if (!hapticsReady) return@Function false
+      if (!amplitude.isFinite() || amplitude <= 0.0 || durationMs <= 0) return@Function false
+      if ((handMask and 3) == 0) return@Function false
+      nativeTriggerHaptic(handMask, amplitude.toFloat(), durationMs)
+    }
+
+    Function("hapticsStatus") {
+      if (!hapticsReady) return@Function null
+      synchronized(lock) {
+        if (!nativeHapticsStatus(hapticsStatsBuf)) return@Function null
+        mapOf(
+          "version" to hapticsStatsBuf[0].toInt(),
+          "live" to (hapticsStatsBuf[1] != 0L),
+          "actionsReady" to (hapticsStatsBuf[2] != 0L),
+          "applied" to hapticsStatsBuf[3].toDouble(),
+          "failed" to hapticsStatsBuf[4].toDouble(),
+          "dropped" to hapticsStatsBuf[5].toDouble(),
+          "lastResult" to hapticsStatsBuf[6].toInt()
+        )
+      }
     }
 
     OnDestroy {

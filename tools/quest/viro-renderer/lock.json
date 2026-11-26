@@ -9,7 +9,9 @@
     "0003-openxr-quest-input-sampler.patch",
     "0004-openxr-quest-rig-sync.patch",
     "0005-openxr-controller-attached-hands.patch",
-    "0006-openxr-skeletal-crossfade.patch"
+    "0006-openxr-skeletal-crossfade.patch",
+    "0007-openxr-quest-haptics.patch",
+    "0008-openxr-menu-pause-view-hud.patch"
   ],
   "stockAarSha256": "cd654a19066b50c2b408c64c3ae2a6d1529ebd1c5dd3238a026bf4720727bdc7",
   "stockRendererSha256": "2b3280493c4a788cc14319e263f1c2769bf3e54b22c9e4cc7673319967ccacd4"

@@ -52,6 +52,19 @@ export interface QuestInputNative {
   rigSyncVersion?(): number;
   publishRigState?(active: boolean, values: number[]): boolean;
   clearRigState?(): boolean;
+  hapticsVersion?(): number;
+  triggerHaptic?(handMask: number, amplitude: number, durationMs: number): boolean;
+  hapticsStatus?(): QuestHapticsStatus | null;
+}
+
+export interface QuestHapticsStatus {
+  version: number;
+  live: boolean;
+  actionsReady: boolean;
+  applied: number;
+  failed: number;
+  dropped: number;
+  lastResult: number;
 }
 
 const native = requireOptionalNativeModule<QuestInputNative>('QuestInput');

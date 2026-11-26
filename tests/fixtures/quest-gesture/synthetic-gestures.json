@@ -1,0 +1,558 @@
+{
+  "source": "synthetic",
+  "measured": false,
+  "note": "Authored aim-pose trajectories for the provisional classifier. No headset capture exists in this worktree. Distances and timings are scenario inputs, not measured Quest thresholds.",
+  "cases": [
+    {
+      "name": "yaw 180 punch follows body forward, world -Z",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 5, "right": [0.2, 0.95, -0.52] },
+        { "n": 7, "right": [0.2, 0.95, -0.52] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": [{ "type": "punch", "hand": "right" }]
+    },
+    {
+      "name": "yaw 0 punch follows body forward, world +Z",
+      "frame": { "yaw": 0, "origin": [0, 1.2, 0] },
+      "left": [0.2, 0.95, 0.3],
+      "keys": [
+        { "n": 0, "right": [-0.2, 0.95, 0.3] },
+        { "n": 5, "right": [-0.2, 0.95, 0.52] },
+        { "n": 7, "right": [-0.2, 0.95, 0.52] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": [{ "type": "punch", "hand": "right" }]
+    },
+    {
+      "name": "yaw 180 motion toward world +Z is backward and is not a punch",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 5, "right": [0.2, 0.95, -0.08] },
+        { "n": 7, "right": [0.2, 0.95, -0.08] }
+      ],
+      "oracle": { "hand": "right", "maxAlong": 0, "retreatAlong": -0.18 },
+      "expect": []
+    },
+    {
+      "name": "upward swing is an uppercut attempt and not a punch",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 5, "right": [0.2, 1.11, -0.34] },
+        { "n": 7, "right": [0.2, 1.11, -0.34] }
+      ],
+      "oracle": { "hand": "right", "maxAlong": 0.05 },
+      "expect": [{ "type": "uppercut", "hand": "right" }]
+    },
+    {
+      "name": "a diagonal rise is neither a punch nor an uppercut",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 5, "right": [0.2, 1.11, -0.52] },
+        { "n": 7, "right": [0.2, 1.11, -0.52] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": []
+    },
+    {
+      "name": "idle shake stays under the punch travel",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 1, "right": [0.2, 0.95, -0.35] },
+        { "n": 2, "right": [0.2, 0.95, -0.3] },
+        { "n": 3, "right": [0.2, 0.95, -0.36] },
+        { "n": 4, "right": [0.2, 0.95, -0.28] },
+        { "n": 5, "right": [0.2, 0.95, -0.34] },
+        { "n": 7, "right": [0.2, 0.95, -0.3] }
+      ],
+      "oracle": { "hand": "right", "maxAlong": 0.08 },
+      "expect": []
+    },
+    {
+      "name": "a fast wrist flick with little translation is not a strike",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "angular": [0, 4, 0],
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 2, "right": [0.2, 0.95, -0.35] },
+        { "n": 4, "right": [0.2, 0.95, -0.3] }
+      ],
+      "oracle": { "hand": "right", "maxAlong": 0.08 },
+      "expect": []
+    },
+    {
+      "name": "buttons, trigger, and reported linear velocity do not strike a still hand",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "linear": [8, 0, 0],
+      "triggerFrom": 2,
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 6, "right": [0.2, 0.95, -0.3] }
+      ],
+      "oracle": { "hand": "right", "maxAlong": 0.001 },
+      "expect": []
+    },
+    {
+      "name": "an extension that never settles does not emit a punch",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 5, "right": [0.2, 0.95, -0.52] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": []
+    },
+    {
+      "name": "a one-metre step is a discontinuity, not a punch",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 1, "right": [0.2, 0.95, -1.4] },
+        { "n": 3, "right": [0.2, 0.95, -1.4] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": []
+    },
+    {
+      "name": "lost tracking cancels the open swing; a later tracked swing punches once",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 2, "right": [0.2, 0.95, -0.4] },
+        { "n": 5, "right": [0.2, 0.95, -0.4] },
+        { "n": 10, "right": [0.2, 0.95, -0.62] },
+        { "n": 12, "right": [0.2, 0.95, -0.62] }
+      ],
+      "events": {
+        "3": { "rightTracking": "lost" },
+        "4": { "rightTracking": "lost" }
+      },
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": [{ "type": "punch", "hand": "right" }]
+    },
+    {
+      "name": "inferred poses keep their positions and still do not strike",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "rightTracking": "inferred",
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 5, "right": [0.2, 0.95, -0.52] },
+        { "n": 7, "right": [0.2, 0.95, -0.52] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": []
+    },
+    {
+      "name": "stale samples do not punch; a swing after the stream is live does",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "status": "stale",
+      "liveFrom": 10,
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 5, "right": [0.2, 0.95, -0.52] },
+        { "n": 7, "right": [0.2, 0.95, -0.52] },
+        { "n": 10, "right": [0.2, 0.95, -0.3] },
+        { "n": 15, "right": [0.2, 0.95, -0.52] },
+        { "n": 17, "right": [0.2, 0.95, -0.52] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": [{ "type": "punch", "hand": "right" }]
+    },
+    {
+      "name": "an unfocused stream does not punch",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "status": "unfocused",
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 5, "right": [0.2, 0.95, -0.52] },
+        { "n": 7, "right": [0.2, 0.95, -0.52] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": []
+    },
+    {
+      "name": "a live status with focused false does not punch",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "focused": false,
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 5, "right": [0.2, 0.95, -0.52] },
+        { "n": 7, "right": [0.2, 0.95, -0.52] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": []
+    },
+    {
+      "name": "actions that are not ready do not punch",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "actionsReady": false,
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 5, "right": [0.2, 0.95, -0.52] },
+        { "n": 7, "right": [0.2, 0.95, -0.52] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": []
+    },
+    {
+      "name": "a capture-clock gap does not turn separated poses into a punch",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3], "capturedNs": 20000000 },
+        { "n": 1, "right": [0.2, 0.95, -0.52], "capturedNs": 520000000 }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": []
+    },
+    {
+      "name": "a backward capturedNs splits one spatial punch into no strike",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 6, "right": [0.2, 0.95, -0.52] },
+        { "n": 8, "right": [0.2, 0.95, -0.52] }
+      ],
+      "events": { "3": { "capturedNs": 1000 } },
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": []
+    },
+    {
+      "name": "a repeated capturedNs splits one spatial punch into no strike",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 6, "right": [0.2, 0.95, -0.52] },
+        { "n": 8, "right": [0.2, 0.95, -0.52] }
+      ],
+      "events": { "3": { "capturedNs": "repeat" } },
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": []
+    },
+    {
+      "name": "two still hands become guard, then a slow exit releases it without a punch",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "keys": [
+        { "n": 0, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.3] },
+        { "n": 6, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.3] },
+        { "n": 70, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.5] }
+      ],
+      "expect": [
+        { "type": "guard", "held": true },
+        { "type": "guard", "held": false }
+      ]
+    },
+    {
+      "name": "one hand in the guard volume does not start guard",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "keys": [
+        { "n": 0, "left": [-0.2, 0.95, -0.3], "right": [0.18, 1.25, -0.3] },
+        { "n": 8, "left": [-0.2, 0.95, -0.3], "right": [0.18, 1.25, -0.3] }
+      ],
+      "expect": []
+    },
+    {
+      "name": "the same forward jump is a punch when generation stays put",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "keys": [
+        { "n": 0, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.3] },
+        { "n": 7, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.3] },
+        { "n": 8, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.52] },
+        { "n": 12, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.52] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": [
+        { "type": "guard", "held": true },
+        { "type": "guard", "held": false },
+        { "type": "punch", "hand": "right" }
+      ]
+    },
+    {
+      "name": "a session generation change drops guard and ignores the position step",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "generationFrom": 8,
+      "keys": [
+        { "n": 0, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.3] },
+        { "n": 7, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.3] },
+        { "n": 8, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.52] },
+        { "n": 12, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.52] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": [
+        { "type": "guard", "held": true },
+        { "type": "guard", "held": false }
+      ]
+    },
+    {
+      "name": "a recenter epoch change drops guard and ignores the position step",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "refEpochFrom": 8,
+      "keys": [
+        { "n": 0, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.3] },
+        { "n": 7, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.3] },
+        { "n": 8, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.52] },
+        { "n": 12, "left": [-0.18, 1.25, -0.3], "right": [0.18, 1.25, -0.52] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": [
+        { "type": "guard", "held": true },
+        { "type": "guard", "held": false }
+      ]
+    },
+    {
+      "name": "a second extension without a retreat does not punch again",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3] },
+        { "n": 5, "right": [0.2, 0.95, -0.52] },
+        { "n": 7, "right": [0.2, 0.95, -0.52] },
+        { "n": 12, "right": [0.2, 0.95, -0.74] },
+        { "n": 14, "right": [0.2, 0.95, -0.74] },
+        { "n": 30, "right": [0.2, 0.95, -0.36] },
+        { "n": 32, "right": [0.2, 0.95, -0.36] },
+        { "n": 37, "right": [0.2, 0.95, -0.58] },
+        { "n": 39, "right": [0.2, 0.95, -0.58] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": [
+        { "type": "punch", "hand": "right" },
+        { "type": "punch", "hand": "right" }
+      ]
+    },
+    {
+      "name": "an in-bounds crouch ducks, and a deeper crouch stays at the standing clamp",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "calibration": {
+        "origin": [0, 1.6, 0],
+        "yaw": 180,
+        "posture": "standing",
+        "source": "default",
+        "entry": 0
+      },
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3], "head": [0, 1.4, 0] },
+        { "n": 1, "right": [0.2, 0.95, -0.3], "head": [0, 0.8, 0] }
+      ],
+      "expect": [
+        {
+          "type": "head",
+          "duck": true,
+          "weave": false,
+          "verticalM": -0.2,
+          "lateralM": 0,
+          "clamped": false,
+          "outOfBounds": false
+        }
+      ],
+      "poseAfter": {
+        "duck": true,
+        "weave": false,
+        "verticalM": -0.45,
+        "lateralM": 0,
+        "clamped": true,
+        "outOfBounds": true
+      }
+    },
+    {
+      "name": "a crouch past the clamp reports the clamp on the first intent",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "calibration": {
+        "origin": [0, 1.6, 0],
+        "yaw": 180,
+        "posture": "standing",
+        "source": "default",
+        "entry": 0
+      },
+      "keys": [{ "n": 0, "right": [0.2, 0.95, -0.3], "head": [0, 0.8, 0] }],
+      "expect": [
+        {
+          "type": "head",
+          "duck": true,
+          "weave": false,
+          "verticalM": -0.45,
+          "lateralM": 0,
+          "clamped": true,
+          "outOfBounds": true
+        }
+      ]
+    },
+    {
+      "name": "a lateral lean past the clamp reports the clamp, not the raw offset",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "calibration": {
+        "origin": [0, 1.6, 0],
+        "yaw": 180,
+        "posture": "standing",
+        "source": "default",
+        "entry": 0
+      },
+      "keys": [{ "n": 0, "right": [0.2, 0.95, -0.3], "head": [0.8, 1.6, 0] }],
+      "expect": [
+        {
+          "type": "head",
+          "duck": false,
+          "weave": true,
+          "verticalM": 0,
+          "lateralM": 0.3,
+          "clamped": true,
+          "outOfBounds": true
+        }
+      ]
+    },
+    {
+      "name": "an in-bounds lateral lean weaves",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "calibration": {
+        "origin": [0, 1.6, 0],
+        "yaw": 180,
+        "posture": "standing",
+        "source": "default",
+        "entry": 0
+      },
+      "keys": [{ "n": 0, "right": [0.2, 0.95, -0.3], "head": [0.2, 1.6, 0] }],
+      "expect": [
+        {
+          "type": "head",
+          "duck": false,
+          "weave": true,
+          "verticalM": 0,
+          "lateralM": 0.2,
+          "clamped": false,
+          "outOfBounds": false
+        }
+      ]
+    },
+    {
+      "name": "a seated crouch clamps at the seated bound",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "calibration": {
+        "origin": [0, 1.6, 0],
+        "yaw": 180,
+        "posture": "seated",
+        "source": "default",
+        "entry": 0
+      },
+      "keys": [{ "n": 0, "right": [0.2, 0.95, -0.3], "head": [0, 1.2, 0] }],
+      "expect": [
+        {
+          "type": "head",
+          "duck": true,
+          "weave": false,
+          "verticalM": -0.25,
+          "lateralM": 0,
+          "clamped": true,
+          "outOfBounds": false
+        }
+      ]
+    },
+    {
+      "name": "head motion straight forward is not a duck or a weave",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "calibration": {
+        "origin": [0, 1.6, 0],
+        "yaw": 180,
+        "posture": "standing",
+        "source": "default",
+        "entry": 0
+      },
+      "keys": [{ "n": 0, "right": [0.2, 0.95, -0.3], "head": [0, 1.6, -0.1] }],
+      "expect": []
+    },
+    {
+      "name": "returning upright clears duck",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "calibration": {
+        "origin": [0, 1.6, 0],
+        "yaw": 180,
+        "posture": "standing",
+        "source": "default",
+        "entry": 0
+      },
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3], "head": [0, 1.4, 0] },
+        { "n": 1, "right": [0.2, 0.95, -0.3], "head": [0, 1.6, 0] }
+      ],
+      "expect": [
+        {
+          "type": "head",
+          "duck": true,
+          "weave": false,
+          "verticalM": -0.2,
+          "lateralM": 0,
+          "clamped": false,
+          "outOfBounds": false
+        },
+        {
+          "type": "head",
+          "duck": false,
+          "weave": false,
+          "verticalM": 0,
+          "lateralM": 0,
+          "clamped": false,
+          "outOfBounds": false
+        }
+      ]
+    },
+    {
+      "name": "stale controller motion does not punch while a crouch still ducks",
+      "frame": { "yaw": 180, "origin": [0, 1.2, 0] },
+      "left": [-0.2, 0.95, -0.3],
+      "status": "stale",
+      "calibration": {
+        "origin": [0, 1.6, 0],
+        "yaw": 180,
+        "posture": "standing",
+        "source": "default",
+        "entry": 0
+      },
+      "keys": [
+        { "n": 0, "right": [0.2, 0.95, -0.3], "head": [0, 1.4, 0] },
+        { "n": 5, "right": [0.2, 0.95, -0.52], "head": [0, 1.4, 0] },
+        { "n": 7, "right": [0.2, 0.95, -0.52], "head": [0, 1.4, 0] }
+      ],
+      "oracle": { "hand": "right", "minAlong": 0.18 },
+      "expect": [
+        {
+          "type": "head",
+          "duck": true,
+          "weave": false,
+          "verticalM": -0.2,
+          "lateralM": 0,
+          "clamped": false,
+          "outOfBounds": false
+        }
+      ]
+    }
+  ]
+}

@@ -78,6 +78,7 @@ export interface QuestMenuPanelFrame {
   heightPx?: number;
   widthM?: number;
   heightM?: number;
+  viewLocked?: boolean;
 }
 
 const round = (value: number) => Math.round(value * 1e5) / 1e5 || 0;
@@ -91,6 +92,7 @@ export function questMenuPanelSpec(frame: QuestMenuPanelFrame) {
     widthM: frame.widthM ?? QUEST_MENU_SIZE.widthM,
     heightM: frame.heightM ?? QUEST_MENU_SIZE.heightM,
     pose: frame.pose.map(round),
+    ...(frame.viewLocked ? { viewLocked: true } : {}),
     ops: frame.ops,
   });
 }
@@ -343,26 +345,27 @@ export function createQuestMenuCompositor(
     present,
     /** Forces a re-upload of the last drawn panel on the current owner (e.g. after XR resume). */
     replay() {
-      if (disposed || !lastFrame) return;
+      if (disposed || owner === null || !lastFrame) return;
       if (snapshot.mode !== 'pending' && snapshot.mode !== 'shown' && snapshot.mode !== 'slow') {
         return;
       }
-      if (owner !== null) {
-        try {
-          backend.invalidate?.(owner);
-        } catch (error) {
-          fail(`invalidate ${describe(error)}`);
-          return;
-        }
+      try {
+        backend.invalidate?.(owner);
+      } catch (error) {
+        fail(`invalidate ${describe(error)}`);
+        return;
       }
       lastSpec = null;
       present(lastFrame);
     },
-    /** Temporarily hides the layer while keeping snapshot mode intact for reversible re-present. */
+    /** Clears cached active frame and hides the compositor layer cleanly. */
     hide() {
-      if (disposed || owner === null) return;
+      lastFrame = null;
       lastSpec = null;
+      if (disposed || owner === null) return;
       release();
+      firstDrawAt = null;
+      if (snapshot.mode === 'shown' || snapshot.mode === 'slow') set('pending');
     },
     dispose() {
       if (disposed) return;

@@ -1,0 +1,294 @@
+diff --git a/android/sharedCode/src/main/cpp/QuestHaptics.h b/android/sharedCode/src/main/cpp/QuestHaptics.h
+new file mode 100644
+index 0000000..c1a9f10
+--- /dev/null
++++ b/android/sharedCode/src/main/cpp/QuestHaptics.h
+@@ -0,0 +1,202 @@
++// App-owned addition to ReactVision/virocore v3.0.3 (MIT) for the Neo Rock 'Em
++// Sock 'Em Robots Quest controller OpenXR haptic actuation bridge. Included once
++// by VROSceneRendererOpenXR.cpp so JNI exports live in one translation unit.
++//
++// Queues bounded per-hand vibration requests from JS/JNI and dispatches them on
++// VROOpenXRRender through the existing VROInputControllerOpenXR action set only
++// when the active OpenXR session is running and focused. No extra XrSession or
++// XrActionSet is created.
++#pragma once
++#include <jni.h>
++#include <openxr/openxr.h>
++#include <android/log.h>
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <cstdint>
++#include <mutex>
++#include <time.h>
++#include "VROInputControllerOpenXR.h"
++
++namespace quest_haptics {
++constexpr int kVersion = 1;
++constexpr int kHandLeft = 1;
++constexpr int kHandRight = 2;
++constexpr int kHandBoth = kHandLeft | kHandRight;
++constexpr int kFocusedState = XR_SESSION_STATE_FOCUSED;
++constexpr int kMinDurationMs = 10;
++constexpr int kMaxDurationMs = 500;
++constexpr int64_t kMaxPendingAgeNs = 250000000LL;
++constexpr int kStatusLongCount = 7;
++
++struct PendingPulse {
++    bool active = false;
++    float amplitude = 0.0f;
++    int32_t durationMs = 0;
++    int64_t queuedAtNs = 0;
++    uint32_t targetGen = 0;
++};
++
++struct State {
++    std::mutex mutex;
++    uint32_t generation = 0;
++    bool live = false;
++    bool actionsReady = false;
++    std::array<PendingPulse, 2> pending{};
++    int64_t applied = 0;
++    int64_t failed = 0;
++    int64_t dropped = 0;
++    int64_t lastResult = 0;
++    int64_t lastWarnNs = 0;
++};
++
++static State state;
++
++inline int64_t monotonicNow() {
++    struct timespec ts{};
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + static_cast<int64_t>(ts.tv_nsec);
++}
++
++inline void beginSession(uint32_t generation, bool actionsReady) {
++    std::lock_guard<std::mutex> lock(state.mutex);
++    state.generation = generation;
++    state.live = generation > 0;
++    state.actionsReady = actionsReady;
++    state.pending = {};
++    state.lastResult = 0;
++    __android_log_print(ANDROID_LOG_INFO, "QuestHaptics",
++                        "beginSession gen=%u actions=%d", generation, actionsReady ? 1 : 0);
++}
++
++inline void endSession(uint32_t generation) {
++    std::lock_guard<std::mutex> lock(state.mutex);
++    if (state.generation != generation) return;
++    state.live = false;
++    state.actionsReady = false;
++    state.pending = {};
++}
++
++inline bool queue(int handMask, float amplitude, int durationMs) {
++    if ((handMask & kHandBoth) == 0) return false;
++    if (!std::isfinite(amplitude) || amplitude <= 0.0f || durationMs <= 0) return false;
++    const float clampedAmp = std::max(0.05f, std::min(1.0f, amplitude));
++    const int32_t clampedDur = std::max(kMinDurationMs, std::min(kMaxDurationMs, durationMs));
++    const int64_t now = monotonicNow();
++
++    std::lock_guard<std::mutex> lock(state.mutex);
++    if (!state.live || !state.actionsReady || state.generation == 0) {
++        ++state.dropped;
++        return false;
++    }
++    for (int h = 0; h < 2; ++h) {
++        if ((handMask & (1 << h)) == 0) continue;
++        PendingPulse &p = state.pending[static_cast<size_t>(h)];
++        if (p.active && p.targetGen == state.generation &&
++            (now - p.queuedAtNs) <= kMaxPendingAgeNs) {
++            p.amplitude = std::max(p.amplitude, clampedAmp);
++            p.durationMs = std::max(p.durationMs, clampedDur);
++            p.queuedAtNs = now;
++        } else {
++            p.active = true;
++            p.amplitude = clampedAmp;
++            p.durationMs = clampedDur;
++            p.queuedAtNs = now;
++            p.targetGen = state.generation;
++        }
++    }
++    return true;
++}
++
++// Called on VROOpenXRRender inside renderFrame() after _inputController->onProcess().
++inline void flush(uint32_t generation, XrSession session, int sessionState, bool sessionRunning,
++                  const VROInputControllerOpenXR &controller) {
++    std::array<PendingPulse, 2> due{};
++    bool hasAny = false;
++    bool live = false;
++    {
++        std::lock_guard<std::mutex> lock(state.mutex);
++        if (generation == 0 || generation != state.generation || !state.live || !state.actionsReady) {
++            return;
++        }
++        live = true;
++        for (int h = 0; h < 2; ++h) {
++            if (state.pending[static_cast<size_t>(h)].active) {
++                due[static_cast<size_t>(h)] = state.pending[static_cast<size_t>(h)];
++                state.pending[static_cast<size_t>(h)].active = false;
++                hasAny = true;
++            }
++        }
++    }
++    if (!hasAny || !live) return;
++
++    const int64_t now = monotonicNow();
++    const bool canActuate =
++        session != XR_NULL_HANDLE && sessionRunning && sessionState == kFocusedState;
++
++    for (int h = 0; h < 2; ++h) {
++        const PendingPulse &p = due[static_cast<size_t>(h)];
++        if (!p.active) continue;
++        if (p.targetGen != generation || !canActuate || (now - p.queuedAtNs) > kMaxPendingAgeNs) {
++            std::lock_guard<std::mutex> lock(state.mutex);
++            ++state.dropped;
++            continue;
++        }
++        const XrResult r = controller.applyQuestHaptic(
++            session, h, p.amplitude, static_cast<float>(p.durationMs) * 0.001f);
++        std::lock_guard<std::mutex> lock(state.mutex);
++        state.lastResult = static_cast<int64_t>(r);
++        if (XR_SUCCEEDED(r)) {
++            const bool firstSuccess = state.applied == 0;
++            ++state.applied;
++            if (firstSuccess) {
++                __android_log_print(ANDROID_LOG_INFO, "QuestHaptics",
++                                    "xrApplyHapticFeedback active hand=%d amp=%.2f durMs=%d",
++                                    h, p.amplitude, p.durationMs);
++            }
++        } else {
++            ++state.failed;
++            if ((now - state.lastWarnNs) > 2000000000LL) {
++                state.lastWarnNs = now;
++                __android_log_print(ANDROID_LOG_WARN, "QuestHaptics",
++                                    "xrApplyHapticFeedback failed hand=%d result=%d", h, (int)r);
++            }
++        }
++    }
++}
++} // namespace quest_haptics
++
++extern "C" JNIEXPORT jint JNICALL
++Java_expo_modules_questinput_QuestInputModule_nativeHapticsVersion(JNIEnv *, jobject) {
++    return quest_haptics::kVersion;
++}
++
++extern "C" JNIEXPORT jboolean JNICALL
++Java_expo_modules_questinput_QuestInputModule_nativeTriggerHaptic(
++        JNIEnv *, jobject, jint handMask, jfloat amplitude, jint durationMs) {
++    return quest_haptics::queue(static_cast<int>(handMask), static_cast<float>(amplitude),
++                                static_cast<int>(durationMs))
++               ? JNI_TRUE
++               : JNI_FALSE;
++}
++
++extern "C" JNIEXPORT jboolean JNICALL
++Java_expo_modules_questinput_QuestInputModule_nativeHapticsStatus(
++        JNIEnv *env, jobject, jlongArray outStats) {
++    if (!outStats || env->GetArrayLength(outStats) < quest_haptics::kStatusLongCount) {
++        return JNI_FALSE;
++    }
++    jlong buf[quest_haptics::kStatusLongCount]{};
++    {
++        std::lock_guard<std::mutex> lock(quest_haptics::state.mutex);
++        buf[0] = quest_haptics::kVersion;
++        buf[1] = quest_haptics::state.live ? 1 : 0;
++        buf[2] = quest_haptics::state.actionsReady ? 1 : 0;
++        buf[3] = quest_haptics::state.applied;
++        buf[4] = quest_haptics::state.failed;
++        buf[5] = quest_haptics::state.dropped;
++        buf[6] = quest_haptics::state.lastResult;
++    }
++    env->SetLongArrayRegion(outStats, 0, quest_haptics::kStatusLongCount, buf);
++    return JNI_TRUE;
++}
+diff --git a/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.cpp b/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.cpp
+index bcd2d6e..7d6e2a1 100644
+--- a/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.cpp
++++ b/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.cpp
+@@ -818,6 +818,30 @@ void VROInputControllerOpenXR::triggerHaptic(XrSession session, int hand,
+     xrApplyHapticFeedback(session, &info, (const XrHapticBaseHeader *)&vibration);
+ }
+ 
++XrResult VROInputControllerOpenXR::applyQuestHaptic(XrSession session, int hand,
++                                                    float amplitude, float durationSec) const {
++    if (session == XR_NULL_HANDLE) return XR_ERROR_HANDLE_INVALID;
++    if (hand != 0 && hand != 1) return XR_ERROR_VALIDATION_FAILURE;
++    XrAction vibrateAction = (hand == 0) ? _leftVibrateAction : _rightVibrateAction;
++    if (vibrateAction == XR_NULL_HANDLE) return XR_ERROR_HANDLE_INVALID;
++
++    const float clampedAmp = std::isfinite(amplitude)
++        ? (amplitude < 0.0f ? 0.0f : (amplitude > 1.0f ? 1.0f : amplitude))
++        : 0.0f;
++    const float clampedSec = std::isfinite(durationSec)
++        ? (durationSec < 0.001f ? 0.001f : (durationSec > 0.5f ? 0.5f : durationSec))
++        : 0.02f;
++
++    XrHapticVibration vibration = { XR_TYPE_HAPTIC_VIBRATION };
++    vibration.amplitude  = clampedAmp;
++    vibration.duration   = static_cast<XrDuration>(clampedSec * 1e9f);
++    vibration.frequency  = XR_FREQUENCY_UNSPECIFIED;
++
++    XrHapticActionInfo info = { XR_TYPE_HAPTIC_ACTION_INFO };
++    info.action = vibrateAction;
++    return xrApplyHapticFeedback(session, &info, (const XrHapticBaseHeader *)&vibration);
++}
++
+ // ──────────────────────────────────────────────────────────────────────────────
+ // Hand tracking  (XR_EXT_hand_tracking + XR_FB_hand_tracking_aim)
+ // ──────────────────────────────────────────────────────────────────────────────
+diff --git a/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.h b/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.h
+index 247e18f..f83c4aa 100644
+--- a/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.h
++++ b/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.h
+@@ -129,6 +129,8 @@ public:
+      */
+     void triggerHaptic(XrSession session, int hand,
+                        float amplitude = 0.5f, float durationSec = 0.05f);
++    XrResult applyQuestHaptic(XrSession session, int hand,
++                              float amplitude, float durationSec) const;
+ 
+     VROVector3f getDragForwardOffset() override;
+ 
+diff --git a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
+index b2d58ae..1e6d2c5 100644
+--- a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
++++ b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
+@@ -9,6 +9,7 @@
+ #include "QuestInputSampler.h"
+ #include "QuestRigSync.h"
+ #include "QuestHandsRenderer.h"
++#include "QuestHaptics.h"
+ 
+ #include <android/log.h>
+ #include <sys/prctl.h>
+@@ -207,6 +208,7 @@ void VROSceneRendererOpenXR::createSession() {
+         _inputController->createActionSet(_instance, _session, _eyeGazeSupported);
+     // App input bridge (QuestInputSampler.h): samples from this session only.
+     _questInputGeneration = quest_input::beginSession(questActionsReady);
++    quest_haptics::beginSession(_questInputGeneration, questActionsReady);
+     _questProfileRefreshIn = 0;
+     initHandTracking();  // no-op if XR_EXT_hand_tracking not available on this device
+ 
+@@ -899,6 +901,7 @@ void VROSceneRendererOpenXR::destroySwapchains() {
+ void VROSceneRendererOpenXR::destroySession() {
+     // App input bridge: this session's samples end here; a newer session is untouched.
+     quest_input::endSession(_questInputGeneration);
++    quest_haptics::endSession(_questInputGeneration);
+     quest_rig::resetRenderCache();
+     quest_hands::reset();
+     // AR session teardown — destroy the plane detector before the XrSession.
+@@ -1383,7 +1386,9 @@ void VROSceneRendererOpenXR::renderFrame() {
+         if (_inputController && _renderer && _renderer->hasRenderContext()) {
+             _inputController->onProcess(_session, _stageSpace,
+                                          frameState.predictedDisplayTime,
+                                          _renderer->getCamera());
++            quest_haptics::flush(_questInputGeneration, _session, (int)_sessionState,
++                                 _sessionRunning, *_inputController);
+             auto presenter = _inputController->getPresenter();
+             if (auto presenterRoot = presenter ? presenter->getRootNode() : nullptr) {
+                 auto parent = presenterRoot->getParentNode();

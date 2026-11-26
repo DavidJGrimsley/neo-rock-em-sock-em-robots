@@ -1,7 +1,7 @@
 // Quest controller sources from ViroOculus. Head gaze is 12 and is processed
 // after both hands, so it must not move the menu highlight or fire an action.
 // Grip, face buttons, and the controller Back button are not menu triggers.
-// Back/Menu still exits through Viro's VR BackHandler, outside this filter.
+// The sampled left Menu edge pauses the match outside this filter.
 
 export const QUEST_TRIGGER_SOURCES = [1, 4] as const;
 const CLICK_DOWN = 1;

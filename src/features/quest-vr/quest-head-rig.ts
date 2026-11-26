@@ -365,6 +365,34 @@ export function menuFrame(cal: Calibration): { position: Vec3; rotationY: number
   };
 }
 
+/**
+ * Rotates calibration around the wearer's current horizontal head XZ without
+ * disturbing physical headset tracking or shifting apparent stance center.
+ */
+export function applyYawTurnToCalibration(
+  cal: Calibration,
+  headPosition: Vec3 | null | undefined,
+  deltaYawDeg: number
+): Calibration {
+  if (!Number.isFinite(deltaYawDeg) || deltaYawDeg === 0) return cal;
+  const hx = headPosition && Number.isFinite(headPosition[0]) ? headPosition[0] : cal.origin[0];
+  const hz = headPosition && Number.isFinite(headPosition[2]) ? headPosition[2] : cal.origin[2];
+  const rad = (deltaYawDeg * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const vx = cal.origin[0] - hx;
+  const vz = cal.origin[2] - hz;
+  return {
+    ...cal,
+    origin: [
+      cleanZero(hx + vx * cos + vz * sin),
+      cal.origin[1],
+      cleanZero(hz - vx * sin + vz * cos),
+    ],
+    yaw: wrap180(cal.yaw + deltaYawDeg),
+  };
+}
+
 export type CalibrationResult =
   { ok: true; origin: Vec3; yaw: number } | { ok: false; reason: 'too-few' | 'moving' | 'invalid' };
 

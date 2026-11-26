@@ -17,7 +17,6 @@ const {
 const { createQuestInputSource } = require('../src/features/quest-vr/quest-input-source.ts');
 const {
   QUEST_ARENA_RULES,
-  QUEST_STAGE_05_IDLE_OPPONENT_RULES,
   createQuestArenaSession,
 } = require('../src/features/quest-vr/quest-arena-session.ts');
 const {
@@ -54,12 +53,14 @@ function near(actual, expected, tolerance = 1e-6, label = '') {
   );
 }
 
+let sampleClockNs = 1_000_000_000;
 function makeSample(overrides = {}) {
   const stick = overrides.stick ?? [0, 0];
   return {
     seq: overrides.seq ?? 1,
     refEpoch: overrides.refEpoch,
     timestampNs: overrides.timestampNs ?? 1_000_000_000,
+    capturedNs: overrides.timestampNs ?? (sampleClockNs += 16_000_000),
     focused: overrides.focused ?? true,
     actionsReady: overrides.actionsReady ?? true,
     left: {
@@ -578,6 +579,7 @@ test('QuestArenaSession drives real-time substepped locomotion, neutralizes clea
   assert.ok(fc.pendingFrames > 0, 'frame loop restarts on resume');
 
   // Bounds invariant stays intact under extreme corner input using Quest-only rules.
+  session.setInputState(makeSample({ stick: [0, 0] }), 'live');
   session.setInputState(makeSample({ stick: [1, -1] }), 'live');
   for (let i = 0; i < 40; i++) fc.stepFrame(33.33);
   const late = session.getLiveTransforms();
@@ -591,8 +593,8 @@ test('QuestArenaSession drives real-time substepped locomotion, neutralizes clea
   session.dispose();
 });
 
-test('Quest Stage 05 temporary idle opponent stays stationary and non-attacking while player moves close, leaving default ArenaMatch solo CPU active', () => {
-  assert.deepEqual(QUEST_STAGE_05_IDLE_OPPONENT_RULES, { cpuEnabled: false });
+test('Quest Stage 06 restores active CPU combat in solo while preserving ring constraints and default phone ArenaMatch solo CPU', () => {
+  assert.equal(QUEST_ARENA_RULES.headEvasionEnabled, true);
 
   const fc = makeFrameClock();
   const session = createQuestArenaSession(fc.clock);
@@ -610,70 +612,34 @@ test('Quest Stage 05 temporary idle opponent stays stationary and non-attacking 
   assert.equal(session.getSnapshot().stage, 'fighting');
 
   const redSpawn = { ...session.getLiveTransforms().red };
-  const assertRedStationaryAndIdle = (label) => {
+  let cpuMoved = false;
+  let cpuAttacked = false;
+  let playerDamaged = false;
+
+  for (let i = 0; i < 180; i++) {
+    fc.stepFrame(33.3333);
     const snap = session.getSnapshot();
+    const matchSnap = session.getMatchSnapshot();
     const live = session.getLiveTransforms();
-    assert.equal(snap.stage, 'fighting', `${label}: stage stays fighting`);
-    assert.equal(snap.outcome, null, `${label}: no knockout/outcome`);
-    assert.equal(snap.fighters.red.clip, 'IdleAggro', `${label}: red stays in IdleAggro`);
-    assert.equal(snap.animationsRunning, true, `${label}: animations stay running`);
-    near(live.red.x, redSpawn.x, 1e-6, `${label}: red X stationary`);
-    near(live.red.z, redSpawn.z, 1e-6, `${label}: red Z stationary`);
-    near(live.red.lift, 0, 1e-6, `${label}: red lift stays 0`);
+    if (distance(live.red, redSpawn) > 0.01) cpuMoved = true;
+    if (snap.fighters?.red.clip.startsWith('Combo_')) cpuAttacked = true;
+    if (matchSnap && matchSnap.blue.health < ARENA_RULES.health) playerDamaged = true;
     assert.ok(
       distance(live.blue, live.red) >= QUEST_ARENA_RULES.separation - 1e-6,
-      `${label}: Quest separation constraint enforced`
+      `step ${i}: Quest separation constraint enforced`
     );
     assert.ok(
       Math.hypot(live.blue.x, live.blue.z) <= QUEST_ARENA_RULES.boundary + 1e-6,
-      `${label}: Quest ring boundary constraint enforced`
+      `step ${i}: Quest ring boundary constraint enforced`
     );
-  };
-
-  // Push straight forward up to minimum separation and hold close well past cpuFirstDelay/cpuRecovery.
-  session.setInputState(makeSample({ stick: [0, 1] }), 'live');
-  for (let i = 0; i < 180; i++) {
-    fc.stepFrame(33.3333); // 6 seconds total while pressing into close range
-    assertRedStationaryAndIdle(`close-forward-${i}`);
+    assert.ok(
+      Math.hypot(live.red.x, live.red.z) <= QUEST_ARENA_RULES.boundary + 1e-6,
+      `step ${i}: CPU ring boundary constraint enforced`
+    );
   }
-  const atClose = session.getLiveTransforms();
-  assert.ok(
-    distance(atClose.blue, atClose.red) <= QUEST_ARENA_RULES.separation + 0.002,
-    'player reached Quest close separation limit'
-  );
-
-  // Remain idle right in front of the opponent (inside reach) for 3 seconds: CPU still never moves or attacks.
-  session.setInputState(makeSample({ stick: [0, 0] }), 'live');
-  for (let i = 0; i < 90; i++) {
-    fc.stepFrame(33.3333);
-    assertRedStationaryAndIdle(`close-idle-${i}`);
-  }
-
-  // Orbit left and right around the stationary opponent; red faces player in place without translating.
-  session.setInputState(makeSample({ stick: [-1, 0] }), 'live');
-  for (let i = 0; i < 45; i++) {
-    fc.stepFrame(33.3333);
-    assertRedStationaryAndIdle(`orbit-left-${i}`);
-  }
-  const orbitedLeft = session.getLiveTransforms();
-  assert.notEqual(Math.round(orbitedLeft.red.yaw), Math.round(redSpawn.yaw), 'red turns to face');
-
-  session.setInputState(makeSample({ stick: [1, -0.5] }), 'live');
-  for (let i = 0; i < 45; i++) {
-    fc.stepFrame(33.3333);
-    assertRedStationaryAndIdle(`orbit-right-retreat-${i}`);
-  }
-
-  // Pause & resume preserves stationary idle opponent behavior.
-  session.setAppActive(false);
-  assert.equal(session.getSnapshot().stage, 'paused');
-  session.setAppActive(true);
-  assert.equal(session.ready().reason, 'resumed');
-  session.setInputState(makeSample({ stick: [0, 1] }), 'live');
-  for (let i = 0; i < 60; i++) {
-    fc.stepFrame(33.3333);
-    assertRedStationaryAndIdle(`post-resume-${i}`);
-  }
+  assert.equal(cpuMoved, true, 'Quest CPU closes distance in Stage 06');
+  assert.equal(cpuAttacked, true, 'Quest CPU throws attacks in Stage 06');
+  assert.equal(playerDamaged, true, 'Quest CPU lands hits on undefended player');
   session.dispose();
 
   // Default ArenaMatch('solo') (used by phone AR solo) keeps active CPU movement and combat enabled.
@@ -779,6 +745,7 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
     vrActivityState: 'resumed',
   };
   const replayCounts = { menu: 0, title: 0 };
+  const titlePresents = [];
   let compositorCreates = 0;
 
   const mocks = {
@@ -884,7 +851,7 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
     },
     './quest-arena-session.ts': {
       createQuestArenaSession: () => {
-        const raw = createQuestArenaSession(fc.clock);
+        const raw = createQuestArenaSession(fc.clock, undefined, { cpuEnabled: false });
         sessionInstance = {
           ...raw,
           setMenuFocus(focused) {
@@ -909,6 +876,7 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
         dispose: () => {},
       },
     },
+    './quest-combat-hud.ts': require('../src/features/quest-vr/quest-combat-hud.ts'),
     './quest-head-rig.ts': require('../src/features/quest-vr/quest-head-rig.ts'),
     './quest-menu-asset-uri.ts': require('../src/features/quest-vr/quest-menu-asset-uri.ts'),
     './quest-menu-compositor.ts': {
@@ -918,8 +886,12 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
         return {
           subscribe: () => () => {},
           getSnapshot: () => ({ mode: 'shown', reason: null }),
-          present: () => {},
-          hide: () => {},
+          present: (spec) => {
+            if (slot === 'title') titlePresents.push(spec?.label ?? null);
+          },
+          hide: () => {
+            if (slot === 'title') titlePresents.push('hide');
+          },
           replay: () => {
             replayCounts[slot] += 1;
           },
@@ -930,6 +902,8 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
     './quest-menu-input.ts': require('../src/features/quest-vr/quest-menu-input.ts'),
     './quest-menu-layer.ts': require('../src/features/quest-vr/quest-menu-layer.ts'),
     './quest-menu-layout.ts': require('../src/features/quest-vr/quest-menu-layout.ts'),
+    './quest-arena-audio.native.ts': { useQuestArenaAudio: () => {} },
+    './quest-tuning.ts': require('../src/features/quest-vr/quest-tuning.ts'),
     './quest-diagnostics-layout.ts': {
       questDiagLayerMaterials: () => ({}),
     },
@@ -998,6 +972,7 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
   };
 
   let all = render();
+  assert.equal(titlePresents.includes('title menu'), true, 'menu stage presents branded title');
   const findHit = (action) => all.find((n) => n.type === 'ViroQuad' && n.key === `hit-${action}`);
 
   // Solo -> attach ref mocks to blue/red models and transform ViroNodes -> load assets -> Ready.
@@ -1057,7 +1032,13 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
   findHit('back').props.onHover(true, [0, 0, 0], 12);
   assert.equal(calls.menuFocusHistory.at(-1) ?? false, false);
 
-  // Ready starts countdown -> fighting.
+  // Controller ray hover (source 1) DOES set menu focus while menu is shown, and hover leave clears it promptly.
+  findHit('back').props.onHover(true, [0, 0, 0], 1);
+  assert.equal(calls.menuFocusHistory.at(-1), true);
+  findHit('back').props.onHover(false, [0, 0, 0], 1);
+  assert.equal(calls.menuFocusHistory.at(-1), false);
+
+  // Ready starts countdown -> fighting and removes ring menu hit quads during active play.
   findHit('ready').props.onClickState(1, [0, 0, 0], 1);
   findHit('ready').props.onClickState(2, [0, 0, 0], 1);
   all = render();
@@ -1066,12 +1047,13 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
     if (sessionInstance.getSnapshot().stage === 'fighting') break;
   }
   all = render();
-
-  // Controller ray hover (source 1) DOES set menu focus, and hover leave clears it promptly.
-  findHit('back').props.onHover(true, [0, 0, 0], 1);
-  assert.equal(calls.menuFocusHistory.at(-1), true);
-  findHit('back').props.onHover(false, [0, 0, 0], 1);
-  assert.equal(calls.menuFocusHistory.at(-1), false);
+  assert.equal(findHit('back'), undefined, 'menu hit quads are removed during active combat');
+  assert.equal(findHit('ready'), undefined, 'ready/set button is removed during active combat');
+  assert.equal(
+    titlePresents.at(-1),
+    'combat hud',
+    'eyes presentation switches titleCompositor slot to live combat HUD'
+  );
 
   // 200ms tracker snapshot ticks (outOfBounds unchanged) must keep QuestRing memoized (no GLB re-render).
   const fightingRingRef = all.find((n) => n.type?.name === 'QuestRing');
@@ -1186,8 +1168,7 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
   assert.equal(sessionInstance.getSnapshot().fighters.red.clip, 'IdleAggro');
   assert.equal(sessionInstance.getSnapshot().animationsRunning, true);
 
-  // Rising edge of appActive && vrActivityState === 'resumed' triggers compositor replay for menu & title,
-  // preserves IdleAggro animation running state, and resumes smooth 1:1 left/right frame updates.
+  // VRActivity resume builds the current Pause card and leaves both old owners hidden.
   assert.equal(replayCounts.menu, 0);
   assert.equal(replayCounts.title, 0);
   runtimeSnap = { ...runtimeSnap, appActive: false, vrActivityState: 'paused' };
@@ -1204,11 +1185,11 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
   assert.equal(replayCounts.menu, 0, 'still paused until VRActivity resumes');
   runtimeSnap = { ...runtimeSnap, appActive: true, vrActivityState: 'resumed' };
   for (const l of runtimeListeners) l();
-  assert.equal(replayCounts.menu, 1);
-  assert.equal(replayCounts.title, 1);
+  assert.equal(replayCounts.menu, 0);
+  assert.equal(replayCounts.title, 0);
   all = render();
-  findHit('ready').props.onClickState(1, [0, 0, 0], 1);
-  findHit('ready').props.onClickState(2, [0, 0, 0], 1);
+  findHit('resume').props.onClickState(1, [0, 0, 0], 1);
+  findHit('resume').props.onClickState(2, [0, 0, 0], 1);
   all = render();
   for (let i = 0; i < 40; i++) {
     fc.stepFrame(120);
@@ -1217,6 +1198,10 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
   assert.equal(sessionInstance.getSnapshot().animationsRunning, true);
   assert.equal(sessionInstance.getSnapshot().fighters.red.clip, 'IdleAggro');
   calls.nativePropsLog.length = 0;
+  for (const cb of calls.inputSampleHandlers) {
+    cb(makeSample({ stick: [0, 0] }), 'live');
+    cb(makeSample({ stick: [-1, 0] }), 'live');
+  }
   // Post-resume frame advances smoothly even after large pause dt spike (clamped safely).
   calls.transformCommands.length = 0;
   all.find((n) => n.type === 'ViroGameLoop').props.onUpdate({ dt: 0.4, elapsed: 2.5 });
@@ -1238,7 +1223,7 @@ test('Quest view-relative locomotion moves on horizontal plane along live head l
     entries: () => 1,
     refSpaceEpoch: () => refEpoch,
   });
-  const session = createQuestArenaSession(fc.clock, tracker);
+  const session = createQuestArenaSession(fc.clock, tracker, { cpuEnabled: false });
 
   // Feed initial stable head pose at differing calibration yaw (135 deg) before Solo.
   for (let i = 0; i < 10; i++) {
@@ -1623,7 +1608,7 @@ test('QuestArenaSession external render-loop stepping stays smooth across left/r
     entries: () => 1,
     refSpaceEpoch: () => 1,
   });
-  const session = createQuestArenaSession(fc.clock, tracker);
+  const session = createQuestArenaSession(fc.clock, tracker, { cpuEnabled: false });
   for (let i = 0; i < 10; i++) {
     tracker.onCameraTransform(makeHeadViroPose(180, 0, 0, [0, 1.5, 0]));
     fc.clock.now();
@@ -1847,6 +1832,7 @@ test('QuestRigSync path bypasses ViroGameLoop and ViroGameLoopUtils, tags rig/fi
         dispose: () => {},
       },
     },
+    './quest-combat-hud.ts': require('../src/features/quest-vr/quest-combat-hud.ts'),
     './quest-head-rig.ts': require('../src/features/quest-vr/quest-head-rig.ts'),
     './quest-menu-asset-uri.ts': require('../src/features/quest-vr/quest-menu-asset-uri.ts'),
     './quest-menu-compositor.ts': {
@@ -1863,6 +1849,8 @@ test('QuestRigSync path bypasses ViroGameLoop and ViroGameLoopUtils, tags rig/fi
     './quest-menu-input.ts': require('../src/features/quest-vr/quest-menu-input.ts'),
     './quest-menu-layer.ts': require('../src/features/quest-vr/quest-menu-layer.ts'),
     './quest-menu-layout.ts': require('../src/features/quest-vr/quest-menu-layout.ts'),
+    './quest-arena-audio.native.ts': { useQuestArenaAudio: () => {} },
+    './quest-tuning.ts': require('../src/features/quest-vr/quest-tuning.ts'),
     './quest-diagnostics-layout.ts': { questDiagLayerMaterials: () => ({}) },
     './quest-runtime-store.ts': {
       questRuntime: {
@@ -2142,7 +2130,7 @@ test('QuestArenaSession executes Quest A-button directional dash across cardinal
     entries: () => 1,
     refSpaceEpoch: () => refEpoch,
   });
-  const session = createQuestArenaSession(fc.clock, tracker);
+  const session = createQuestArenaSession(fc.clock, tracker, { cpuEnabled: false });
 
   // Calibrate looking along 180 deg (+Z? wait: yawFromForward([0,0,-1])=180; worldForwardXZ(180)=[0,-1]).
   for (let i = 0; i < 10; i++) {

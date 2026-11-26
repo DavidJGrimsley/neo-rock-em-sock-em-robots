@@ -6,6 +6,7 @@ import {
   type FighterId,
   type Movement,
   type AnalogMovement,
+  type HeadEvasionInput,
   type AttackKind,
   type CombatCommand,
   type FighterTransform,
@@ -240,6 +241,16 @@ export class ArenaMatch {
     }
     return events;
   }
+  takeEvadedHits() {
+    return this.round.takeEvadedHits(this.localFighter);
+  }
+  getQuestCombatTelemetry() {
+    return this.round.getQuestCombatTelemetry();
+  }
+  setCombatYaw = (yaw: number | null, roundId = this.snapshot.roundId, viewYaw = yaw) => {
+    if (this.mode !== 'solo' || roundId !== this.snapshot.roundId) return;
+    this.round.setCombatYaw(yaw, roundId, this.localFighter, viewYaw);
+  };
   getSessionToken = () => this.round.getSessionToken();
   isCurrent(token: number) {
     return !this.disposed && this.getSessionToken() === token;
@@ -536,7 +547,8 @@ export class ArenaMatch {
     const active = this.snapshot.phase === 'fighting' && this.snapshot.animationsRunning;
     this.analog = active ? sanitizeAnalogMovement(input) : { advance: 0, strafe: 0 };
   };
-  attack = (kind: AttackKind, roundId = this.snapshot.roundId) => this.command(kind, roundId);
+  attack = (kind: AttackKind, roundId = this.snapshot.roundId, preferredHand?: 'L' | 'R') =>
+    this.command(kind, roundId, preferredHand);
   block = (held: boolean, roundId = this.snapshot.roundId) =>
     this.command(held ? 'block-down' : 'block-up', roundId);
   jumpBack = (roundId = this.snapshot.roundId) => this.command('jump-back', roundId);
@@ -554,7 +566,15 @@ export class ArenaMatch {
     return this.round.dash(direction, roundId, this.localFighter);
   };
   cancelDash = () => this.round.cancelDash(this.localFighter);
-  private command(kind: CombatCommand, roundId: number) {
+  setHeadEvasion = (input: HeadEvasionInput | null, roundId = this.snapshot.roundId) => {
+    if (this.mode !== 'solo' || roundId !== this.snapshot.roundId) return;
+    if (input === null || this.stage !== 'fighting' || !this.snapshot.animationsRunning) {
+      this.round.setHeadEvasion(null, roundId, this.localFighter);
+      return;
+    }
+    this.round.setHeadEvasion(input, roundId, this.localFighter);
+  };
+  private command(kind: CombatCommand, roundId: number, preferredHand?: 'L' | 'R') {
     if (
       roundId !== this.snapshot.roundId ||
       this.snapshot.phase !== 'fighting' ||
@@ -601,7 +621,14 @@ export class ArenaMatch {
       this.interrupt();
       return false;
     }
-    const command = { seq: ++this.seq, epoch: this.epoch, matchId: this.matchId, roundId, kind };
+    const command = {
+      seq: ++this.seq,
+      epoch: this.epoch,
+      matchId: this.matchId,
+      roundId,
+      kind,
+      ...(preferredHand ? { preferredHand } : {}),
+    };
     if (this.mode === 'guest') this.pending.push(command);
     else this.localCommands.push(command);
     this.publish();
@@ -700,7 +727,10 @@ export class ArenaMatch {
       command.roundId !== this.round.getSnapshot().roundId
     )
       return;
-    this.round.command(command.kind, fighter, command.roundId);
+    const rawHand = (command as { preferredHand?: unknown }).preferredHand;
+    const safeHand =
+      fighter === this.localFighter && (rawHand === 'L' || rawHand === 'R') ? rawHand : undefined;
+    this.round.command(command.kind, fighter, command.roundId, safeHand);
   }
   tick = (token: number, dt: number) => {
     if (!this.isCurrent(token) || !Number.isFinite(dt) || dt <= 0 || dt > 0.1) return;

@@ -516,6 +516,7 @@ function createSceneHarness(
       questPanelNative: panel.native,
     },
     './quest-arena-session.ts': require('../src/features/quest-vr/quest-arena-session.ts'),
+    './quest-combat-hud.ts': require('../src/features/quest-vr/quest-combat-hud.ts'),
     './quest-head-rig.ts': require('../src/features/quest-vr/quest-head-rig.ts'),
     './quest-head-tracker.ts': { questHeadTracker: mockTracker },
     './quest-menu-asset-uri.ts': require('../src/features/quest-vr/quest-menu-asset-uri.ts'),
@@ -589,6 +590,8 @@ function createSceneHarness(
       QuestDiagnosticsPanel: 'QuestDiagnosticsPanel',
       QuestInputMarkers: 'QuestInputMarkers',
     },
+    './quest-arena-audio.native.ts': { useQuestArenaAudio: () => {} },
+    './quest-tuning.ts': require('../src/features/quest-vr/quest-tuning.ts'),
   };
 
   const output = ts.transpileModule(

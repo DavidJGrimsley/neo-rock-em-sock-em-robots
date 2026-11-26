@@ -1125,3 +1125,44 @@ test('diagnostics live patch targets bounded sub-regions and responds faster tha
   assert.match(visualizer, /questInputNative\?\.patchDiagnostics\?\.\(owner/);
   assert.match(visualizer, /source\.onSample\(/);
 });
+
+test('QuestInputModule and patch 0007 agree on the OpenXR haptics JNI contract', () => {
+  const kotlin = read(
+    'modules/quest-input/native/src/main/java/expo/modules/questinput/QuestInputModule.kt'
+  );
+  const patch = read('tools/quest/viro-renderer/0007-openxr-quest-haptics.patch');
+  const build = read('tools/quest/build-viro-renderer.mjs');
+  const ts = read('modules/quest-input/src/index.ts');
+  const hapticsJni = {
+    nativeHapticsVersion: [
+      'jint',
+      '(JNIEnv *, jobject)',
+      /private external fun nativeHapticsVersion\(\): Int/,
+    ],
+    nativeTriggerHaptic: [
+      'jboolean',
+      'jint handMask, jfloat amplitude, jint durationMs',
+      /private external fun nativeTriggerHaptic\(handMask: Int, amplitude: Float, durationMs: Int\): Boolean/,
+    ],
+    nativeHapticsStatus: [
+      'jboolean',
+      'jlongArray outStats',
+      /private external fun nativeHapticsStatus\(outStats: LongArray\): Boolean/,
+    ],
+  };
+  for (const [name, [returns, args, kotlinDecl]] of Object.entries(hapticsJni)) {
+    const symbol = `Java_expo_modules_questinput_QuestInputModule_${name}`;
+    const at = patch.indexOf(symbol);
+    assert.ok(at > 0, symbol);
+    assert.match(patch.slice(at - 60, at), new RegExp(`JNIEXPORT ${returns} JNICALL`));
+    assert.ok(patch.slice(at, at + 260).includes(args), `${name} arguments`);
+    assert.match(kotlin, kotlinDecl);
+    assert.match(build, new RegExp(`'${name}'`));
+  }
+  assert.match(kotlin, /Function\("hapticsVersion"\)/);
+  assert.match(kotlin, /Function\("triggerHaptic"\)/);
+  assert.match(kotlin, /Function\("hapticsStatus"\)/);
+  assert.match(ts, /triggerHaptic\?\(/);
+  assert.match(ts, /hapticsVersion\?\(/);
+  assert.match(ts, /hapticsStatus\?\(/);
+});

@@ -322,6 +322,8 @@ const panelJni = [
   'nativeTitleHide',
   'nativeTitlePose',
   'nativeTitleDraw',
+  'nativeTitlePoseInSpace',
+  'nativeTitleDrawInSpace',
 ].map((name) => `Java_expo_modules_questpanel_QuestPanelModule_${name}`);
 const missingPanelJni = pristine ? [] : panelJni.filter((symbol) => !candidate.exports.has(symbol));
 if (missingPanelJni.length)
@@ -344,6 +346,9 @@ const inputJni = [
   'nativeHandsVersion',
   'nativeSetHandsEnabled',
   'nativeReadGrip',
+  'nativeHapticsVersion',
+  'nativeTriggerHaptic',
+  'nativeHapticsStatus',
 ].map((name) => `Java_expo_modules_questinput_QuestInputModule_${name}`);
 const missingInputJni = pristine ? [] : inputJni.filter((symbol) => !candidate.exports.has(symbol));
 if (missingInputJni.length)

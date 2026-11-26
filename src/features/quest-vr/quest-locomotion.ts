@@ -8,6 +8,7 @@ import {
 } from './quest-head-rig.ts';
 import type { QuestInputSample } from './quest-input.ts';
 import type { QuestInputStatus } from './quest-input-source.ts';
+import { QUEST_TUNING, type QuestTurnMode } from './quest-tuning.ts';
 
 /** Radial deadzone rejecting Oculus Touch rest jitter while keeping smooth analog response. */
 export const QUEST_STICK_DEADZONE = 0.15;
@@ -334,5 +335,185 @@ export function evaluateQuestDashInput(
       advance: cleanZero(move.advance / len),
       strafe: cleanZero(move.strafe / len),
     },
+  };
+}
+
+export interface QuestPauseTriggerState {
+  armed: boolean;
+  lastToggleMs: number;
+  menuAvailable: boolean | null;
+}
+
+export interface QuestPauseInputEvaluation {
+  nextState: QuestPauseTriggerState;
+  toggled: boolean;
+  neutralized: boolean;
+}
+
+/**
+ * Evaluates a rising-edge toggle on the left Oculus Touch Menu button
+ * (`/user/hand/left/input/menu/click` -> `sample.left.buttons.menu`).
+ * Requires observing `menu === false` in a focused, live, tracked frame before
+ * arming; rejects held inputs across focus loss, tracking loss, reconnects, and recenter.
+ */
+export function evaluateQuestPauseInput(
+  prevState: QuestPauseTriggerState,
+  input: {
+    sample: QuestInputSample | null;
+    status: QuestInputStatus;
+    canToggle: boolean;
+    appActive?: boolean;
+    recenterNeutral?: boolean;
+    head?: QuestHeadLocomotionState | null;
+    nowMs?: number;
+  },
+  debounceMs = QUEST_TUNING.pause.debounceMs
+): QuestPauseInputEvaluation {
+  const nowMs = typeof input.nowMs === 'number' && Number.isFinite(input.nowMs) ? input.nowMs : 0;
+  const reset = (
+    neutralized: boolean,
+    menuAvailable: boolean | null = prevState.menuAvailable
+  ): QuestPauseInputEvaluation => ({
+    nextState: { armed: false, lastToggleMs: prevState.lastToggleMs, menuAvailable },
+    toggled: false,
+    neutralized,
+  });
+
+  if (input.appActive === false || input.recenterNeutral === true) return reset(true);
+  if (input.status !== 'live' || !input.sample) return reset(true);
+  const { sample } = input;
+  if (!sample.focused || !sample.actionsReady) return reset(true);
+  if (
+    typeof sample.refEpoch === 'number' &&
+    typeof input.head?.refEpoch === 'number' &&
+    sample.refEpoch !== input.head.refEpoch
+  ) {
+    return reset(true);
+  }
+  if (input.head?.recentering) return reset(true);
+  if (sample.left.tracking === 'lost') return reset(true);
+  const menuDown = sample.left.buttons.menu;
+  if (menuDown === null) return reset(true, false);
+  if (!input.canToggle) return reset(true, true);
+
+  if (menuDown === false) {
+    return {
+      nextState: { armed: true, lastToggleMs: prevState.lastToggleMs, menuAvailable: true },
+      toggled: false,
+      neutralized: false,
+    };
+  }
+
+  if (!prevState.armed || nowMs - prevState.lastToggleMs < debounceMs) {
+    return {
+      nextState: { armed: false, lastToggleMs: prevState.lastToggleMs, menuAvailable: true },
+      toggled: false,
+      neutralized: false,
+    };
+  }
+
+  return {
+    nextState: { armed: false, lastToggleMs: nowMs, menuAvailable: true },
+    toggled: true,
+    neutralized: false,
+  };
+}
+
+export interface QuestTurnTriggerState {
+  snapArmed: boolean;
+}
+
+export interface QuestTurnInputEvaluation {
+  nextState: QuestTurnTriggerState;
+  deltaYawDeg: number;
+}
+
+/**
+ * Evaluates right thumbstick horizontal turning (30 deg snap default or optional smooth turn).
+ * Positive thumbstick X rotates right (increasing calibration.yaw).
+ */
+export function evaluateQuestTurnInput(
+  prevState: QuestTurnTriggerState,
+  input: {
+    sample: QuestInputSample | null;
+    status: QuestInputStatus;
+    inActiveFight: boolean;
+    menuFocused?: boolean;
+    appActive?: boolean;
+    recenterNeutral?: boolean;
+    paused?: boolean;
+    head?: QuestHeadLocomotionState | null;
+    turnMode?: QuestTurnMode;
+    snapAngleDeg?: number;
+    smoothDegPerSec?: number;
+    dtSeconds?: number;
+  }
+): QuestTurnInputEvaluation {
+  const disarm = (): QuestTurnInputEvaluation => ({
+    nextState: { snapArmed: false },
+    deltaYawDeg: 0,
+  });
+
+  if (
+    input.appActive === false ||
+    input.menuFocused === true ||
+    input.recenterNeutral === true ||
+    input.paused === true ||
+    !input.inActiveFight
+  ) {
+    return disarm();
+  }
+  if (input.status !== 'live' || !input.sample) return disarm();
+  const { sample } = input;
+  if (!sample.focused || !sample.actionsReady || sample.right.tracking === 'lost') return disarm();
+  if (!sample.right.thumbstick.active) return disarm();
+  if (
+    typeof sample.refEpoch === 'number' &&
+    typeof input.head?.refEpoch === 'number' &&
+    sample.refEpoch !== input.head.refEpoch
+  ) {
+    return disarm();
+  }
+  if (input.head?.recentering) return disarm();
+
+  const x = sample.right.thumbstick.x;
+  if (!Number.isFinite(x)) return disarm();
+
+  const mode = input.turnMode ?? 'snap';
+  const deadzone = QUEST_TUNING.turn.deadzone;
+  if (mode === 'smooth') {
+    const dt =
+      typeof input.dtSeconds === 'number' && Number.isFinite(input.dtSeconds) && input.dtSeconds > 0
+        ? Math.min(0.1, input.dtSeconds)
+        : 0;
+    if (Math.abs(x) <= deadzone) {
+      return { nextState: { snapArmed: true }, deltaYawDeg: 0 };
+    }
+    if (!prevState.snapArmed || dt <= 0) return { nextState: prevState, deltaYawDeg: 0 };
+    const mag = (Math.min(1, Math.abs(x)) - deadzone) / (1 - deadzone);
+    const rate = input.smoothDegPerSec ?? 120;
+    return {
+      nextState: prevState,
+      deltaYawDeg: Math.sign(x) * mag * rate * dt,
+    };
+  }
+
+  const absX = Math.abs(x);
+  if (absX <= QUEST_TUNING.turn.snapReleaseThreshold) {
+    return {
+      nextState: { snapArmed: true },
+      deltaYawDeg: 0,
+    };
+  }
+  if (absX < QUEST_TUNING.turn.snapEngageThreshold || !prevState.snapArmed) {
+    return { nextState: prevState, deltaYawDeg: 0 };
+  }
+  const snapDeg = Math.max(
+    QUEST_TUNING.turn.minSnapDeg,
+    Math.min(QUEST_TUNING.turn.maxSnapDeg, input.snapAngleDeg ?? 30)
+  );
+  return {
+    nextState: { snapArmed: false },
+    deltaYawDeg: Math.sign(x) * snapDeg,
   };
 }

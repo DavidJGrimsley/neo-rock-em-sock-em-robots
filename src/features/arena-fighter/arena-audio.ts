@@ -54,9 +54,14 @@ export class ArenaAudio {
   private landscape = true;
   private disposed = false;
   private musicVolume = 0.45;
+  private musicVolumeCap = 0.45;
   private paired = false;
 
-  constructor(create: (key: AudioAssetKey) => AudioPlayerPort) {
+  constructor(create: (key: AudioAssetKey) => AudioPlayerPort, musicVolumeCap = 0.45) {
+    this.musicVolumeCap = Number.isFinite(musicVolumeCap)
+      ? Math.max(0, Math.min(1, musicVolumeCap))
+      : 0.45;
+    this.musicVolume = this.musicVolumeCap;
     try {
       for (const key of [
         'menu',
@@ -73,7 +78,7 @@ export class ArenaAudio {
         'round5',
       ] as const) {
         const player = create(key);
-        player.volume = key === 'menu' || key === 'battle' ? 0.45 : 1;
+        player.volume = key === 'menu' || key === 'battle' ? this.musicVolumeCap : 1;
         player.loop = key === 'menu' || key === 'battle';
         this.players.set(key, player);
         this.subscriptions.push(
@@ -145,7 +150,7 @@ export class ArenaAudio {
     this.voice = null;
   }
   private startVoice(id: string, key: VoiceKey) {
-    this.musicVolume = 0.15;
+    this.musicVolume = Math.min(0.15, this.musicVolumeCap);
     const voice: VoicePlayback = {
       id,
       key,
@@ -216,6 +221,13 @@ export class ArenaAudio {
       } else if (player.playing) player.pause();
     }
   }
+  setMusicVolume(volume: number) {
+    const cap = Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 0.45;
+    if (this.musicVolumeCap === cap) return;
+    this.musicVolumeCap = cap;
+    this.musicVolume = this.voice ? Math.min(0.15, this.musicVolumeCap) : this.musicVolumeCap;
+    this.reconcile();
+  }
   /** Active time only: backgrounding and game pauses preserve the voice and its buffer. */
   tick(dt: number) {
     if (this.disposed || !Number.isFinite(dt) || dt <= 0) return;
@@ -231,7 +243,7 @@ export class ArenaAudio {
         if (voice.doneAt !== null && voice.elapsed >= voice.doneAt + AUDIO_BUFFER)
           this.cancelVoice();
       }
-      const target = this.voice ? 0.15 : 0.45;
+      const target = this.voice ? Math.min(0.15, this.musicVolumeCap) : this.musicVolumeCap;
       this.musicVolume =
         target < this.musicVolume
           ? target

@@ -33,6 +33,11 @@ export interface AnalogMovement {
   advance: number;
   strafe: number;
 }
+export interface HeadEvasionInput {
+  duck: boolean;
+  weave: boolean;
+  outOfBounds?: boolean;
+}
 /**
  * Hook for future general dash stamina (Stage 06+).
  * Stage 05 keeps `dashStaminaCost = 0`; `guardStamina` belongs exclusively to blocking and is never charged here.
@@ -109,6 +114,9 @@ export const ARENA_RULES = {
   dashDuration: 0.24,
   dashRecovery: 0.25,
   dashStaminaCost: 0,
+  headEvasionEnabled: false,
+  evadeDuration: 0.75,
+  evadeCooldown: 0.35,
   settleDuration: 0.1,
   cpuGuardReaction: 0.15,
   spawn: 0.095,
@@ -129,6 +137,40 @@ export const ARENA_RULES = {
   victoryRepeats: 2,
   cpuEnabled: true,
   stableFacing: false,
+  // Opt-in Quest motion combat feel (Phone AR & multiplayer leave false).
+  combatFeelEnabled: false,
+  lightHitLock: 0.34,
+  mediumHitLock: 0.56,
+  heavyStaggerDuration: 0.92,
+  guardBreakStaggerDuration: 0.85,
+  poiseMax: 100,
+  poisePunchDamage: 34,
+  poiseUppercutDamage: 70,
+  poiseRecoveryPerSec: 28,
+  poiseRecoveryDelay: 0.85,
+  antiStunlockWindow: 1.8,
+  antiStunlockMaxChain: 3,
+  antiStunlockHyperArmor: 1.1,
+  reactionRecoilTravel: 0,
+  dodgeCounterWindow: 0.85,
+  dodgeCounterDamageMultiplier: 1.35,
+  // Opt-in Quest readable CPU combat state machine (Phone AR & multiplayer leave false).
+  cpuStateMachineEnabled: false,
+  cpuMaxSpeedRatio: 0.78,
+  cpuHoldRangeTolerance: 0.012,
+  cpuHoldWindowMin: 0.32,
+  cpuHoldWindowMax: 0.62,
+  cpuTelegraphPunchWindow: 0.48,
+  cpuTelegraphUppercutWindow: 0.65,
+  cpuRecoveryWindow: 0.62,
+  cpuResetWindow: 0.45,
+  cpuRetreatChance: 0.35,
+  cpuGuardChance: 0.32,
+  cpuPauseChance: 0.33,
+  cpuFeintChance: 0.15,
+  cpuRequireFov: true,
+  cpuFovHalfDeg: 68,
+  cpuTurnDegPerSec: 180,
 };
 
 // GLB already rotates its source mesh into Y-up. Its base is at Y=-0.14273847.
@@ -167,7 +209,20 @@ interface Attack {
   hand: 'L' | 'R';
   step: number;
   direction: ArenaPoint;
+  yaw: number;
 }
+export type CpuAiState =
+  | 'approach'
+  | 'hold-range'
+  | 'telegraph'
+  | 'attack'
+  | 'recover'
+  | 'reset'
+  | 'hit-react'
+  | 'stagger'
+  | 'guard'
+  | 'defeated';
+
 export interface ArenaImpact {
   id: number;
   kind: AttackKind;
@@ -176,6 +231,11 @@ export interface ArenaImpact {
   z: number;
   y: number;
   outcome: 'hit' | 'blocked' | 'guard-break';
+  heavy?: boolean;
+  counter?: boolean;
+  damage?: number;
+  staggerDuration?: number;
+  clip?: string;
 }
 interface Fighter {
   health: number;
@@ -199,6 +259,13 @@ interface Fighter {
   uppercutWindowUntil: number;
   rewardAt: number;
   impact: ArenaImpact | null;
+  poise: number;
+  poiseRecoveryAt: number;
+  hyperArmorUntil: number;
+  stunChainCount: number;
+  stunWindowResetAt: number;
+  dodgeCounterUntil: number;
+  lightHitReaction: boolean;
   guardStamina: number;
   guardState: GuardState;
   guardHeld: boolean;
@@ -216,7 +283,41 @@ interface Fighter {
     elapsed: number;
     clip: string;
   } | null;
+  evadingPose: boolean;
+  evadeOutOfBounds: boolean;
+  evadeArmed: boolean;
+  evadeUntil: number;
+  evadeCooldownUntil: number;
+  bufferedHand: 'L' | 'R' | null;
+  evadeHits: { id: number; attacker: FighterId; kind: AttackKind; hand: 'L' | 'R' }[];
   motionInitialLift: number;
+}
+
+export interface QuestCombatTelemetry {
+  distance: number;
+  reach: number;
+  uppercutReach: number;
+  maxHealth: number;
+  guardCapacity: number;
+  headEvasionEnabled: boolean;
+  blueCombatYaw: number;
+  bearingToRed: number;
+  evadeActive: boolean;
+  evadeRemaining: number;
+  evadeCooldownRemaining: number;
+  evadeOutOfBounds: boolean;
+  evadingPose: boolean;
+  evadeArmed: boolean;
+  dodgeCounterRemaining: number;
+  redAiState: CpuAiState;
+  redTelegraph: { kind: AttackKind; hand: 'L' | 'R'; remaining: number } | null;
+  redAttacking: {
+    kind: AttackKind;
+    hand: 'L' | 'R';
+    elapsed: number;
+    hitAt: number;
+    hitChecked: boolean;
+  } | null;
 }
 
 export interface FighterView {
@@ -327,6 +428,19 @@ export class ArenaController {
   private cpuThreats = 0;
   private cpuGuardUntil = 0;
   private cpuDefenseDone = false;
+  private cpuAiState: CpuAiState = 'approach';
+  private cpuStateUntil = 0;
+  private cpuStrafeDir = 1;
+  private cpuNonAttackStreak = 0;
+  private cpuTelegraph: {
+    kind: AttackKind;
+    hand: 'L' | 'R';
+    until: number;
+    committedYaw: number;
+    feinted: boolean;
+  } | null = null;
+  private cpuLockedAttackYaw: number | null = null;
+  private redRecoil: { direction: ArenaPoint; travel: number; elapsed: number } | null = null;
   private preview: { fighter: FighterId; clip: string; elapsed: number } | null = null;
   private frameTotal = 0;
   private frameSamples = 0;
@@ -347,6 +461,20 @@ export class ArenaController {
   hasNormalTracking = () => this.tracking;
   isVirtualReady = () => this.virtualReady;
   isDashing = (id: FighterId = 'blue') => this.fighters[id].dash !== null;
+  isEvading = (id: FighterId = 'blue') => {
+    const f = this.fighters[id];
+    return (
+      this.rules.headEvasionEnabled &&
+      this.phase === 'fighting' &&
+      f.evadingPose &&
+      !f.evadeOutOfBounds &&
+      f.evadeUntil > 0 &&
+      this.clock < f.evadeUntil + epsilon &&
+      !['hit', 'launch', 'landing', 'hop', 'settling', 'guard', 'guard-break'].includes(f.mode) &&
+      !f.guardHeld &&
+      f.guardState === 'off'
+    );
+  };
   setDashStaminaHook = (hook?: DashStaminaHook) => {
     this.dashStaminaHook = hook;
   };
@@ -468,6 +596,8 @@ export class ArenaController {
     this.phase = 'fighting';
     this.roundId++;
     this.cpuAttackAt = null;
+    this.resetCpuStateMachine();
+    this.combatYaw = { blue: null, red: null };
     this.publish();
     return true;
   };
@@ -476,6 +606,8 @@ export class ArenaController {
     if (this.phase !== 'paused' || !this.prerequisites()) return false;
     this.phase = this.resumePhase;
     this.cpuAttackAt = null;
+    this.resetCpuStateMachine();
+    this.combatYaw = { blue: null, red: null };
     this.publish();
     return true;
   };
@@ -500,6 +632,8 @@ export class ArenaController {
     this.phase = 'fighting';
     this.roundId++;
     this.cpuAttackAt = null;
+    this.resetCpuStateMachine();
+    this.combatYaw = { blue: null, red: null };
     this.publish();
     return true;
   };
@@ -556,14 +690,91 @@ export class ArenaController {
     this.analog[id] = eligible ? sanitizeAnalogMovement(input) : { advance: 0, strafe: 0 };
   };
 
-  attack = (kind: AttackKind, id: FighterId = 'blue', roundId = this.roundId) =>
-    roundId === this.roundId && this.requestAttack(id, kind);
+  private evadeSequence = 0;
+  private combatYaw: Record<FighterId, number | null> = { blue: null, red: null };
+  private playerViewYaw: number | null = null;
 
-  command = (kind: CombatCommand, id: FighterId = 'blue', roundId = this.roundId) => {
+  private effectiveCombatYaw(id: FighterId) {
+    if (id === 'red' && this.rules.cpuStateMachineEnabled && this.cpuLockedAttackYaw !== null) {
+      return this.cpuLockedAttackYaw;
+    }
+    if (this.rules.stableFacing && this.combatYaw[id] !== null) return this.combatYaw[id]!;
+    return this.fighters[id].yaw;
+  }
+
+  setCombatYaw = (
+    yaw: number | null,
+    roundId = this.roundId,
+    id: FighterId = 'blue',
+    viewYaw = yaw
+  ) => {
+    if (roundId !== this.roundId) return;
+    this.combatYaw[id] = yaw !== null && Number.isFinite(yaw) ? yaw : null;
+    if (id === 'blue')
+      this.playerViewYaw = viewYaw !== null && Number.isFinite(viewYaw) ? viewYaw : null;
+  };
+
+  attack = (
+    kind: AttackKind,
+    id: FighterId = 'blue',
+    roundId = this.roundId,
+    preferredHand?: 'L' | 'R'
+  ) => roundId === this.roundId && this.requestAttack(id, kind, preferredHand);
+
+  command = (
+    kind: CombatCommand,
+    id: FighterId = 'blue',
+    roundId = this.roundId,
+    preferredHand?: 'L' | 'R'
+  ) => {
     if (roundId !== this.roundId) return false;
     if (kind === 'block-down' || kind === 'block-up') return this.block(kind === 'block-down', id);
     if (kind === 'jump-back') return this.jumpBack(id);
-    return this.requestAttack(id, kind);
+    return this.requestAttack(id, kind, preferredHand);
+  };
+
+  takeEvadedHits = (id: FighterId = 'blue') => this.fighters[id].evadeHits.splice(0);
+
+  getQuestCombatTelemetry = (): QuestCombatTelemetry => {
+    const blue = this.fighters.blue;
+    const red = this.fighters.red;
+    return {
+      distance: distance(blue, red),
+      reach: this.rules.reach,
+      uppercutReach: this.rules.uppercutReach,
+      maxHealth: this.rules.health,
+      guardCapacity: this.rules.guardCapacity,
+      headEvasionEnabled: this.rules.headEvasionEnabled,
+      blueCombatYaw: this.effectiveCombatYaw('blue'),
+      bearingToRed: facing(blue, red),
+      evadeActive: this.isEvading('blue'),
+      evadeRemaining: Math.max(0, blue.evadeUntil - this.clock),
+      evadeCooldownRemaining: Math.max(0, blue.evadeCooldownUntil - this.clock),
+      evadeOutOfBounds: blue.evadeOutOfBounds,
+      evadingPose: blue.evadingPose,
+      evadeArmed: blue.evadeArmed,
+      dodgeCounterRemaining: this.rules.combatFeelEnabled
+        ? Math.max(0, blue.dodgeCounterUntil - this.clock)
+        : 0,
+      redAiState: this.cpuAiState,
+      redTelegraph:
+        this.cpuAiState === 'telegraph' && this.cpuTelegraph
+          ? {
+              kind: this.cpuTelegraph.kind,
+              hand: this.cpuTelegraph.hand,
+              remaining: Math.max(0, this.cpuTelegraph.until - this.clock),
+            }
+          : null,
+      redAttacking: red.attack
+        ? {
+            kind: red.attack.kind,
+            hand: red.attack.hand,
+            elapsed: red.attack.elapsed,
+            hitAt: red.attack.hitAt,
+            hitChecked: red.attack.hitChecked,
+          }
+        : null,
+    };
   };
 
   private canRaiseGuard(f: Fighter) {
@@ -575,15 +786,23 @@ export class ArenaController {
     );
   }
   private canAcceptBlock(f: Fighter) {
+    const lightHitCancel = this.isLightHitReaction(f);
     return (
-      (['idle', 'walk'].includes(f.mode) || (f.mode === 'hit' && f.clip === 'HitFrontFast')) &&
+      (['idle', 'walk'].includes(f.mode) || lightHitCancel) &&
       f.guardRecoveryRemaining <= epsilon &&
       !f.guardNeedsRelease &&
       f.guardStamina + epsilon >= this.rules.guardMinimum
     );
   }
+  private isLightHitReaction(f: Fighter) {
+    return (
+      f.mode === 'hit' &&
+      (this.rules.combatFeelEnabled ? f.lightHitReaction : f.clip === 'HitFrontFast')
+    );
+  }
   private raiseGuard(f: Fighter) {
     f.buffered = null;
+    f.bufferedHand = null;
     f.counterpunchBuffered = false;
     f.guardState = 'raising';
     f.guardElapsed = 0;
@@ -596,6 +815,7 @@ export class ArenaController {
       if (!this.canAcceptBlock(f) || f.guardHeld) return false;
       f.guardHeld = true;
       f.buffered = null;
+      f.bufferedHand = null;
       f.counterpunchBuffered = false;
       if (this.canRaiseGuard(f)) this.raiseGuard(f);
     } else {
@@ -769,6 +989,70 @@ export class ArenaController {
     return true;
   };
 
+  setHeadEvasion = (
+    input: HeadEvasionInput | null,
+    roundId = this.roundId,
+    id: FighterId = 'blue'
+  ) => {
+    if (roundId !== this.roundId) return;
+    const f = this.fighters[id];
+    if (
+      !this.rules.headEvasionEnabled ||
+      input === null ||
+      this.phase !== 'fighting' ||
+      !this.prerequisites()
+    ) {
+      const wasActive = f.evadeUntil > 0;
+      f.evadingPose = false;
+      f.evadeOutOfBounds = false;
+      f.evadeUntil = 0;
+      f.evadeArmed = false;
+      if (wasActive) {
+        f.evadeCooldownUntil = Math.max(
+          f.evadeCooldownUntil,
+          this.clock + this.rules.evadeCooldown
+        );
+      }
+      return;
+    }
+    const outOfBounds = input.outOfBounds === true;
+    const wantPose = !outOfBounds && (Boolean(input.duck) || Boolean(input.weave));
+    f.evadingPose = wantPose;
+    f.evadeOutOfBounds = outOfBounds;
+    if (outOfBounds) {
+      if (f.evadeUntil > 0) {
+        f.evadeUntil = 0;
+        f.evadeCooldownUntil = Math.max(
+          f.evadeCooldownUntil,
+          this.clock + this.rules.evadeCooldown
+        );
+      }
+      f.evadeArmed = false;
+      return;
+    }
+    if (!wantPose) {
+      if (f.evadeUntil > 0) {
+        f.evadeUntil = 0;
+        f.evadeCooldownUntil = Math.max(
+          f.evadeCooldownUntil,
+          this.clock + this.rules.evadeCooldown
+        );
+      }
+      if (this.clock + epsilon >= f.evadeCooldownUntil) {
+        f.evadeArmed = true;
+      }
+      return;
+    }
+    const canEvadeMode =
+      !['hit', 'launch', 'landing', 'hop', 'settling', 'guard', 'guard-break'].includes(f.mode) &&
+      !f.guardHeld &&
+      f.guardState === 'off';
+    if (f.evadeArmed && canEvadeMode && this.clock + epsilon >= f.evadeCooldownUntil) {
+      f.evadeArmed = false;
+      f.evadeUntil = this.clock + this.rules.evadeDuration;
+    }
+  };
+
   previewClip = (fighter: FighterId, clip: string) => {
     if (this.phase !== 'setup' || !this.prerequisites() || !ARENA_CLIPS.includes(clip))
       return false;
@@ -845,8 +1129,35 @@ export class ArenaController {
     for (const id of ids) {
       const fighter = this.fighters[id];
       fighter.elapsed += dt;
+      if (fighter.evadeUntil > 0 && this.clock + epsilon >= fighter.evadeUntil) {
+        fighter.evadeUntil = 0;
+        fighter.evadeCooldownUntil = Math.max(
+          fighter.evadeCooldownUntil,
+          this.clock + this.rules.evadeCooldown
+        );
+      }
+      if (
+        !fighter.evadingPose &&
+        !fighter.evadeOutOfBounds &&
+        !fighter.evadeArmed &&
+        fighter.evadeUntil === 0 &&
+        this.clock + epsilon >= fighter.evadeCooldownUntil
+      ) {
+        fighter.evadeArmed = true;
+      }
       if (fighter.uppercutWindowUntil > 0 && this.clock + epsilon >= fighter.uppercutWindowUntil)
         this.clearReward(fighter);
+      if (
+        this.rules.combatFeelEnabled &&
+        !['hit', 'launch', 'landing', 'guard-break', 'defeat', 'defeated'].includes(fighter.mode) &&
+        this.clock >= fighter.poiseRecoveryAt &&
+        fighter.poise < this.rules.poiseMax
+      ) {
+        fighter.poise = Math.min(
+          this.rules.poiseMax,
+          fighter.poise + this.rules.poiseRecoveryPerSec * dt
+        );
+      }
       if (fighter.mode === 'hit' && this.clock + epsilon >= fighter.staggerUntil) {
         this.setAnimation(fighter, 'idle', 'IdleAggro');
         if (id === 'red') this.recoverCPU();
@@ -855,14 +1166,17 @@ export class ArenaController {
       if (fighter.counterpunchBuffered) {
         if (fighter.guardHeld || this.clock > fighter.counterpunchUntil + epsilon) {
           fighter.buffered = null;
+          fighter.bufferedHand = null;
           fighter.counterpunchBuffered = false;
         } else if (
           this.clock + epsilon >= fighter.punchReadyAt &&
           ['idle', 'walk'].includes(fighter.mode)
         ) {
+          const nextHand = fighter.bufferedHand ?? undefined;
           fighter.buffered = null;
+          fighter.bufferedHand = null;
           fighter.counterpunchBuffered = false;
-          this.startAttack(id, 'punch');
+          this.startAttack(id, 'punch', nextHand);
         }
       }
     }
@@ -917,51 +1231,209 @@ export class ArenaController {
           : null;
         if (point) {
           attack.hitChecked = true;
-          hits.push({
-            attacker: id,
-            defender,
-            kind: attack.kind,
-            hand: attack.hand,
-            point,
-            recovery: Math.max(0, attack.duration - attack.elapsed),
-            blocked:
-              attack.kind === 'punch' &&
-              this.fighters[defender].guardState === 'holding' &&
-              inCone(
-                this.fighters[defender],
-                this.fighters[id],
-                this.fighters[defender].yaw,
-                this.rules.guardCone
-              ),
-          });
+          if (attack.kind === 'punch' && this.isEvading(defender)) {
+            this.fighters[defender].evadeHits.push({
+              id: ++this.evadeSequence,
+              attacker: id,
+              kind: attack.kind,
+              hand: attack.hand,
+            });
+            if (this.rules.combatFeelEnabled) {
+              this.fighters[defender].dodgeCounterUntil =
+                this.clock + this.rules.dodgeCounterWindow;
+            }
+          } else {
+            hits.push({
+              attacker: id,
+              defender,
+              kind: attack.kind,
+              hand: attack.hand,
+              point,
+              recovery: Math.max(0, attack.duration - attack.elapsed),
+              blocked:
+                attack.kind === 'punch' &&
+                this.fighters[defender].guardState === 'holding' &&
+                inCone(
+                  this.fighters[defender],
+                  this.fighters[id],
+                  this.effectiveCombatYaw(defender),
+                  this.rules.guardCone
+                ),
+            });
+          }
         }
         if (attack.elapsed + epsilon >= activeEnd) attack.hitChecked = true;
       }
     }
     for (const hit of hits) {
       const fighter = this.fighters[hit.defender];
+      const attackerFighter = this.fighters[hit.attacker];
       if (hit.blocked) {
         fighter.guardStamina = Math.max(0, fighter.guardStamina - this.rules.guardPunchCost);
         fighter.guardRegenAt = this.clock + this.rules.guardRegenDelay;
         const broken = fighter.guardStamina <= epsilon;
-        if (broken) this.exhaustGuard(fighter);
-        else this.setAnimation(fighter, 'guard', 'BlockHit', true);
+        if (broken) {
+          this.exhaustGuard(fighter);
+          if (hit.defender === 'red') {
+            this.cpuTelegraph = null;
+            this.cpuLockedAttackYaw = null;
+            this.cpuAiState = 'stagger';
+            this.cpuStateUntil = this.clock + fighter.guardRecoveryRemaining;
+          }
+        } else {
+          this.setAnimation(fighter, 'guard', 'BlockHit', true);
+        }
         fighter.impact = {
           id: ++this.impactSequence,
           kind: hit.kind,
           hand: hit.hand,
           ...hit.point,
           outcome: broken ? 'guard-break' : 'blocked',
+          staggerDuration: broken ? fighter.guardRecoveryRemaining : 0,
+          clip: fighter.clip,
         };
         this.impactPauseRemaining = Math.max(this.impactPauseRemaining, this.rules.blockHitstop);
         continue;
       }
-      fighter.health = Math.max(
-        0,
-        fighter.health - (hit.kind === 'punch' ? this.rules.punchDamage : this.rules.uppercutDamage)
+
+      if (!this.rules.combatFeelEnabled) {
+        fighter.health = Math.max(
+          0,
+          fighter.health -
+            (hit.kind === 'punch' ? this.rules.punchDamage : this.rules.uppercutDamage)
+        );
+        fighter.attack = null;
+        fighter.buffered = null;
+        fighter.bufferedHand = null;
+        fighter.counterpunchBuffered = false;
+        this.clearReward(fighter);
+        fighter.impact = {
+          id: ++this.impactSequence,
+          kind: hit.kind,
+          hand: hit.hand,
+          ...hit.point,
+          outcome: 'hit',
+        };
+        if (hit.kind === 'uppercut') fighter.guardHeld = false;
+        fighter.guardState = 'off';
+        fighter.guardElapsed = 0;
+        fighter.guardRegenAt = this.clock + this.rules.guardRegenDelay;
+        this.impactPauseRemaining = Math.max(
+          this.impactPauseRemaining,
+          hit.kind === 'uppercut' ? this.rules.uppercutHitstop : this.rules.punchHitstop
+        );
+        fighter.staggerUntil = this.clock + this.rules.punchDefenseLock;
+        fighter.punchReadyAt = this.clock + this.rules.counterpunchRecovery;
+        fighter.motionInitialLift = fighter.lift;
+        const settling =
+          hit.kind === 'punch' &&
+          (fighter.mode === 'hop' || fighter.mode === 'settling') &&
+          fighter.lift > epsilon;
+        fighter.hop = null;
+        fighter.dash = null;
+        if (settling) {
+          fighter.mode = 'settling';
+          fighter.elapsed = 0;
+          fighter.staggerUntil += this.rules.settleDuration;
+          fighter.punchReadyAt += this.rules.settleDuration;
+        } else
+          this.setAnimation(
+            fighter,
+            hit.kind === 'uppercut' ? 'launch' : 'hit',
+            hit.kind === 'uppercut' ? 'HitFront' : 'HitFrontFast',
+            true
+          );
+        this.held[hit.defender] = { advance: false, strafeLeft: false, strafeRight: false };
+        this.analog[hit.defender] = null;
+        if (hit.defender === 'red') this.cpuAttackAt = null;
+        continue;
+      }
+
+      // Quest combat feel path: directional hit reactions, poise meter & anti-stunlock.
+      const counterActive = this.clock + epsilon < attackerFighter.dodgeCounterUntil;
+      if (counterActive) attackerFighter.dodgeCounterUntil = 0;
+      const baseDamage = hit.kind === 'punch' ? this.rules.punchDamage : this.rules.uppercutDamage;
+      const appliedDamage = counterActive
+        ? Math.round(baseDamage * this.rules.dodgeCounterDamageMultiplier)
+        : baseDamage;
+      fighter.health = Math.max(0, fighter.health - appliedDamage);
+      const poiseHit =
+        hit.kind === 'uppercut' ? this.rules.poiseUppercutDamage : this.rules.poisePunchDamage;
+      fighter.poise = Math.max(0, fighter.poise - poiseHit);
+      fighter.poiseRecoveryAt = this.clock + this.rules.poiseRecoveryDelay;
+
+      const hyperArmored =
+        hit.kind !== 'uppercut' &&
+        fighter.health > 0 &&
+        this.clock + epsilon < fighter.hyperArmorUntil;
+      const defenderForward = forward(
+        hit.defender === 'red' ? fighter.yaw : this.effectiveCombatYaw(hit.defender)
       );
+      const hitDx = fighter.x - attackerFighter.x;
+      const hitDz = fighter.z - attackerFighter.z;
+      const hitDist = Math.hypot(hitDx, hitDz) || 1;
+      const hitDir = { x: hitDx / hitDist, z: hitDz / hitDist };
+      const rearHit = defenderForward.x * hitDir.x + defenderForward.z * hitDir.z > 0.35;
+
+      const poiseBroken = fighter.poise <= epsilon;
+      if (poiseBroken) fighter.poise = this.rules.poiseMax;
+
+      if (this.clock > fighter.stunWindowResetAt) {
+        fighter.stunChainCount = 0;
+      }
+      fighter.stunWindowResetAt = this.clock + this.rules.antiStunlockWindow;
+
+      if (hyperArmored) {
+        fighter.impact = {
+          id: ++this.impactSequence,
+          kind: hit.kind,
+          hand: hit.hand,
+          ...hit.point,
+          outcome: 'hit',
+          heavy: hit.kind === 'uppercut',
+          counter: counterActive,
+          damage: appliedDamage,
+          staggerDuration: 0,
+          clip: fighter.clip,
+        };
+        this.impactPauseRemaining = Math.max(
+          this.impactPauseRemaining,
+          this.rules.punchHitstop * 0.7
+        );
+        continue;
+      }
+
+      fighter.stunChainCount += 1;
+      const hitLimitReached = fighter.stunChainCount >= this.rules.antiStunlockMaxChain;
+      const heavyStagger = hit.kind === 'uppercut' || poiseBroken;
+      const mediumHit =
+        !heavyStagger && (counterActive || rearHit || attackerFighter.punchProgress >= 1);
+      const stunDuration = heavyStagger
+        ? this.rules.heavyStaggerDuration
+        : mediumHit
+          ? this.rules.mediumHitLock
+          : this.rules.lightHitLock;
+
+      if (hitLimitReached || poiseBroken) {
+        fighter.stunChainCount = 0;
+        fighter.hyperArmorUntil = this.clock + stunDuration + this.rules.antiStunlockHyperArmor;
+      }
+
+      const directionalClip = heavyStagger
+        ? 'HitFront'
+        : rearHit
+          ? 'HitBack'
+          : mediumHit
+            ? hit.hand === 'L'
+              ? 'HitRight'
+              : 'HitLeft'
+            : hit.hand === 'L'
+              ? 'HitFrontFast'
+              : 'HitLeft';
+
       fighter.attack = null;
       fighter.buffered = null;
+      fighter.bufferedHand = null;
       fighter.counterpunchBuffered = false;
       this.clearReward(fighter);
       fighter.impact = {
@@ -970,17 +1442,24 @@ export class ArenaController {
         hand: hit.hand,
         ...hit.point,
         outcome: 'hit',
+        heavy: heavyStagger,
+        counter: counterActive,
+        damage: appliedDamage,
+        staggerDuration: stunDuration,
+        clip: directionalClip,
       };
+      fighter.lightHitReaction = !heavyStagger && !mediumHit;
       if (hit.kind === 'uppercut') fighter.guardHeld = false;
       fighter.guardState = 'off';
       fighter.guardElapsed = 0;
       fighter.guardRegenAt = this.clock + this.rules.guardRegenDelay;
       this.impactPauseRemaining = Math.max(
         this.impactPauseRemaining,
-        hit.kind === 'uppercut' ? this.rules.uppercutHitstop : this.rules.punchHitstop
+        heavyStagger ? this.rules.uppercutHitstop : this.rules.punchHitstop
       );
-      fighter.staggerUntil = this.clock + this.rules.punchDefenseLock;
-      fighter.punchReadyAt = this.clock + this.rules.counterpunchRecovery;
+      fighter.staggerUntil = this.clock + stunDuration;
+      fighter.punchReadyAt =
+        this.clock + Math.max(this.rules.counterpunchRecovery, stunDuration * 0.85);
       fighter.motionInitialLift = fighter.lift;
       const settling =
         hit.kind === 'punch' &&
@@ -993,16 +1472,30 @@ export class ArenaController {
         fighter.elapsed = 0;
         fighter.staggerUntil += this.rules.settleDuration;
         fighter.punchReadyAt += this.rules.settleDuration;
-      } else
+      } else {
         this.setAnimation(
           fighter,
           hit.kind === 'uppercut' ? 'launch' : 'hit',
-          hit.kind === 'uppercut' ? 'HitFront' : 'HitFrontFast',
+          directionalClip,
           true
         );
+      }
       this.held[hit.defender] = { advance: false, strafeLeft: false, strafeRight: false };
       this.analog[hit.defender] = null;
-      if (hit.defender === 'red') this.cpuAttackAt = null;
+      if (hit.defender === 'red') {
+        this.cpuAttackAt = null;
+        this.cpuTelegraph = null;
+        this.cpuLockedAttackYaw = null;
+        this.cpuAiState = heavyStagger ? 'stagger' : 'hit-react';
+        this.cpuStateUntil = fighter.staggerUntil;
+        if (hit.kind === 'punch') {
+          this.redRecoil = {
+            direction: hitDir,
+            travel: this.rules.reactionRecoilTravel * (heavyStagger ? 1 : mediumHit ? 0.4 : 0.2),
+            elapsed: 0,
+          };
+        }
+      }
     }
     // Grant openings after all hits resolve, so a simultaneous counter cannot create a stale cue.
     for (const hit of hits) {
@@ -1022,7 +1515,10 @@ export class ArenaController {
         attacker.rewardAt = this.clock;
         attacker.uppercutWindowUntil = this.clock + hit.recovery + this.rules.uppercutWindow;
         attacker.punchRestUntil = this.clock + hit.recovery + this.rules.punchRest;
-        if (attacker.buffered === 'punch') attacker.buffered = null;
+        if (attacker.buffered === 'punch') {
+          attacker.buffered = null;
+          attacker.bufferedHand = null;
+        }
       }
     }
     if (ids.some((id) => this.fighters[id].health === 0)) {
@@ -1032,13 +1528,15 @@ export class ArenaController {
         const fighter = this.fighters[id];
         if (fighter.attack && fighter.attack.elapsed + epsilon >= fighter.attack.duration) {
           const next = fighter.buffered;
+          const nextHand = fighter.bufferedHand ?? undefined;
           fighter.attack = null;
           fighter.buffered = null;
+          fighter.bufferedHand = null;
           this.setAnimation(fighter, 'idle', 'IdleAggro');
           if (id === 'red') this.recoverCPU();
           // A buffered Uppercut already consumed its earned opportunity.
           if (next === 'jump-back') this.jumpBack(id);
-          else if (next) this.startAttack(id, next);
+          else if (next) this.startAttack(id, next, nextHand);
         } else if (fighter.mode === 'launch') {
           this.advanceLaunch(fighter, false);
         } else if (
@@ -1077,6 +1575,13 @@ export class ArenaController {
       uppercutWindowUntil: 0,
       rewardAt: 0,
       impact: null,
+      poise: this.rules.poiseMax,
+      poiseRecoveryAt: 0,
+      hyperArmorUntil: 0,
+      stunChainCount: 0,
+      stunWindowResetAt: 0,
+      dodgeCounterUntil: 0,
+      lightHitReaction: false,
       guardStamina: this.rules.guardCapacity,
       guardState: 'off',
       guardHeld: false,
@@ -1088,6 +1593,13 @@ export class ArenaController {
       hop: null,
       dashReadyAt: 0,
       dash: null,
+      evadingPose: false,
+      evadeOutOfBounds: false,
+      evadeArmed: true,
+      evadeUntil: 0,
+      evadeCooldownUntil: 0,
+      bufferedHand: null,
+      evadeHits: [],
       motionInitialLift: 0,
     };
   }
@@ -1119,7 +1631,8 @@ export class ArenaController {
       x: f.x,
       z: f.z,
       lift: f.lift,
-      yaw: f.yaw,
+      yaw:
+        (this.rules.combatFeelEnabled ? f.attack?.yaw : undefined) ?? this.effectiveCombatYaw(id),
       clip: f.clip,
       elapsed: f.attack?.elapsed ?? f.elapsed,
     };
@@ -1134,10 +1647,16 @@ export class ArenaController {
   };
   private clearInput() {
     this.clearHeldMovement();
+    this.redRecoil = null;
     ids.forEach((id) => {
       this.fighters[id].buffered = null;
+      this.fighters[id].bufferedHand = null;
       this.fighters[id].counterpunchBuffered = false;
       this.fighters[id].dash = null;
+      this.fighters[id].evadingPose = false;
+      this.fighters[id].evadeOutOfBounds = false;
+      this.fighters[id].evadeUntil = 0;
+      this.fighters[id].evadeArmed = false;
       if (this.fighters[id].mode !== 'hop') this.fighters[id].hop = null;
     });
   }
@@ -1155,8 +1674,11 @@ export class ArenaController {
       fighter.punchReadyAt = 0;
       this.clearReward(fighter);
       fighter.impact = null;
+      fighter.evadeHits = [];
+      fighter.dodgeCounterUntil = 0;
       fighter.guardHeld = false;
       fighter.guardNeedsRelease = false;
+      fighter.evadeCooldownUntil = 0;
       if (fighter.guardState !== 'exhausted') fighter.guardState = 'off';
       if (['attack', 'hit', 'walk', 'guard', 'guard-exit'].includes(fighter.mode))
         this.setAnimation(fighter, 'idle', 'IdleAggro');
@@ -1166,6 +1688,12 @@ export class ArenaController {
     this.cpuReactAt = 0;
     this.cpuGuardUntil = 0;
     this.cpuDefenseDone = false;
+    this.cpuTelegraph = null;
+    this.cpuLockedAttackYaw = null;
+    this.cpuAiState = 'approach';
+    this.cpuStateUntil = this.rules.cpuStateMachineEnabled
+      ? this.clock + this.rules.cpuFirstDelay
+      : 0;
     this.impactPauseRemaining = 0;
   }
   private clearReward(fighter: Fighter) {
@@ -1179,12 +1707,14 @@ export class ArenaController {
       this.clock + epsilon < fighter.uppercutWindowUntil
     );
   }
-  private requestAttack(id: FighterId, kind: AttackKind) {
+  private requestAttack(id: FighterId, kind: AttackKind, preferredHand?: 'L' | 'R') {
     if (this.phase !== 'fighting' || !this.prerequisites()) return false;
+    const safeHand = preferredHand === 'L' || preferredHand === 'R' ? preferredHand : undefined;
     const fighter = this.fighters[id];
     if (!this.canAcceptAttack(fighter, kind)) return false;
     if (kind === 'punch' && this.clock + epsilon < fighter.punchReadyAt) {
       fighter.buffered = 'punch';
+      fighter.bufferedHand = safeHand ?? null;
       fighter.counterpunchBuffered = true;
       fighter.counterpunchUntil = fighter.punchReadyAt + this.rules.counterpunchBuffer;
       this.publish();
@@ -1193,20 +1723,21 @@ export class ArenaController {
     if (fighter.attack || fighter.mode === 'guard-exit') {
       if (fighter.buffered && !(kind === 'uppercut' && fighter.buffered === 'punch')) return false;
       fighter.buffered = kind;
+      fighter.bufferedHand = safeHand ?? null;
       if (kind === 'uppercut') this.clearReward(fighter);
       this.publish();
       return true;
     }
     if (kind === 'uppercut') this.clearReward(fighter);
-    this.startAttack(id, kind);
+    this.startAttack(id, kind, safeHand);
     this.publish();
     return true;
   }
   private canAcceptAttack(f: Fighter, kind: AttackKind) {
+    const lightHitCancel = this.isLightHitReaction(f);
     const bufferingCounter =
       kind === 'punch' &&
-      f.clip === 'HitFrontFast' &&
-      f.mode === 'hit' &&
+      lightHitCancel &&
       this.clock + epsilon >= f.punchReadyAt - this.rules.counterpunchBuffer;
     if ((!canFighterAttack(f.mode) && !bufferingCounter) || f.guardHeld) return false;
     if (kind === 'uppercut') {
@@ -1218,21 +1749,28 @@ export class ArenaController {
       return false;
     return !f.buffered || (kind === 'uppercut' && f.buffered === 'punch');
   }
-  private startAttack(id: FighterId, kind: AttackKind) {
+  private startAttack(id: FighterId, kind: AttackKind, preferredHand?: 'L' | 'R') {
     const fighter = this.fighters[id];
     fighter.counterpunchBuffered = false;
     fighter.counterpunchUntil = 0;
-    fighter.yaw = facing(fighter, this.fighters[id === 'blue' ? 'red' : 'blue']);
+    if (id === 'red' && this.rules.cpuStateMachineEnabled && this.cpuLockedAttackYaw !== null) {
+      fighter.yaw = this.cpuLockedAttackYaw;
+    } else if (!(this.rules.stableFacing && id === 'blue')) {
+      fighter.yaw = facing(fighter, this.fighters[id === 'blue' ? 'red' : 'blue']);
+    }
+    const safeHand = preferredHand === 'L' || preferredHand === 'R' ? preferredHand : undefined;
     const hand =
-      kind === 'punch'
+      safeHand ??
+      (kind === 'punch'
         ? this.random() < 0.5
           ? 'L'
           : 'R'
         : fighter.uppercutIndex++ % 2 === 0
           ? 'L'
-          : 'R';
+          : 'R');
     const clip = `Combo_${kind === 'punch' ? 'Punch' : 'Uppercut'}${hand}`;
     const timing = attackTiming(clip);
+    const yaw = this.effectiveCombatYaw(id);
     fighter.attack = {
       kind,
       elapsed: 0,
@@ -1241,7 +1779,8 @@ export class ArenaController {
       hitChecked: false,
       hand,
       step: 0,
-      direction: forward(fighter.yaw),
+      direction: forward(yaw),
+      yaw,
     };
     this.setAnimation(fighter, 'attack', clip, true);
   }
@@ -1349,19 +1888,35 @@ export class ArenaController {
         : 0;
       const strafe = free
         ? cpu
-          ? this.clock < this.cpuRecoveryUntil
-            ? this.cpuAttacks % 2 === 0
-              ? 1
-              : -1
-            : 0
+          ? this.rules.cpuStateMachineEnabled
+            ? this.cpuStrafe()
+            : this.clock < this.cpuRecoveryUntil
+              ? this.cpuAttacks % 2 === 0
+                ? 1
+                : -1
+              : 0
           : analog !== null
             ? analog.strafe
             : Number(this.held[id].strafeLeft) - Number(this.held[id].strafeRight)
         : 0;
+      const cpuSpeedScale =
+        cpu && this.rules.cpuStateMachineEnabled ? this.rules.cpuMaxSpeedRatio : 1;
       const scale =
-        (this.rules.speed * (f.mode === 'guard' ? this.rules.guardSpeed : 1)) /
+        (this.rules.speed * cpuSpeedScale * (f.mode === 'guard' ? this.rules.guardSpeed : 1)) /
         Math.max(1, Math.hypot(advance, strafe));
       velocity[id] = { advance: advance * scale, strafe: strafe * scale };
+    }
+    const recoil = this.redRecoil;
+    if (recoil && red.mode === 'hit') {
+      const window = this.rules.lightHitLock;
+      const from = Math.min(1, recoil.elapsed / window);
+      recoil.elapsed += dt;
+      const to = Math.min(1, recoil.elapsed / window);
+      const speed = (recoil.travel * ((1 - from) ** 2 - (1 - to) ** 2)) / dt;
+      dashWorldVel.red = { vx: recoil.direction.x * speed, vz: recoil.direction.z * speed };
+      if (to >= 1) this.redRecoil = null;
+    } else {
+      this.redRecoil = null;
     }
     const useLinear = this.rules.stableFacing || !!dashWorldVel.blue || !!dashWorldVel.red;
     const positions = useLinear
@@ -1397,7 +1952,24 @@ export class ArenaController {
       const f = this.fighters[id],
         v = velocity[id];
       if (!['idle', 'walk', 'guard', 'guard-exit'].includes(f.mode)) continue;
-      if (!(this.rules.stableFacing && id === 'blue')) {
+      if (
+        id === 'red' &&
+        this.rules.cpuStateMachineEnabled &&
+        this.cpuAiState === 'telegraph' &&
+        this.cpuTelegraph
+      ) {
+        f.yaw = this.cpuTelegraph.committedYaw;
+        continue;
+      }
+      if (id === 'red' && this.rules.cpuStateMachineEnabled) {
+        const desired = facing(f, this.fighters.blue);
+        const diff = ((((desired - f.yaw + 180) % 360) + 360) % 360) - 180;
+        const maxStep = this.rules.cpuTurnDegPerSec * dt;
+        f.yaw =
+          Math.abs(diff) <= maxStep
+            ? desired
+            : ((((f.yaw + Math.sign(diff) * maxStep + 180) % 360) + 360) % 360) - 180;
+      } else if (!(this.rules.stableFacing && id === 'blue')) {
         f.yaw = facing(f, this.fighters[id === 'blue' ? 'red' : 'blue']);
       }
       if (f.dash) {
@@ -1457,9 +2029,16 @@ export class ArenaController {
     f.guardState = 'exhausted';
     f.guardHeld = false;
     f.guardNeedsRelease = true;
-    f.guardRecoveryRemaining = this.rules.guardRecovery;
+    f.guardRecoveryRemaining = this.rules.combatFeelEnabled
+      ? this.rules.guardBreakStaggerDuration
+      : this.rules.guardRecovery;
     f.guardRegenAt = this.clock + this.rules.guardRegenDelay;
-    this.setAnimation(f, 'guard-break', 'BlockExit', true);
+    this.setAnimation(
+      f,
+      'guard-break',
+      this.rules.combatFeelEnabled && f === this.fighters.red ? 'HitFront' : 'BlockExit',
+      true
+    );
   }
   private advanceDefense(id: FighterId, dt: number) {
     const f = this.fighters[id];
@@ -1487,11 +2066,15 @@ export class ArenaController {
       if (f.guardElapsed + epsilon >= this.rules.guardExit) {
         f.guardState = 'off';
         const next = f.buffered;
+        const nextHand = f.bufferedHand ?? undefined;
         f.buffered = null;
+        f.bufferedHand = null;
         this.setAnimation(f, 'idle', 'IdleAggro');
         if (next === 'jump-back') this.jumpBack(id);
-        else if (next === 'punch' && this.clock + epsilon < f.punchReadyAt) f.buffered = 'punch';
-        else if (next) this.startAttack(id, next);
+        else if (next === 'punch' && this.clock + epsilon < f.punchReadyAt) {
+          f.buffered = 'punch';
+          f.bufferedHand = nextHand ?? null;
+        } else if (next) this.startAttack(id, next, nextHand);
       }
     } else if (f.mode === 'guard-break' && f.guardRecoveryRemaining <= epsilon) {
       f.guardState = 'off';
@@ -1590,18 +2173,59 @@ export class ArenaController {
       ) >= this.rules.hopMinimum
     );
   }
+  private resetCpuStateMachine() {
+    this.cpuTelegraph = null;
+    this.cpuLockedAttackYaw = null;
+    this.cpuAiState = 'approach';
+    this.cpuStateUntil = this.clock + this.rules.cpuFirstDelay;
+    this.cpuStrafeDir = 1;
+    this.cpuNonAttackStreak = 0;
+  }
+
   private cpuMovement() {
     const d = distance(this.fighters.red, this.fighters.blue);
     if (!canFighterBeHit(this.fighters.blue.mode)) return 0;
-    if (d < this.rules.cpuMinimumRange) return -1;
-    return d > this.rules.cpuPreferredRange ? 1 : 0;
+    if (!this.rules.cpuStateMachineEnabled) {
+      if (d < this.rules.cpuMinimumRange) return -1;
+      return d > this.rules.cpuPreferredRange ? 1 : 0;
+    }
+    switch (this.cpuAiState) {
+      case 'telegraph':
+      case 'recover':
+      case 'hit-react':
+      case 'stagger':
+      case 'defeated':
+        return 0;
+      case 'reset':
+        return d < this.rules.cpuPreferredRange + this.rules.cpuHoldRangeTolerance ? -0.7 : 0;
+      case 'hold-range':
+        if (d < this.rules.cpuMinimumRange) return -0.75;
+        if (d > this.rules.cpuPreferredRange + this.rules.cpuHoldRangeTolerance * 1.5) return 0.7;
+        return 0;
+      case 'guard':
+        return d < this.rules.cpuMinimumRange ? -0.5 : 0;
+      case 'approach':
+      default:
+        if (d < this.rules.cpuMinimumRange) return -1;
+        return d > this.rules.cpuPreferredRange + this.rules.cpuHoldRangeTolerance ? 1 : 0;
+    }
   }
+
+  private cpuStrafe() {
+    if (!canFighterBeHit(this.fighters.blue.mode)) return 0;
+    if (this.cpuAiState === 'hold-range') return this.cpuStrafeDir * 0.42;
+    if (this.cpuAiState === 'reset') return this.cpuStrafeDir * 0.65;
+    if (this.cpuAiState === 'guard') return this.cpuStrafeDir * 0.35;
+    return 0;
+  }
+
   private defendCPU() {
     if (!this.rules.cpuEnabled) return;
     const red = this.fighters.red,
       attack = this.fighters.blue.attack;
     if (red.guardHeld && this.clock >= this.cpuGuardUntil) this.block(false, 'red');
     if (red.guardNeedsRelease) this.block(false, 'red');
+    if (this.rules.cpuStateMachineEnabled && this.cpuAiState === 'telegraph') return;
     if (
       !attack ||
       attack.hitChecked ||
@@ -1614,50 +2238,260 @@ export class ArenaController {
       if (this.block(true, 'red')) {
         this.cpuGuardUntil = this.clock + 0.45;
         this.cpuDefenseDone = true;
+        if (this.rules.cpuStateMachineEnabled) {
+          this.cpuAiState = 'guard';
+          this.cpuStateUntil = this.cpuGuardUntil;
+        }
       }
     } else if (attack.kind === 'uppercut' && this.cpuEvades() && this.cpuCanRetreat()) {
-      if (this.jumpBack('red')) this.cpuDefenseDone = true;
+      if (this.jumpBack('red')) {
+        this.cpuDefenseDone = true;
+        if (this.rules.cpuStateMachineEnabled) {
+          this.cpuAiState = 'reset';
+          this.cpuStateUntil = this.clock + this.rules.cpuResetWindow;
+        }
+      }
     }
   }
   private recoverCPU() {
+    if (this.rules.cpuStateMachineEnabled) {
+      this.cpuLockedAttackYaw = null;
+      this.cpuTelegraph = null;
+      this.cpuAiState = 'recover';
+      const recoverDur = Math.min(this.rules.cpuRecoveryWindow, this.rules.cpuRecovery);
+      this.cpuStateUntil = this.clock + recoverDur;
+      this.cpuRecoveryUntil = this.cpuStateUntil;
+      return;
+    }
     // A short, varied beat leaves counterplay without the old long idle opening.
     const rhythm = [1, 1.4, 0.8][this.cpuAttacks % 3];
     this.cpuAttackAt = this.cpuRecoveryUntil = this.clock + this.rules.cpuRecovery * rhythm;
   }
+  private beginCpuTelegraph(red: Fighter, blue: Fighter, allowFeint: boolean) {
+    if (
+      this.rules.cpuRequireFov &&
+      (!inCone(red, blue, red.yaw, this.rules.punchCone) ||
+        !inCone(blue, red, this.playerViewYaw ?? blue.yaw, this.rules.cpuFovHalfDeg))
+    )
+      return false;
+    const useUppercut =
+      this.uppercutReady(red) &&
+      distance(red, blue) <= this.rules.uppercutReach + this.rules.uppercutLunge + epsilon &&
+      this.clock + epsilon >= red.rewardAt + this.rules.cpuRewardReaction;
+    const kind: AttackKind = useUppercut ? 'uppercut' : 'punch';
+    const hand: 'L' | 'R' = this.random() < 0.5 ? 'L' : 'R';
+    const windup =
+      kind === 'uppercut'
+        ? this.rules.cpuTelegraphUppercutWindow
+        : this.rules.cpuTelegraphPunchWindow;
+    const committedYaw = red.yaw;
+    this.cpuLockedAttackYaw = committedYaw;
+    if (useUppercut) {
+      red.uppercutWindowUntil = Math.max(red.uppercutWindowUntil, this.clock + windup + 0.15);
+    }
+    this.cpuTelegraph = {
+      kind,
+      hand,
+      until: this.clock + windup,
+      committedYaw,
+      feinted: allowFeint && kind === 'punch' && this.random() < this.rules.cpuFeintChance,
+    };
+    this.cpuAiState = 'telegraph';
+    // Raise visual windup pose distinct from idle; contact cannot fire until startAttack runs.
+    this.setAnimation(red, 'idle', 'BlockEnter', true);
+    return true;
+  }
   private decideCPU() {
     if (!this.rules.cpuEnabled) return;
     const red = this.fighters.red;
-    if (!canFighterAttack(red.mode)) return;
     const blue = this.fighters.blue;
-    if (!canFighterBeHit(blue.mode)) return;
-    if (
-      this.uppercutReady(red) &&
-      this.clock + epsilon >= red.rewardAt + this.rules.cpuRewardReaction
-    ) {
-      if (this.requestAttack('red', 'uppercut')) {
+
+    if (!this.rules.cpuStateMachineEnabled) {
+      if (!canFighterAttack(red.mode)) return;
+      if (!canFighterBeHit(blue.mode)) return;
+      if (
+        this.uppercutReady(red) &&
+        this.clock + epsilon >= red.rewardAt + this.rules.cpuRewardReaction
+      ) {
+        if (this.requestAttack('red', 'uppercut')) {
+          this.cpuAttacks++;
+          this.cpuAttackAt = null;
+        }
+        return;
+      }
+      if (red.attack) return;
+      if (distance(red, blue) > this.rules.reach + epsilon) return;
+      if (
+        red.punchReadyAt > this.clock &&
+        this.cpuThreats % 4 === 2 &&
+        this.clock >= this.cpuReactAt
+      ) {
+        // A visible pressure response uses the same short counterpunch buffer as a human.
+        this.requestAttack('red', 'punch');
+        return;
+      }
+      this.cpuAttackAt ??= Math.max(this.clock + this.rules.cpuFirstDelay, this.cpuRecoveryUntil);
+      if (this.clock + epsilon < this.cpuAttackAt) return;
+      if (this.cpuEvades() && this.cpuCanRetreat()) return;
+      if (this.requestAttack('red', 'punch')) {
         this.cpuAttacks++;
         this.cpuAttackAt = null;
       }
       return;
     }
-    if (red.attack) return;
-    if (distance(red, blue) > this.rules.reach + epsilon) return;
-    if (
-      red.punchReadyAt > this.clock &&
-      this.cpuThreats % 4 === 2 &&
-      this.clock >= this.cpuReactAt
-    ) {
-      // A visible pressure response uses the same short counterpunch buffer as a human.
-      this.requestAttack('red', 'punch');
+
+    // Quest CPU state machine: readable cadence, telegraphs, committed attacks, recovery & resets.
+    if (this.phase === 'ending' || this.phase === 'ended' || red.health === 0) {
+      this.cpuTelegraph = null;
+      this.cpuLockedAttackYaw = null;
+      this.cpuAiState = 'defeated';
       return;
     }
-    this.cpuAttackAt ??= Math.max(this.clock + this.rules.cpuFirstDelay, this.cpuRecoveryUntil);
-    if (this.clock + epsilon < this.cpuAttackAt) return;
-    if (this.cpuEvades() && this.cpuCanRetreat()) return;
-    if (this.requestAttack('red', 'punch')) {
-      this.cpuAttacks++;
-      this.cpuAttackAt = null;
+    if (red.mode === 'guard-break') {
+      this.cpuTelegraph = null;
+      this.cpuLockedAttackYaw = null;
+      this.cpuAiState = 'stagger';
+      return;
     }
+    if (['hit', 'launch', 'landing', 'settling'].includes(red.mode)) {
+      this.cpuTelegraph = null;
+      this.cpuLockedAttackYaw = null;
+      this.cpuAiState = 'hit-react';
+      return;
+    }
+    if (red.attack) {
+      this.cpuAiState = 'attack';
+      return;
+    }
+    if (red.mode === 'guard' || red.mode === 'guard-exit' || red.guardHeld) {
+      this.cpuAiState = 'guard';
+      return;
+    }
+    if (!canFighterAttack(red.mode) || !canFighterBeHit(blue.mode)) {
+      this.cpuTelegraph = null;
+      this.cpuLockedAttackYaw = null;
+      this.cpuAiState = 'hold-range';
+      return;
+    }
+
+    const d = distance(red, blue);
+    if (
+      this.cpuAiState === 'hit-react' ||
+      this.cpuAiState === 'stagger' ||
+      this.cpuAiState === 'guard' ||
+      this.cpuAiState === 'attack'
+    ) {
+      this.cpuAiState = 'recover';
+      const recoverDur = Math.min(this.rules.cpuRecoveryWindow, this.rules.cpuRecovery);
+      this.cpuStateUntil = this.clock + recoverDur * 0.7;
+    }
+
+    if (this.cpuAiState === 'telegraph' && this.cpuTelegraph) {
+      if (this.clock + epsilon < this.cpuTelegraph.until) return;
+      const telegraph = this.cpuTelegraph;
+      this.cpuTelegraph = null;
+      if (telegraph.feinted) {
+        this.cpuLockedAttackYaw = null;
+        this.cpuNonAttackStreak += 1;
+        if (this.block(true, 'red')) {
+          this.cpuGuardUntil = this.clock + 0.3;
+          this.cpuAiState = 'guard';
+        } else {
+          this.cpuAiState = 'reset';
+          this.cpuStateUntil = this.clock + this.rules.cpuResetWindow * 0.7;
+        }
+        return;
+      }
+      this.cpuLockedAttackYaw = telegraph.committedYaw;
+      if (this.requestAttack('red', telegraph.kind, telegraph.hand)) {
+        this.cpuAttacks++;
+        this.cpuNonAttackStreak = 0;
+        this.cpuAiState = 'attack';
+      } else {
+        this.cpuLockedAttackYaw = null;
+        this.cpuAiState = 'reset';
+        this.cpuStateUntil = this.clock + this.rules.cpuResetWindow * 0.7;
+      }
+      return;
+    }
+
+    if (this.cpuAiState === 'recover') {
+      if (this.clock + epsilon < this.cpuStateUntil) return;
+      this.cpuLockedAttackYaw = null;
+      this.cpuStrafeDir = this.random() < 0.5 ? 1 : -1;
+      const quickHold = Math.min(this.rules.cpuHoldWindowMin, this.rules.cpuRecovery * 0.35);
+      this.cpuAiState = 'hold-range';
+      this.cpuStateUntil = this.clock + quickHold;
+      return;
+    }
+
+    if (this.cpuAiState === 'reset') {
+      if (this.clock + epsilon < this.cpuStateUntil) return;
+      this.cpuAiState =
+        d <= this.rules.cpuPreferredRange + this.rules.cpuHoldRangeTolerance
+          ? 'hold-range'
+          : 'approach';
+      if (this.cpuAiState === 'hold-range') {
+        this.cpuStateUntil = this.clock + this.rules.cpuHoldWindowMin * 0.5;
+      }
+      return;
+    }
+
+    if (this.cpuAiState === 'approach') {
+      if (this.clock + epsilon < this.cpuStateUntil) return;
+      if (d <= this.rules.reach + this.rules.cpuHoldRangeTolerance) {
+        if (this.cpuAttacks === 0 && this.beginCpuTelegraph(red, blue, false)) {
+          return;
+        }
+        const span = Math.max(0, this.rules.cpuHoldWindowMax - this.rules.cpuHoldWindowMin);
+        this.cpuAiState = 'hold-range';
+        this.cpuStateUntil = this.clock + this.rules.cpuHoldWindowMin + this.random() * span;
+      }
+      return;
+    }
+
+    // hold-range: wait out tactical pause then pick telegraph / retreat / guard / reposition.
+    if (this.clock + epsilon < this.cpuStateUntil) return;
+    if (d > this.rules.reach + this.rules.cpuHoldRangeTolerance) {
+      this.cpuAiState = 'approach';
+      return;
+    }
+    const allowVariety = this.cpuAttacks >= 2 && this.cpuNonAttackStreak === 0;
+    if (allowVariety) {
+      const roll = this.random();
+      if (roll < this.rules.cpuRetreatChance) {
+        this.cpuNonAttackStreak += 1;
+        if (this.cpuCanRetreat() && this.jumpBack('red')) {
+          this.cpuAiState = 'reset';
+          this.cpuStateUntil = this.clock + this.rules.cpuResetWindow;
+          return;
+        }
+        this.cpuAiState = 'reset';
+        this.cpuStateUntil = this.clock + this.rules.cpuResetWindow;
+        return;
+      }
+      if (roll < this.rules.cpuRetreatChance + this.rules.cpuGuardChance * 0.5) {
+        this.cpuNonAttackStreak += 1;
+        if (this.block(true, 'red')) {
+          this.cpuGuardUntil = this.clock + 0.35;
+          this.cpuAiState = 'guard';
+          return;
+        }
+      }
+      if (
+        roll <
+        this.rules.cpuRetreatChance +
+          this.rules.cpuGuardChance * 0.5 +
+          this.rules.cpuPauseChance * 0.5
+      ) {
+        this.cpuNonAttackStreak += 1;
+        this.cpuStrafeDir = -this.cpuStrafeDir;
+        this.cpuStateUntil = this.clock + this.rules.cpuHoldWindowMin;
+        return;
+      }
+    }
+
+    this.beginCpuTelegraph(red, blue, allowVariety);
   }
   private endRound(hits: { defender: FighterId; kind: AttackKind }[]) {
     this.outcome =

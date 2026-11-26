@@ -1,0 +1,201 @@
+From: David Grimsley <DavidJGrimsley@gmail.com>
+Subject: [PATCH] OpenXR: isolate left Menu button from Back exit and support VIEW-space title HUD
+
+Left controller Menu button (/user/hand/left/input/menu/click) no longer
+triggers Viro BackButton exit callbacks; JS reads sample.left.buttons.menu
+for edge-debounced in-app pause. QuestPanelLayer gains optional
+XR_REFERENCE_SPACE_TYPE_VIEW submission for head/view-locked HUD overlays.
+diff --git a/android/sharedCode/src/main/cpp/QuestPanelLayer.h b/android/sharedCode/src/main/cpp/QuestPanelLayer.h
+index 7538bf1..963f5fb 100644
+--- a/android/sharedCode/src/main/cpp/QuestPanelLayer.h
++++ b/android/sharedCode/src/main/cpp/QuestPanelLayer.h
+@@ -23,6 +23,6 @@
+ namespace quest_panel {
+ // Bumped when the JNI contract changes; QuestPanelModule checks it.
+-constexpr int kVersion = 3;
++constexpr int kVersion = 4;
+ 
+ static std::atomic<int> refSpaceEpoch{0};
+ inline void bumpRefSpaceEpoch() { refSpaceEpoch.fetch_add(1, std::memory_order_relaxed); }
+@@ -30,6 +30,7 @@ inline void bumpRefSpaceEpoch() { refSpaceEpoch.fetch_add(1, std::memory_order_r
+ struct QuadState {
+     std::mutex mutex;
+     bool visible = false;
++    bool viewLocked = false;
+     int status = 0;  // 0 hidden or not yet submitted, 1 submitted, -1 failed
+     uint64_t revision = 0;
+     int width = 0, height = 0;
+@@ -54,16 +55,19 @@ static bool readPose(JNIEnv *env, jfloatArray values, XrPosef *pose) {
+     return true;
+ }
+ 
+-static jboolean updateQuadPose(JNIEnv *env, QuadState &s, jfloatArray pose) {
++static jboolean updateQuadPose(JNIEnv *env, QuadState &s, jfloatArray pose,
++                               jboolean viewLocked = JNI_FALSE) {
+     XrPosef next;
+     if (!readPose(env, pose, &next)) return JNI_FALSE;
+     std::lock_guard<std::mutex> lock(s.mutex);
+     s.pose = next;
++    s.viewLocked = (viewLocked == JNI_TRUE);
+     return JNI_TRUE;
+ }
+ 
+ static jboolean writeQuadDraw(JNIEnv *env, QuadState &s, jbyteArray rgba, jint width, jint height,
+-                              jfloat widthM, jfloat heightM, jfloatArray pose) {
++                              jfloat widthM, jfloat heightM, jfloatArray pose,
++                              jboolean viewLocked = JNI_FALSE) {
+     XrPosef next;
+     const size_t totalBytes = (width > 0 && height > 0)
+         ? static_cast<size_t>(width) * static_cast<size_t>(height) * 4u
+@@ -77,6 +81,7 @@ static jboolean writeQuadDraw(JNIEnv *env, QuadState &s, jbyteArray rgba, jint w
+     s.width = width; s.height = height;
+     s.widthM = widthM; s.heightM = heightM;
+     s.pose = next;
++    s.viewLocked = (viewLocked == JNI_TRUE);
+     s.pixels.resize(static_cast<size_t>(width) * height * 4);
+     s.scratch.resize(totalBytes);
+     env->GetByteArrayRegion(rgba, 0, static_cast<jsize>(totalBytes),
+@@ -111,7 +116,12 @@ public:
+ 
+     // Returns the quad layer to submit this frame, or null when hidden.
+     const XrCompositionLayerBaseHeader *prepare(XrSession session, XrSpace space, QuadState &s,
+-                                                const char *logTag) {
++                                                const char *logTag, XrSpace viewSpace = XR_NULL_HANDLE) {
+         std::lock_guard<std::mutex> lock(s.mutex);
+         if (!s.visible || s.pixels.empty() || s.status < 0) return nullptr;
++        if (s.viewLocked && viewSpace == XR_NULL_HANDLE) {
++            __android_log_print(ANDROID_LOG_WARN, logTag, "VIEW space unavailable for viewLocked layer");
++            s.status = -1;
++            return nullptr;
++        }
+         if (_swapchain && (_width != s.width || _height != s.height)) destroySwapchain();
+@@ -215,7 +225,7 @@ public:
+                 s.widthM, s.heightM, target);
+             _revision = s.revision;
+         }
+-        _layer.space = space;
++        _layer.space = s.viewLocked ? viewSpace : space;
+         // Canvas bitmaps are premultiplied, which is the compositor's default.
+         _layer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+         _layer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+@@ -277,6 +282,7 @@ extern "C" JNIEXPORT void JNICALL
+ Java_expo_modules_questpanel_QuestPanelModule_nativeTitleHide(JNIEnv *, jobject) {
+     std::lock_guard<std::mutex> lock(quest_panel::titleState.mutex);
+     quest_panel::titleState.visible = false;
++    quest_panel::titleState.viewLocked = false;
+     quest_panel::titleState.status = 0;
+ }
+ 
+@@ -292,6 +298,19 @@ Java_expo_modules_questpanel_QuestPanelModule_nativeTitleDraw(
+     return quest_panel::writeQuadDraw(env, quest_panel::titleState, rgba, width, height, widthM, heightM, pose);
+ }
+ 
++extern "C" JNIEXPORT jboolean JNICALL
++Java_expo_modules_questpanel_QuestPanelModule_nativeTitlePoseInSpace(
++        JNIEnv *env, jobject, jfloatArray pose, jboolean viewLocked) {
++    return quest_panel::updateQuadPose(env, quest_panel::titleState, pose, viewLocked);
++}
++
++extern "C" JNIEXPORT jboolean JNICALL
++Java_expo_modules_questpanel_QuestPanelModule_nativeTitleDrawInSpace(
++        JNIEnv *env, jobject, jbyteArray rgba, jint width, jint height, jfloat widthM,
++        jfloat heightM, jfloatArray pose, jboolean viewLocked) {
++    return quest_panel::writeQuadDraw(env, quest_panel::titleState, rgba, width, height, widthM, heightM, pose, viewLocked);
++}
++
+ class QuestPanelLayer {
+     quest_panel::QuadLayer _card;
+     quest_panel::QuadLayer _title;
+@@ -301,7 +320,8 @@ public:
+         return _card.prepare(session, space, quest_panel::state, "QuestPanelLayer");
+     }
+ 
+-    const XrCompositionLayerBaseHeader *prepareTitle(XrSession session, XrSpace space) {
+-        return _title.prepare(session, space, quest_panel::titleState, "QuestTitleLayer");
++    const XrCompositionLayerBaseHeader *prepareTitle(XrSession session, XrSpace space,
++                                                     XrSpace viewSpace = XR_NULL_HANDLE) {
++        return _title.prepare(session, space, quest_panel::titleState, "QuestTitleLayer", viewSpace);
+     }
+ };
+diff --git a/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.cpp b/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.cpp
+index e3dea79..50f1270 100644
+--- a/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.cpp
++++ b/android/sharedCode/src/main/cpp/VROInputControllerOpenXR.cpp
+@@ -628,21 +628,16 @@ void VROInputControllerOpenXR::onProcess(XrSession session, XrSpace baseSpace,
+         }
+     }
+ 
+-    // ── Menu button (left hand → BackButton) ─────────────────────────────────
++    // ── Menu button (left hand → app-handled pause via QuestInputSampler) ───
+     {
+         XrActionStateBoolean state  = { XR_TYPE_ACTION_STATE_BOOLEAN };
+         XrActionStateGetInfo info   = { XR_TYPE_ACTION_STATE_GET_INFO };
+         info.action = _menuAction;
+         xrGetActionStateBoolean(session, &info, &state);
+         if (state.isActive) {
+-            bool pressed = (state.currentState == XR_TRUE);
+-            if (pressed && !_prevMenuButton) {
+-                queueButtonEvent(ViroOculus::BackButton, VROEventDelegate::ClickState::ClickDown);
+-                if (_backButtonCallback) _backButtonCallback();
+-            } else if (!pressed && _prevMenuButton) {
+-                queueButtonEvent(ViroOculus::BackButton, VROEventDelegate::ClickState::ClickUp);
+-            }
+-            _prevMenuButton = pressed;
++            _prevMenuButton = (state.currentState == XR_TRUE);
++        } else {
++            _prevMenuButton = false;
+         }
+     }
+ 
+diff --git a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
+index a3ba9a0..cfc05e1 100644
+--- a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
++++ b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.cpp
+@@ -578,6 +578,15 @@ bool VROSceneRendererOpenXR::createReferenceSpace() {
+         return false;
+     }
+     ALOGV("Reference space created (LOCAL — eye-level origin)");
++
++    XrReferenceSpaceCreateInfo viewInfo = { XR_TYPE_REFERENCE_SPACE_CREATE_INFO };
++    viewInfo.referenceSpaceType   = XR_REFERENCE_SPACE_TYPE_VIEW;
++    viewInfo.poseInReferenceSpace = { {0, 0, 0, 1}, {0, 0, 0} };
++    XrResult vr = xrCreateReferenceSpace(_session, &viewInfo, &_viewSpace);
++    if (XR_FAILED(vr)) {
++        ALOGW("VIEW reference space creation failed: %d", vr);
++        _viewSpace = XR_NULL_HANDLE;
++    }
+     return true;
+ }
+ 
+@@ -917,6 +926,10 @@ void VROSceneRendererOpenXR::destroySession() {
+         _passthrough = XR_NULL_HANDLE;
+     }
+     destroySwapchains();
++    if (_viewSpace != XR_NULL_HANDLE) {
++        xrDestroySpace(_viewSpace);
++        _viewSpace = XR_NULL_HANDLE;
++    }
+     if (_stageSpace != XR_NULL_HANDLE) {
+         xrDestroySpace(_stageSpace);
+         _stageSpace = XR_NULL_HANDLE;
+@@ -1461,7 +1474,7 @@ void VROSceneRendererOpenXR::renderFrame() {
+     // Floating transparent branded title overlay (QuestPanelLayer.h), over the scene.
+     const XrCompositionLayerBaseHeader *questTitlePanel = nullptr;
+     if (viewsValid && frameState.shouldRender && _questPanel) {
+-        questTitlePanel = _questPanel->prepareTitle(_session, _stageSpace);
++        questTitlePanel = _questPanel->prepareTitle(_session, _stageSpace, _viewSpace);
+     }
+     if (questTitlePanel) layers.push_back(questTitlePanel);
+ 
+diff --git a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.h b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.h
+index 6efc0fc..7877f7c 100644
+--- a/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.h
++++ b/android/sharedCode/src/main/cpp/VROSceneRendererOpenXR.h
+@@ -147,6 +147,7 @@ private:
+     XrSystemId      _systemId   = XR_NULL_SYSTEM_ID;
+     XrSession       _session    = XR_NULL_HANDLE;
+     XrSpace         _stageSpace = XR_NULL_HANDLE;  // XR_REFERENCE_SPACE_TYPE_STAGE
++    XrSpace         _viewSpace  = XR_NULL_HANDLE;  // XR_REFERENCE_SPACE_TYPE_VIEW
+ 
+     XrSessionState  _sessionState             = XR_SESSION_STATE_UNKNOWN;
+     XrTime          _lastPredictedDisplayTime = 0;  // updated each frame; used by recenterTracking()
