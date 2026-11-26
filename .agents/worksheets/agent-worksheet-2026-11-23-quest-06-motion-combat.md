@@ -1,6 +1,6 @@
 # Quest 06 motion combat
 
-- Status: PLAYTEST REMEDIATION COMPLETE & INSTALLED ON QUEST 3S (`3487C10J3706TQ`); physical wearer re-test of gameplay, HUD readability, and OpenXR controller vibration remains PENDING (do not assert a wearer test until user confirms).
+- Status: ACTIVE. Combat feel implementation and release build verified. Final independent review, in-place install, and wearer acceptance are pending.
 - Task source: `project/agent/handoffs/2026-11-23-quest-06-motion-combat.md` + User failed Stage 06 physical playtest report against `a9bd8b3`
 - Branch: `feat/quest-06-motion-combat` (base `origin/main` `964d85fe4c14d8a8e1261611ae71fb85bf7743ab`, PR #6)
 - Worktree: `neo-rock-em-sock-em-robots-quest-06-motion-combat`
@@ -8,6 +8,40 @@
 - Remediation sole writer: Antigravity (`cad431a2-5f98-48ac-b156-f0cc58b473c3`), sole writer with zero code-writing delegation.
 - Remediation Contrarian Reviewer: Gemini 4 Neon High (`antigravity` edit transport with strict read-only / no-edits / no-agents rules; pre/post SHA-256 verified zero writes across 268 files on every round).
 - Control repository (`../project`): left unstaged and untouched in git as instructed (`../project/todo.md` and untracked handoff files preserved).
+
+## Combat feel iteration
+
+The supplied “Quest 06 Combat Feel, Enemy AI, Stagger, and Multisensory Feedback” task expands the earlier remediation. Gemini Hydrogen hit Google's individual quota with uncommitted edits. Codex continued as sole writer and retained those edits. Gemini Neon High round 1 (`769819d3-aca8-45a8-8951-63a5d70182a9`) returned FAIL against an earlier draft. Grok 4.7 High is the authorized cross-provider substitute for the read-only review of the repaired candidate.
+
+| Root cause | Implementation |
+| --- | --- |
+| The menu compositor could replay cached ring art after Activity resume. Match-stage interruption and the scene's pause page had separate state. | Hide releases the owner and clears replay state. Activity resume draws the current page. The match's paused stage opens a controller-clickable card ahead of the wearer's horizontal gaze, including during countdown. Resume rebuilds any unfinished intro and requires fresh stick, A, and Menu input. |
+| The HUD used the opponent's bearing and stage coordinates. | Patch 0008 uses an OpenXR VIEW-space quad 1.75 m ahead and 0.35 m up. A missing VIEW layer falls back to a tracked scene-root HUD. The Kotlin/renderer ABI is now v4. |
+| Right-stick turns could enter prediction as rapid yaw and reset the gesture frame through a calibration callback. | Each fresh deflection makes one 30° turn by default. Smooth turn starts from a centered stick. Turns pivot the world calibration around the physical head, preserve hand history, and suppress rig velocity extrapolation at snap boundaries. |
+| Shared pursuit and 200 ms recoil made Red feel relentless. | Quest-only CPU movement is capped at 78% of player speed. Red turns at 180°/s, checks the wearer's 68° half-angle before committing, telegraphs for 0.42 s or 0.62 s, holds the committed yaw, and recovers for 0.55 s. Red's earned uppercut window accommodates recovery and windup. |
+| A single light clip and simple defense lock obscured the impact relationship. | Directional GLB hit clips, 0.34/0.56/0.92 s reactions, 0.85 s guard break, bounded Red recoil, poise recovery and temporary anti-stunlock resistance. Quest hit evaluation continues to use swept glove/body contact. A tracked duck or weave at punch contact gives a visible committed miss and a 0.85 s counter opening. |
+| The Quest scene had no combat SFX path and secondary stagger cues could duplicate an impact. | One typed event per collision selects an Expo Audio effect, native OpenXR haptic and optional HUD/tint. Reused three distinct 48 kHz stereo punch WAVs, loaded into bounded pools through SDK 57 Expo Audio. A pause invalidates outstanding seeks. On-device logcat can report native playback start and errors. |
+
+Tuning lives in `src/features/quest-vr/quest-tuning.ts`. Pause → Options exposes music and effect level, damage tint and turn mode for the current scene visit. Existing GLB strike, guard, recoil and launch clips are reused. Damage tint fades in 210 ms and keeps the center clear. The Quest settings, CPU, and rules are opt-in. Phone AR and multiplayer continue through the shared defaults. Audio is headset-local stereo.
+
+### Quest 3S wearer checklist
+
+1. Launch the installed release, select Solo and Ready. During the first countdown and again during a fight, turn physically away and press the left controller Menu button once. Confirm the Pause card appears in front, a held Menu does not toggle twice, and either Resume or a new Menu press returns to play. Hold the left stick, right stick and A during Resume, then release them and confirm the match only responds to fresh input. Repeat after opening the system menu and after recentering.
+2. Look upward, downward, and away from Red. Verify HP/guard indicators stay above eye center while the ring card stays hidden. Test left/right snap turns, smooth turn in Options, and turning with both hands raised. Watch for unexpected world movement or prediction overshoot.
+3. Land left/right punches, earn a three-hit uppercut, break Red's guard and score a heavy stagger. Confirm distinct audio/haptics, the striking hand, Red's recoil, and a recovery opening. Compare a blocked hit, incoming unguarded hit, successful guard and dodge. Verify tint can be disabled and volumes can be changed.
+4. Back up or circle, guard a telegraphed punch, duck or weave through another, and counter during recovery. Move out of reach of an uppercut. Check that Red does not attack unseen or track a committed swing around the player. Remove or occlude a controller and use the system menu to check neutralization.
+5. Complete several rounds and log comfort, sustained frame pacing, hit/guard clarity, actual audio audibility, and controller vibration. Record the tested commit and APK SHA. A successful install and native playback status are separate from wearer acceptance.
+
+### Candidate verification
+
+- `npm test` passed lint, typecheck, and 578 tests (14 AR, 373 app, 172 Quest, 16 UI, 3 dependencies). `npm run build:android` passed (2,447 modules). `git diff --check` passed with Git's `cr-at-eol` setting for the existing CRLF sources.
+- Pinned ViroCore `23710240d2cab5d4e866f3dba44ef568d8e563b4` arm64 renderer rebuilt and passed the patched AAR compatibility checks against the pinned pristine baseline. Renderer SHA-256 `ceb5019be86641e287b444efc4569ea10c09abe269f64d02f04d5ca18e9f7f29`.
+- The first native compile exposed references to the retired panel JNI methods. The final Kotlin path uses the v4 JNI entry points for both title spaces. Quest prebuild and `:app:processReleaseManifest :app:assembleRelease -PreactNativeArchitectures=arm64-v8a` passed. The packaged renderer hash matches the rebuild, all three punch WAVs are Android resources, and the release-APK Quest suite passed 172/172.
+- Release APK `D:/nrq06/q8/android/app/build/outputs/apk/release/app-release.apk`, 140,287,643 bytes. SHA-256 `55f2e27fa5d285c5a3ca33a484077773b0211e490e8acf6bef041b892ce92e12`. Package `com.djleg.neorobots`, arm64-v8a.
+- Grok status and models reported authentication ready and `grok-4.7` available. The sole read-only launch, session `a4e62be2-f234-4037-9f05-a7c756273972`, was rejected with HTTP 402 `Grok Build usage balance exhausted`. It returned no verdict. Pre/post SHA-256 checks matched all 28 reviewed task files and the Git index. JamSession's worksheet logger also failed on Windows because Python lacked `fcntl`.
+- Quest 3S `3487C10J3706TQ` was initially connected. The subsequent Meta device query and USB ADB check found no connected device. In-place install and device base-APK SHA verification remain pending until USB debugging is available.
+
+## Prior remediation against a9bd8b3
 
 ## Failed Playtest Diagnosis (`a9bd8b3`) & Remediation Fixes
 

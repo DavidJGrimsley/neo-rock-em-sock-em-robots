@@ -30,8 +30,8 @@ import java.util.concurrent.Executors
 
 private const val TAG = "QuestPanel"
 
-// QuestPanelLayer.h in tools/quest/viro-renderer/0002-openxr-quest-panel-layer.patch.
-private const val NATIVE_VERSION = 3
+// QuestPanelLayer.h, including VIEW space support from renderer patch 0008.
+private const val NATIVE_VERSION = 4
 
 // Draws the compact headset compositor button card (underlay) and the floating
 // transparent branded title (overlay) with Android Canvas, handing pixels and
@@ -65,14 +65,15 @@ class QuestPanelModule : Module() {
 
   private external fun nativeTitleStatus(): Int
   private external fun nativeTitleHide()
-  private external fun nativeTitlePose(pose: FloatArray): Boolean
-  private external fun nativeTitleDraw(
+  private external fun nativeTitlePoseInSpace(pose: FloatArray, viewLocked: Boolean): Boolean
+  private external fun nativeTitleDrawInSpace(
     rgba: ByteArray,
     width: Int,
     height: Int,
     widthM: Float,
     heightM: Float,
-    pose: FloatArray
+    pose: FloatArray,
+    viewLocked: Boolean
   ): Boolean
 
   // Phone builds and the stock renderer have no QuestPanelLayer symbols.
@@ -89,8 +90,8 @@ class QuestPanelModule : Module() {
     private val slotName: String,
     private val nativeStatusFn: () -> Int,
     private val nativeHideFn: () -> Unit,
-    private val nativePoseFn: (FloatArray) -> Boolean,
-    private val nativeDrawFn: (ByteArray, Int, Int, Float, Float, FloatArray) -> Boolean
+    private val nativePoseFn: (FloatArray, Boolean) -> Boolean,
+    private val nativeDrawFn: (ByteArray, Int, Int, Float, Float, FloatArray, Boolean) -> Boolean
   ) {
     @Volatile var owner = 0
     @Volatile var drawFailed = false
@@ -190,12 +191,13 @@ class QuestPanelModule : Module() {
       require(widthM.isFinite() && widthM > 0f && widthM <= 2f) { "Menu panel width is out of range." }
       require(heightM.isFinite() && heightM > 0f && heightM <= 2f) { "Menu panel height is out of range." }
       val pose = poseOf(spec)
+      val viewLocked = spec.optBoolean("viewLocked", false)
       val ops = spec.getJSONArray("ops")
       require(ops.length() in 1..160) { "Menu panel has no drawing operations." }
       val pixelsKey = "$width:$height:$widthM:$heightM:$ops"
       if (pixelsKey == drawnPixelsKey) {
-        check(nativePoseFn(pose)) { "The renderer rejected the $slotName pose." }
-        Log.i(TAG, "moved $slotName $label")
+        check(nativePoseFn(pose, viewLocked)) { "The renderer rejected the $slotName pose." }
+        Log.i(TAG, "moved $slotName $label viewLocked=$viewLocked")
         return
       }
       if (panelBitmap?.width != width || panelBitmap?.height != height) {
@@ -212,7 +214,7 @@ class QuestPanelModule : Module() {
       val buffer = ByteBuffer.wrap(pixels)
       buffer.rewind()
       bitmap.copyPixelsToBuffer(buffer)
-      check(nativeDrawFn(pixels, width, height, widthM, heightM, pose)) {
+      check(nativeDrawFn(pixels, width, height, widthM, heightM, pose, viewLocked)) {
         "The renderer rejected the $slotName panel."
       }
       drawnPixelsKey = pixelsKey
@@ -229,16 +231,18 @@ class QuestPanelModule : Module() {
     slotName = "menu",
     nativeStatusFn = { nativeStatus() },
     nativeHideFn = { nativeHide() },
-    nativePoseFn = { pose -> nativePose(pose) },
-    nativeDrawFn = { rgba, w, h, wm, hm, pose -> nativeDraw(rgba, w, h, wm, hm, pose) }
+    nativePoseFn = { pose, _ -> nativePose(pose) },
+    nativeDrawFn = { rgba, w, h, wm, hm, pose, _ -> nativeDraw(rgba, w, h, wm, hm, pose) }
   )
 
   private val titleSlot = PanelSlot(
     slotName = "title",
     nativeStatusFn = { nativeTitleStatus() },
     nativeHideFn = { nativeTitleHide() },
-    nativePoseFn = { pose -> nativeTitlePose(pose) },
-    nativeDrawFn = { rgba, w, h, wm, hm, pose -> nativeTitleDraw(rgba, w, h, wm, hm, pose) }
+    nativePoseFn = ::nativeTitlePoseInSpace,
+    nativeDrawFn = { rgba, w, h, wm, hm, pose, viewLocked ->
+      nativeTitleDrawInSpace(rgba, w, h, wm, hm, pose, viewLocked)
+    }
   )
 
   private fun releaseAssets() {

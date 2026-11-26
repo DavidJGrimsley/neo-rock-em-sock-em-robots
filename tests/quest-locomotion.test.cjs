@@ -53,12 +53,14 @@ function near(actual, expected, tolerance = 1e-6, label = '') {
   );
 }
 
+let sampleClockNs = 1_000_000_000;
 function makeSample(overrides = {}) {
   const stick = overrides.stick ?? [0, 0];
   return {
     seq: overrides.seq ?? 1,
     refEpoch: overrides.refEpoch,
     timestampNs: overrides.timestampNs ?? 1_000_000_000,
+    capturedNs: overrides.timestampNs ?? (sampleClockNs += 16_000_000),
     focused: overrides.focused ?? true,
     actionsReady: overrides.actionsReady ?? true,
     left: {
@@ -577,6 +579,7 @@ test('QuestArenaSession drives real-time substepped locomotion, neutralizes clea
   assert.ok(fc.pendingFrames > 0, 'frame loop restarts on resume');
 
   // Bounds invariant stays intact under extreme corner input using Quest-only rules.
+  session.setInputState(makeSample({ stick: [0, 0] }), 'live');
   session.setInputState(makeSample({ stick: [1, -1] }), 'live');
   for (let i = 0; i < 40; i++) fc.stepFrame(33.33);
   const late = session.getLiveTransforms();
@@ -899,6 +902,8 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
     './quest-menu-input.ts': require('../src/features/quest-vr/quest-menu-input.ts'),
     './quest-menu-layer.ts': require('../src/features/quest-vr/quest-menu-layer.ts'),
     './quest-menu-layout.ts': require('../src/features/quest-vr/quest-menu-layout.ts'),
+    './quest-arena-audio.native.ts': { useQuestArenaAudio: () => {} },
+    './quest-tuning.ts': require('../src/features/quest-vr/quest-tuning.ts'),
     './quest-diagnostics-layout.ts': {
       questDiagLayerMaterials: () => ({}),
     },
@@ -1027,7 +1032,13 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
   findHit('back').props.onHover(true, [0, 0, 0], 12);
   assert.equal(calls.menuFocusHistory.at(-1) ?? false, false);
 
-  // Ready starts countdown -> fighting.
+  // Controller ray hover (source 1) DOES set menu focus while menu is shown, and hover leave clears it promptly.
+  findHit('back').props.onHover(true, [0, 0, 0], 1);
+  assert.equal(calls.menuFocusHistory.at(-1), true);
+  findHit('back').props.onHover(false, [0, 0, 0], 1);
+  assert.equal(calls.menuFocusHistory.at(-1), false);
+
+  // Ready starts countdown -> fighting and removes ring menu hit quads during active play.
   findHit('ready').props.onClickState(1, [0, 0, 0], 1);
   findHit('ready').props.onClickState(2, [0, 0, 0], 1);
   all = render();
@@ -1036,17 +1047,13 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
     if (sessionInstance.getSnapshot().stage === 'fighting') break;
   }
   all = render();
+  assert.equal(findHit('back'), undefined, 'menu hit quads are removed during active combat');
+  assert.equal(findHit('ready'), undefined, 'ready/set button is removed during active combat');
   assert.equal(
     titlePresents.at(-1),
     'combat hud',
     'eyes presentation switches titleCompositor slot to live combat HUD'
   );
-
-  // Controller ray hover (source 1) DOES set menu focus, and hover leave clears it promptly.
-  findHit('back').props.onHover(true, [0, 0, 0], 1);
-  assert.equal(calls.menuFocusHistory.at(-1), true);
-  findHit('back').props.onHover(false, [0, 0, 0], 1);
-  assert.equal(calls.menuFocusHistory.at(-1), false);
 
   // 200ms tracker snapshot ticks (outOfBounds unchanged) must keep QuestRing memoized (no GLB re-render).
   const fightingRingRef = all.find((n) => n.type?.name === 'QuestRing');
@@ -1161,8 +1168,7 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
   assert.equal(sessionInstance.getSnapshot().fighters.red.clip, 'IdleAggro');
   assert.equal(sessionInstance.getSnapshot().animationsRunning, true);
 
-  // Rising edge of appActive && vrActivityState === 'resumed' triggers compositor replay for menu & title,
-  // preserves IdleAggro animation running state, and resumes smooth 1:1 left/right frame updates.
+  // VRActivity resume builds the current Pause card and leaves both old owners hidden.
   assert.equal(replayCounts.menu, 0);
   assert.equal(replayCounts.title, 0);
   runtimeSnap = { ...runtimeSnap, appActive: false, vrActivityState: 'paused' };
@@ -1179,11 +1185,11 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
   assert.equal(replayCounts.menu, 0, 'still paused until VRActivity resumes');
   runtimeSnap = { ...runtimeSnap, appActive: true, vrActivityState: 'resumed' };
   for (const l of runtimeListeners) l();
-  assert.equal(replayCounts.menu, 1);
-  assert.equal(replayCounts.title, 1);
+  assert.equal(replayCounts.menu, 0);
+  assert.equal(replayCounts.title, 0);
   all = render();
-  findHit('ready').props.onClickState(1, [0, 0, 0], 1);
-  findHit('ready').props.onClickState(2, [0, 0, 0], 1);
+  findHit('resume').props.onClickState(1, [0, 0, 0], 1);
+  findHit('resume').props.onClickState(2, [0, 0, 0], 1);
   all = render();
   for (let i = 0; i < 40; i++) {
     fc.stepFrame(120);
@@ -1192,6 +1198,10 @@ test('QuestArenaScene drives native transforms via ViroGameLoop and ViroGameLoop
   assert.equal(sessionInstance.getSnapshot().animationsRunning, true);
   assert.equal(sessionInstance.getSnapshot().fighters.red.clip, 'IdleAggro');
   calls.nativePropsLog.length = 0;
+  for (const cb of calls.inputSampleHandlers) {
+    cb(makeSample({ stick: [0, 0] }), 'live');
+    cb(makeSample({ stick: [-1, 0] }), 'live');
+  }
   // Post-resume frame advances smoothly even after large pause dt spike (clamped safely).
   calls.transformCommands.length = 0;
   all.find((n) => n.type === 'ViroGameLoop').props.onUpdate({ dt: 0.4, elapsed: 2.5 });
@@ -1839,6 +1849,8 @@ test('QuestRigSync path bypasses ViroGameLoop and ViroGameLoopUtils, tags rig/fi
     './quest-menu-input.ts': require('../src/features/quest-vr/quest-menu-input.ts'),
     './quest-menu-layer.ts': require('../src/features/quest-vr/quest-menu-layer.ts'),
     './quest-menu-layout.ts': require('../src/features/quest-vr/quest-menu-layout.ts'),
+    './quest-arena-audio.native.ts': { useQuestArenaAudio: () => {} },
+    './quest-tuning.ts': require('../src/features/quest-vr/quest-tuning.ts'),
     './quest-diagnostics-layout.ts': { questDiagLayerMaterials: () => ({}) },
     './quest-runtime-store.ts': {
       questRuntime: {

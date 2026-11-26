@@ -114,7 +114,7 @@ function makeSample(overrides = {}) {
   return {
     seq: overrides.seq ?? 1,
     t: overrides.t ?? 100,
-    capturedNs: overrides.capturedNs ?? 1_000_000,
+    capturedNs: overrides.capturedNs ?? (overrides.t ?? 1) * 1_000_000,
     focused: overrides.focused ?? true,
     actionsReady: overrides.actionsReady ?? true,
     refEpoch: overrides.refEpoch ?? 1,
@@ -1291,6 +1291,8 @@ test('QuestArenaScene body animation effect handles cancelled-rAF pause and sub-
       QuestDiagnosticsPanel: 'QuestDiagnosticsPanel',
       QuestInputMarkers: 'QuestInputMarkers',
     },
+    './quest-arena-audio.native.ts': { useQuestArenaAudio: () => {} },
+    './quest-tuning.ts': require('../src/features/quest-vr/quest-tuning.ts'),
   };
   const compiled = ts.transpileModule(
     fs.readFileSync(

@@ -1,6 +1,7 @@
 import { menuFrame, type Calibration, type Vec3 } from './quest-head-rig.ts';
 import type { QuestPanelPose } from './quest-menu-compositor.ts';
 import type { QuestMenuDrawOp, QuestMenuFonts } from './quest-menu-layout.ts';
+import { QUEST_TUNING } from './quest-tuning.ts';
 
 export const QUEST_COMBAT_HUD_TEXTURE = { widthPx: 1280, heightPx: 360 } as const;
 export const QUEST_COMBAT_HUD_SIZE = { widthM: 1.28, heightM: 0.36 } as const;
@@ -48,15 +49,17 @@ export interface QuestCombatHudState {
   opponentMaxHealth: number;
   opponentGuardState: string;
   opponentMode: string;
+  opponentAiState?: string;
   inPunchRange: boolean;
   inUppercutRange: boolean;
   evadeStatus: QuestEvadeHudStatus;
   evadeKind: 'duck' | 'weave' | null;
   evadeRemaining: number;
   evadeCooldownRemaining: number;
+  dodgeCounterRemaining?: number;
   incomingAttack: { kind: 'punch' | 'uppercut'; hand: 'L' | 'R' } | null;
+  telegraphAttack?: { kind: 'punch' | 'uppercut'; hand: 'L' | 'R'; remaining: number } | null;
   event: QuestCombatHudEvent | null;
-  redBearingOffsetDeg: number;
 }
 
 const COLORS = {
@@ -140,6 +143,30 @@ export function questCombatHudPose(
   return { position, yaw, pose };
 }
 
+/**
+ * Returns the fixed top-of-view OpenXR VIEW-space pose and physical size for
+ * the sticky combat HUD. Independent of opponent bearing, yaw turns, room
+ * translation, and Horizon system recenter.
+ */
+export function questCombatHudViewPose(): {
+  position: Vec3;
+  rotation: [number, number, number];
+  pose: QuestPanelPose;
+  widthM: number;
+  heightM: number;
+} {
+  const [x, y, z] = QUEST_TUNING.hud.position;
+  const pitchDeg = QUEST_TUNING.hud.pitchDeg;
+  const halfX = (pitchDeg * Math.PI) / 360;
+  return {
+    position: [x, y, z],
+    rotation: [pitchDeg, 0, 0],
+    pose: [x, y, z, Math.sin(halfX), 0, 0, Math.cos(halfX)],
+    widthM: QUEST_TUNING.hud.widthM,
+    heightM: QUEST_TUNING.hud.heightM,
+  };
+}
+
 function guardLabel(hud: QuestCombatHudState) {
   if (hud.playerGuardState === 'holding') return 'GUARD ACTIVE';
   if (hud.playerGuardState === 'raising') return 'RAISING GUARD';
@@ -215,7 +242,7 @@ function bannerSpec(hud: QuestCombatHudState): { text: string; bg: string } {
     };
   }
   if (hud.stage === 'paused') {
-    return { text: 'MATCH PAUSED — SELECT READY TO RESUME', bg: COLORS.eventWarning };
+    return { text: 'MATCH PAUSED — SELECT RESUME', bg: COLORS.eventWarning };
   }
   if (hud.event) {
     const bg =
@@ -232,11 +259,26 @@ function bannerSpec(hud: QuestCombatHudState): { text: string; bg: string } {
     const atk = hud.incomingAttack.kind === 'uppercut' ? 'UPPERCUT' : 'PUNCH';
     const advice =
       hud.incomingAttack.kind === 'uppercut'
-        ? 'RAISE BOTH HANDS TO GUARD OR STEP BACK!'
+        ? 'STEP BACK OR MOVE SIDEWAYS!'
         : 'RAISE BOTH HANDS TO BLOCK OR DUCK/WEAVE!';
     return {
       text: `INCOMING ${atk} (${hud.incomingAttack.hand}) — ${advice}`,
       bg: COLORS.eventDanger,
+    };
+  }
+  if (hud.telegraphAttack) {
+    const atk = hud.telegraphAttack.kind === 'uppercut' ? 'UPPERCUT' : 'STRIKE';
+    const advice =
+      hud.telegraphAttack.kind === 'uppercut' ? 'MOVE OUT OF REACH!' : 'GUARD OR DODGE!';
+    return {
+      text: `RED WINDUP: ${atk} (${hud.telegraphAttack.hand}) — ${advice}`,
+      bg: COLORS.eventWarning,
+    };
+  }
+  if ((hud.dodgeCounterRemaining ?? 0) > 0) {
+    return {
+      text: `COUNTER OPENING (${hud.dodgeCounterRemaining!.toFixed(1)}s) — STRIKE NOW FOR BONUS DAMAGE!`,
+      bg: COLORS.eventPositive,
     };
   }
   if (hud.playerUppercutReady) {

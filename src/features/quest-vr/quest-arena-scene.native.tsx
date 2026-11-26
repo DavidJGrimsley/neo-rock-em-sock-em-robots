@@ -57,11 +57,11 @@ import {
 import { questDiagLayerMaterials } from './quest-diagnostics-layout.ts';
 import {
   buildQuestCombatHud,
-  questCombatHudLocalPose,
-  questCombatHudPose,
-  QUEST_COMBAT_HUD_SIZE,
+  questCombatHudViewPose,
   type QuestCombatHudState,
 } from './quest-combat-hud.ts';
+import { useQuestArenaAudio } from './quest-arena-audio.native.ts';
+import { QUEST_TUNING, type QuestUserSettings } from './quest-tuning.ts';
 import {
   createQuestMenuCompositor,
   questMenuLayerMaterials,
@@ -229,6 +229,15 @@ ViroMaterials.createMaterials({
     readsFromDepthBuffer: false,
     writesToDepthBuffer: false,
   },
+  // VR-safe peripheral damage edge vignette (never occludes center FOV).
+  questDamageTint: {
+    diffuseColor: '#dc2626',
+    lightingModel: 'Constant',
+    blendMode: 'Alpha',
+    cullMode: 'None',
+    readsFromDepthBuffer: false,
+    writesToDepthBuffer: false,
+  },
 });
 
 // The medical viewer's headset text: scale 0.05 with the box in scaled units.
@@ -292,6 +301,7 @@ interface InitialRingPose {
 
 interface SyncedTransformCache {
   presentation?: 'menu' | 'side' | 'eyes';
+  calYaw?: number;
   rigOuterNode?: ViroNode | null;
   rigPosition?: Vec3Tuple;
   rigRotationY?: number;
@@ -354,6 +364,37 @@ function writeFighterAnimation(
   setNativeNodeProps(model, { animation });
 }
 
+function QuestViewHudFallback({ children }: { children: React.ReactNode }) {
+  const node = useRef<ViroNode | null>(null);
+  useEffect(() => {
+    let visible = false;
+    const sync = () => {
+      const head = questHeadTracker.getLiveHeadState?.();
+      const pose =
+        head?.sample && !head.recentering
+          ? questHeadCoverPose(head.sample, -QUEST_TUNING.hud.position[2])
+          : null;
+      if (pose) pushNodeTransform(node, [...pose.position], [...pose.rotation]);
+      if (visible !== Boolean(pose)) {
+        visible = Boolean(pose);
+        setNativeNodeProps(node.current, { visible });
+      }
+    };
+    sync();
+    return questHeadTracker.subscribeLive?.(sync);
+  }, []);
+  return (
+    <ViroNode ref={node} visible={false} ignoreEventHandling>
+      <ViroNode
+        position={[0, QUEST_TUNING.hud.position[1], 0]}
+        rotation={[QUEST_TUNING.hud.pitchDeg, 0, 0]}
+        ignoreEventHandling>
+        {children}
+      </ViroNode>
+    </ViroNode>
+  );
+}
+
 function scheduleAnimationFrame(callback: () => void): unknown {
   return typeof globalThis.requestAnimationFrame === 'function'
     ? globalThis.requestAnimationFrame(callback)
@@ -407,8 +448,10 @@ function publishQuestRigState(
     stanceCenter[2],
   ];
 
+  const calTurnJump = cache.calYaw !== undefined && Math.abs(wrap180(cal.yaw - cache.calYaw)) >= 5;
   const canDifferentiate =
     allowExtrapolation &&
+    !calTurnJump &&
     (snap.stage === 'fighting' || snap.introActive) &&
     cache.presentation === snap.presentation &&
     dtSeconds > 1e-4 &&
@@ -530,6 +573,7 @@ function publishQuestRigState(
   ]);
 
   cache.presentation = snap.presentation;
+  cache.calYaw = cal.yaw;
   cache.rigPosition = [...rig.position];
   cache.rigRotationY = rig.rotationY;
   cache.stancePosition = stancePosition;
@@ -1007,6 +1051,77 @@ const QuestIntroCover = memo(function QuestIntroCover({
   );
 });
 
+const damageEdgeMaterials = ['questDamageTint'];
+const damageEdgeBars: readonly { position: Vec3Tuple; width: number; height: number }[] = [
+  { position: [0, 0.25, 0], width: 0.72, height: 0.14 },
+  { position: [0, -0.25, 0], width: 0.72, height: 0.14 },
+  { position: [-0.31, 0, 0], width: 0.14, height: 0.56 },
+  { position: [0.31, 0, 0], width: 0.14, height: 0.56 },
+];
+
+const QuestDamageVignette = memo(function QuestDamageVignette({
+  session,
+}: {
+  session: QuestArenaSession;
+}) {
+  const nodeRef = useRef<ViroNode | null>(null);
+  const quadRefs = useRef<(ViroQuad | null)[]>([null, null, null, null]);
+  const visibleRef = useRef(false);
+  const lastOpacityRef = useRef(-1);
+
+  useEffect(() => {
+    const sync = () => {
+      const node = nodeRef.current;
+      if (!node) return;
+      const opacity = session.getDamageTintOpacity?.() ?? 0;
+      const visible = opacity > 0.005;
+      const sample = visible ? questHeadTracker.getLiveHeadState().sample : null;
+      const pose = visible && sample ? questHeadCoverPose(sample, 0.35) : null;
+      if (!visible || !pose) {
+        if (visibleRef.current) {
+          visibleRef.current = false;
+          lastOpacityRef.current = 0;
+          setNativeNodeProps(node, { visible: false });
+        }
+        return;
+      }
+      pushNodeTransform(nodeRef, [...pose.position], [...pose.rotation]);
+      if (!visibleRef.current) {
+        visibleRef.current = true;
+        setNativeNodeProps(node, { visible: true });
+      }
+      if (Math.abs(opacity - lastOpacityRef.current) >= 0.005) {
+        lastOpacityRef.current = opacity;
+        for (const quad of quadRefs.current) {
+          setNativeNodeProps(quad, { opacity });
+        }
+      }
+    };
+    sync();
+    return session.onFrame(sync);
+  }, [session]);
+
+  return (
+    <ViroNode ref={nodeRef} position={introCoverPosition} visible={false}>
+      {damageEdgeBars.map((bar, index) => (
+        <ViroQuad
+          key={index}
+          ref={(el) => {
+            quadRefs.current[index] = el;
+          }}
+          position={bar.position}
+          width={bar.width}
+          height={bar.height}
+          materials={damageEdgeMaterials}
+          renderingOrder={950}
+          opacity={0}
+          ignoreEventHandling
+        />
+      ))}
+    </ViroNode>
+  );
+});
+
 // Centered under the robot eyes, which the rig places on the calibrated head.
 // The fighter and arena are not moved.
 function StanceFloorRing({
@@ -1254,6 +1369,7 @@ function QuestMenuFocus({
 
 function QuestMenu({
   page,
+  menuVisible,
   acknowledged,
   posture,
   calibration,
@@ -1261,11 +1377,13 @@ function QuestMenu({
   layer,
   titleLayer,
   combatHud,
+  settings,
   hover,
   onPress,
   onHover,
 }: {
   page: QuestMenuPage;
+  menuVisible: boolean;
   acknowledged: boolean;
   posture: QuestMenuPosture;
   calibration: Calibration;
@@ -1273,6 +1391,7 @@ function QuestMenu({
   layer: QuestMenuLayerSnapshot;
   titleLayer: QuestMenuLayerSnapshot;
   combatHud: QuestCombatHudState | null;
+  settings?: QuestUserSettings;
   hover: QuestMenuAction | null;
   onPress: (action: QuestMenuAction, clickState: number, source: unknown) => void;
   onHover: (action: QuestMenuAction, hovering: boolean, source: unknown) => void;
@@ -1296,52 +1415,56 @@ function QuestMenu({
       }
     : basePose;
   const card = questMenuCardMetrics(hasMessages);
-  const buttons = questMenuButtons(page, { acknowledged, posture, hasMessages });
+  const buttons = questMenuButtons(page, { acknowledged, posture, hasMessages, settings });
   const hovered = buttons.find((button) => button.action === hover) ?? null;
   const textWidth = card.widthM * 0.9;
   const textHeight = 0.2;
   const titlePose = QUEST_TITLE_POSE[page];
   const titleSize = QUEST_TITLE_SIZE[page];
+  const showFallbackCombatHud = !menuVisible && !titleOn && Boolean(combatHud);
+  const fallbackHudTexts = combatHud ? (
+    <>
+      <ViroText
+        text={`YOU ${Math.ceil(combatHud.playerHealth)}/${combatHud.playerMaxHealth} | GUARD ${Math.round(
+          (combatHud.playerGuardStamina / Math.max(1, combatHud.playerGuardMaxStamina)) * 100
+        )}% | RED ${Math.ceil(combatHud.opponentHealth)}/${combatHud.opponentMaxHealth}`}
+        position={[0, 0.12, 0]}
+        scale={textScale}
+        width={1.28 / TEXT_SCALE}
+        height={0.14 / TEXT_SCALE}
+        style={fallbackTitleNeoStyle}
+        ignoreEventHandling
+      />
+      <ViroText
+        text={
+          combatHud.event?.label ??
+          (combatHud.incomingAttack
+            ? `INCOMING ${combatHud.incomingAttack.kind.toUpperCase()} (${combatHud.incomingAttack.hand})`
+            : combatHud.telegraphAttack
+              ? `RED WINDUP: ${combatHud.telegraphAttack.kind.toUpperCase()}`
+              : `UPP ${combatHud.playerPunchProgress}/3 | ${combatHud.evadeStatus.toUpperCase()}`)
+        }
+        position={[0, -0.04, 0]}
+        scale={textScale}
+        width={1.28 / TEXT_SCALE}
+        height={0.14 / TEXT_SCALE}
+        style={fallbackTitleMainStyle}
+        ignoreEventHandling
+      />
+    </>
+  ) : null;
+
+  if (!menuVisible && !showFallbackCombatHud) {
+    return null;
+  }
+
+  if (showFallbackCombatHud) {
+    return <QuestViewHudFallback>{fallbackHudTexts}</QuestViewHudFallback>;
+  }
+
   return (
     <ViroNode position={[...frame.position]} rotation={[0, frame.rotationY, 0]}>
-      {!titleOn && combatHud ? (
-        (() => {
-          const localHudPose = questCombatHudLocalPose(combatHud.redBearingOffsetDeg);
-          return (
-            <ViroNode
-              position={[...localHudPose.position]}
-              rotation={[...localHudPose.rotation]}
-              ignoreEventHandling>
-              <ViroText
-                text={`YOU ${Math.ceil(combatHud.playerHealth)}/${combatHud.playerMaxHealth} | GUARD ${Math.round(
-                  (combatHud.playerGuardStamina / Math.max(1, combatHud.playerGuardMaxStamina)) *
-                    100
-                )}% | RED ${Math.ceil(combatHud.opponentHealth)}/${combatHud.opponentMaxHealth}`}
-                position={[0, 0.12, 0]}
-                scale={textScale}
-                width={1.28 / TEXT_SCALE}
-                height={0.14 / TEXT_SCALE}
-                style={fallbackTitleNeoStyle}
-                ignoreEventHandling
-              />
-              <ViroText
-                text={
-                  combatHud.event?.label ??
-                  (combatHud.incomingAttack
-                    ? `INCOMING ${combatHud.incomingAttack.kind.toUpperCase()} (${combatHud.incomingAttack.hand})`
-                    : `UPP ${combatHud.playerPunchProgress}/3 | ${combatHud.evadeStatus.toUpperCase()}`)
-                }
-                position={[0, -0.04, 0]}
-                scale={textScale}
-                width={1.28 / TEXT_SCALE}
-                height={0.14 / TEXT_SCALE}
-                style={fallbackTitleMainStyle}
-                ignoreEventHandling
-              />
-            </ViroNode>
-          );
-        })()
-      ) : !titleOn ? (
+      {!titleOn && menuVisible && (page === 'menu' || page === 'ring') ? (
         <ViroNode position={titlePose.position} rotation={titlePose.rotation}>
           <ViroText
             text="Neo"
@@ -1361,55 +1484,57 @@ function QuestMenu({
           />
         </ViroNode>
       ) : null}
-      <ViroNode position={cardPose.position} rotation={cardPose.rotation}>
-        {layerOn ? (
-          // Depth-writing, zero-alpha hole for the compact quad layer underneath.
-          <ViroQuad
-            width={card.widthM}
-            height={card.heightM}
-            materials={[hasMessages ? 'questMenuLayerMaskAlert' : 'questMenuLayerMask']}
-            renderingOrder={-100}
-            ignoreEventHandling
-          />
-        ) : (
-          <>
+      {menuVisible ? (
+        <ViroNode position={cardPose.position} rotation={cardPose.rotation}>
+          {layerOn ? (
+            // Depth-writing, zero-alpha hole for the compact quad layer underneath.
             <ViroQuad
               width={card.widthM}
               height={card.heightM}
-              materials={['questMenuBacking']}
+              materials={[hasMessages ? 'questMenuLayerMaskAlert' : 'questMenuLayerMask']}
+              renderingOrder={-100}
               ignoreEventHandling
             />
-            {fallbackText ? (
-              <QuestMenuText
-                text={fallbackText}
-                width={textWidth}
-                height={textHeight}
-                y={card.heightM / 2 - 0.12}
+          ) : (
+            <>
+              <ViroQuad
+                width={card.widthM}
+                height={card.heightM}
+                materials={['questMenuBacking']}
+                ignoreEventHandling
               />
-            ) : null}
-            <QuestMenuFallbackButtons buttons={buttons} hasMessages={hasMessages} />
-          </>
-        )}
-        {hovered ? <QuestMenuFocus button={hovered} hasMessages={hasMessages} /> : null}
-        {buttons.map((button) => {
-          const buttonFrame = questMenuButtonFrame(button, hasMessages);
-          return (
-            <ViroQuad
-              key={`hit-${button.action}`}
-              position={buttonFrame.position}
-              width={buttonFrame.width}
-              height={buttonFrame.height}
-              materials={['questMenuHit']}
-              onClickState={(clickState: number, _position: unknown, source: unknown) =>
-                onPress(button.action, clickState, source)
-              }
-              onHover={(isHovering: boolean, _position: unknown, source: unknown) =>
-                onHover(button.action, isHovering, source)
-              }
-            />
-          );
-        })}
-      </ViroNode>
+              {fallbackText ? (
+                <QuestMenuText
+                  text={fallbackText}
+                  width={textWidth}
+                  height={textHeight}
+                  y={card.heightM / 2 - 0.12}
+                />
+              ) : null}
+              <QuestMenuFallbackButtons buttons={buttons} hasMessages={hasMessages} />
+            </>
+          )}
+          {hovered ? <QuestMenuFocus button={hovered} hasMessages={hasMessages} /> : null}
+          {buttons.map((button) => {
+            const buttonFrame = questMenuButtonFrame(button, hasMessages);
+            return (
+              <ViroQuad
+                key={`hit-${button.action}`}
+                position={buttonFrame.position}
+                width={buttonFrame.width}
+                height={buttonFrame.height}
+                materials={['questMenuHit']}
+                onClickState={(clickState: number, _position: unknown, source: unknown) =>
+                  onPress(button.action, clickState, source)
+                }
+                onHover={(isHovering: boolean, _position: unknown, source: unknown) =>
+                  onHover(button.action, isHovering, source)
+                }
+              />
+            );
+          })}
+        </ViroNode>
+      ) : null}
     </ViroNode>
   );
 }
@@ -1507,10 +1632,14 @@ export default function QuestArenaScene() {
   const lastLogAt = useRef(0);
   const posture = tracker.calibration.posture;
   const calibration = tracker.calibration;
+  const menuCalibration =
+    (view.page === 'pause' || view.paused) && view.pauseCalibration
+      ? view.pauseCalibration
+      : calibration;
 
   const initialRingPose = useMemo<InitialRingPose | null>(() => {
     if (
-      view.page !== 'ring' ||
+      view.mode !== 'solo' ||
       view.token === null ||
       view.placementVersion === null ||
       !view.transforms
@@ -1543,7 +1672,16 @@ export default function QuestArenaScene() {
     // Initial JSX mount props stay frozen per round/placement so React re-renders
     // (200ms tracker updates, calibration changes, or presentation flip) never overwrite setNativeProps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, view.lease, view.page, view.placementVersion, view.token, view.transforms]);
+  }, [session, view.lease, view.mode, view.placementVersion, view.token, view.transforms]);
+
+  const menuVisible = view.menuVisible ?? view.presentation !== 'eyes';
+  useQuestArenaAudio(
+    session,
+    session.getMatch?.() ?? null,
+    view.appActive !== false && !view.leaving && !view.paused,
+    menuVisible && view.page === 'menu',
+    view.settings
+  );
 
   const updateMenuFocus = () => {
     let hovered = false;
@@ -1553,7 +1691,9 @@ export default function QuestArenaScene() {
         break;
       }
     }
-    session.setMenuFocus(hovered || press.current.down.size > 0);
+    session.setMenuFocus(
+      session.getSnapshot().menuVisible && (hovered || press.current.down.size > 0)
+    );
   };
 
   const failureMessage =
@@ -1567,8 +1707,10 @@ export default function QuestArenaScene() {
     if (tracker.status === 'no-samples' && tracker.message) lines.push(tracker.message);
     if (failureMessage) lines.push(failureMessage);
     if (tracker.outOfBounds) lines.push('Outside bounds: return toward the stance ring center.');
-    if (view.page === 'ring' && view.stage === 'paused') {
-      lines.push('Match paused. Select Ready to resume.');
+    if (view.page === 'settings') {
+      lines.push('Choose a volume, damage tint, or turning mode.');
+    } else if (view.page === 'pause' || view.stage === 'paused') {
+      lines.push(...view.lines);
     }
     return lines;
   }, [
@@ -1590,15 +1732,17 @@ export default function QuestArenaScene() {
   }, [failureMessage, view.leaving, view.lines, view.message]);
 
   // Pose, panel and hit targets all follow the requested screen at once.
-  const inputKey = `${view.page}:${view.acknowledged}`;
+  const inputKey = `${view.page}:${view.acknowledged}:${view.menuVisible}:${view.appActive}`;
   const inputKeyRef = useRef(inputKey);
-  const visibleHover = questMenuButtons(view.page, {
-    acknowledged: view.acknowledged,
-    posture,
-    hasMessages: menuLines.length > 0,
-  }).some((button) => button.action === hover)
-    ? hover
-    : null;
+  const visibleHover =
+    view.menuVisible &&
+    questMenuButtons(view.page, {
+      acknowledged: view.acknowledged,
+      posture,
+      hasMessages: menuLines.length > 0,
+    }).some((button) => button.action === hover)
+      ? hover
+      : null;
   // Hover is not part of the panel image; only page, text, posture and fonts are.
   const menu = useMemo(
     () =>
@@ -1606,8 +1750,9 @@ export default function QuestArenaScene() {
         acknowledged: view.acknowledged,
         posture,
         fonts,
+        settings: view.settings,
       }),
-    [fonts, menuLines, posture, view.acknowledged, view.page]
+    [fonts, menuLines, posture, view.acknowledged, view.page, view.settings]
   );
   const titleModel = useMemo(() => buildQuestMenuTitle({ titles, fonts }), [fonts, titles]);
   const combatHudModel = useMemo(
@@ -1639,9 +1784,20 @@ export default function QuestArenaScene() {
       }
       return false;
     };
-    const stopInput = input.onSample((sample, status, batch) =>
-      session.setInputState(sample, status, batch, input.getLiveState?.().nowNs)
-    );
+    const stopInput = input.onSample((sample, status, batch) => {
+      if (status === 'live' && sample?.focused) {
+        const hadPress = press.current.down.size > 0;
+        for (const [source, hand] of [
+          [1, sample.right],
+          [4, sample.left],
+        ] as const) {
+          if (hand.trigger?.active && hand.trigger.value < 0.5) press.current.down.delete(source);
+        }
+        if (hadPress && press.current.down.size === 0 && !hasMenuHover())
+          session.setMenuFocus(false);
+      }
+      session.setInputState(sample, status, batch, input.getLiveState?.().nowNs);
+    });
     const stopFrames = session.onFrame((dtSeconds) =>
       syncQuestRingTransforms(
         session,
@@ -1668,13 +1824,6 @@ export default function QuestArenaScene() {
       rt.vrActivityState !== 'stopped' &&
       rt.vrActivityState !== 'finishing' &&
       rt.vrActivityState !== 'destroyed';
-    let wasActive = isSceneActive(
-      questRuntime.getSnapshot() as {
-        status?: string;
-        appActive?: boolean;
-        vrActivityState?: string;
-      }
-    );
     const syncRuntimeActive = () => {
       const rt = questRuntime.getSnapshot() as {
         status?: string;
@@ -1683,12 +1832,11 @@ export default function QuestArenaScene() {
       };
       const active = isSceneActive(rt);
       appActiveRef.current = active;
-      session.setAppActive(active);
-      if (!wasActive && active) {
-        compositor.replay();
-        titleCompositor.replay();
+      if (!active) {
+        compositor.hide();
+        titleCompositor.hide();
       }
-      wasActive = active;
+      session.setAppActive(active);
     };
     syncRuntimeActive();
     const stopRuntime = (
@@ -1717,7 +1865,7 @@ export default function QuestArenaScene() {
   }, [compositor, input, rigSyncActive, session, titleCompositor]);
 
   useEffect(() => {
-    if (view.page !== 'ring') {
+    if (view.mode !== 'solo') {
       if (rigSyncActive) questInputNative?.clearRigState?.();
       syncedTransformsRef.current = {};
       appliedAnimationsRef.current = {
@@ -1750,14 +1898,14 @@ export default function QuestArenaScene() {
     rigSyncActive,
     session,
     view.lease,
-    view.page,
+    view.mode,
     view.placementVersion,
     view.presentation,
     view.token,
   ]);
 
   useEffect(() => {
-    if (view.page !== 'ring' || !view.fighters) return;
+    if (view.mode !== 'solo' || !view.fighters) return;
     const fighters = view.fighters;
     const run = view.animationsRunning;
     const pendingFrames: unknown[] = [];
@@ -1793,10 +1941,10 @@ export default function QuestArenaScene() {
     return () => {
       for (const handle of pendingFrames) cancelScheduledAnimationFrame(handle);
     };
-  }, [session, view.animationsRunning, view.fighters, view.lease, view.page]);
+  }, [session, view.animationsRunning, view.fighters, view.lease, view.mode]);
 
   useEffect(() => {
-    if (view.page !== 'ring') return;
+    if (view.mode !== 'solo') return;
     const bodyModel = blueBodyModelRef.current;
     if (!bodyModel) return;
     if (appliedBodyAnimationRef.current.model !== bodyModel) {
@@ -1879,7 +2027,7 @@ export default function QuestArenaScene() {
     return () => {
       cancelScheduledAnimationFrame(handle);
     };
-  }, [view.animationsRunning, view.bodyClip, view.lease, view.page, view.presentation]);
+  }, [view.animationsRunning, view.bodyClip, view.lease, view.mode, view.presentation]);
 
   // Dev builds serve TTFs/PNGs over Metro HTTP until downloaded to a local file;
   // release builds resolve packaged resource names synchronously above.
@@ -1939,50 +2087,59 @@ export default function QuestArenaScene() {
     );
   }, [tracker]);
 
-  // A new screen starts with no trigger held and no hover, so a press on the
-  // old targets cannot act on the new ones.
+  // Clear hover across screens. A held trigger must release before the next press.
   useEffect(() => {
     if (inputKeyRef.current === inputKey) return;
     inputKeyRef.current = inputKey;
-    press.current.down.clear();
     hoverSources.current.clear();
     setHover(null);
     session.setMenuFocus(false);
   }, [inputKey, session]);
 
   useEffect(() => {
+    if (!view.menuVisible || view.appActive === false) {
+      compositor.hide();
+      return;
+    }
     compositor.present({
       label: panelLabel,
-      pose: questMenuPanelPose(calibration, view.page, menu.hasMessages).pose,
+      pose: questMenuPanelPose(menuCalibration, view.page, menu.hasMessages).pose,
       ops: menu.ops,
       widthPx: menu.widthPx,
       heightPx: menu.heightPx,
       widthM: menu.widthM,
       heightM: menu.heightM,
     });
-  }, [calibration, compositor, menu, panelLabel, view.page]);
+  }, [compositor, menu, menuCalibration, panelLabel, view.appActive, view.menuVisible, view.page]);
 
   useEffect(() => {
-    if (view.introActive) {
+    if (view.introActive || view.paused || view.appActive === false) {
       titleCompositor.hide();
       return;
     }
-    if (view.presentation === 'eyes' && view.combatHud && combatHudModel) {
+    if (!view.menuVisible && view.presentation === 'eyes' && view.combatHud && combatHudModel) {
+      const viewHudPose = questCombatHudViewPose();
       titleCompositor.present({
         label: 'combat hud',
-        pose: questCombatHudPose(calibration, view.combatHud.redBearingOffsetDeg).pose,
+        pose: viewHudPose.pose,
+        viewLocked: true,
         ops: combatHudModel.ops,
         widthPx: combatHudModel.widthPx,
         heightPx: combatHudModel.heightPx,
-        widthM: QUEST_COMBAT_HUD_SIZE.widthM,
-        heightM: QUEST_COMBAT_HUD_SIZE.heightM,
+        widthM: viewHudPose.widthM,
+        heightM: viewHudPose.heightM,
       });
+      return;
+    }
+    if (!view.menuVisible) {
+      titleCompositor.hide();
       return;
     }
     const titleSize = QUEST_TITLE_SIZE[view.page];
     titleCompositor.present({
       label: `title ${view.page}`,
-      pose: questMenuTitlePose(calibration, view.page).pose,
+      pose: questMenuTitlePose(menuCalibration, view.page).pose,
+      viewLocked: false,
       ops: titleModel.ops,
       widthPx: QUEST_TITLE_TEXTURE.widthPx,
       heightPx: QUEST_TITLE_TEXTURE.heightPx,
@@ -1990,13 +2147,16 @@ export default function QuestArenaScene() {
       heightM: titleSize.heightM,
     });
   }, [
-    calibration,
     combatHudModel,
+    menuCalibration,
     titleCompositor,
     titleModel,
+    view.appActive,
     view.combatHud,
     view.introActive,
+    view.menuVisible,
     view.page,
+    view.paused,
     view.presentation,
   ]);
 
@@ -2019,6 +2179,8 @@ export default function QuestArenaScene() {
   }, [view.combatHud, view.presentation]);
 
   const onAction = (action: QuestMenuAction) => {
+    const current = session.getSnapshot();
+    if (current.appActive === false || !current.menuVisible || current.page !== view.page) return;
     logMenu('info', `action ${action} on ${view.page}`);
     if (action === 'solo') {
       if (session.solo()) {
@@ -2026,7 +2188,21 @@ export default function QuestArenaScene() {
         if (next.transforms) questHeadTracker.calibrateForSolo(next.transforms.blue);
       }
     } else if (action === 'ready') session.ready();
-    else if (action === 'back') session.back();
+    else if (action === 'resume') session.resume();
+    else if (action === 'settings') session.showPauseSettings(true);
+    else if (action === 'pause-done') session.showPauseSettings(false);
+    else if (action === 'damage-tint')
+      session.updateSettings({ damageTintEnabled: !current.settings.damageTintEnabled });
+    else if (action === 'turn-mode')
+      session.updateSettings({
+        turnMode: current.settings.turnMode === 'snap' ? 'smooth' : 'snap',
+      });
+    else if (action === 'music-volume' || action === 'sfx-volume') {
+      const key = action === 'music-volume' ? 'musicVolume' : 'sfxVolume';
+      const volume =
+        QUEST_TUNING.audio.volumeLevels.find((level) => level > current.settings[key]) ?? 0;
+      session.updateSettings({ [key]: volume });
+    } else if (action === 'back') session.back();
     else if (action === 'posture') questHeadTracker.cyclePosture();
     else leave(session);
   };
@@ -2034,7 +2210,7 @@ export default function QuestArenaScene() {
   const ringOutOfBounds = tracker.outOfBounds;
   const ringElement = useMemo(() => {
     if (
-      view.page !== 'ring' ||
+      view.mode !== 'solo' ||
       view.token === null ||
       view.placementVersion === null ||
       !initialRingPose
@@ -2065,13 +2241,13 @@ export default function QuestArenaScene() {
     ringOutOfBounds,
     session,
     view.lease,
-    view.page,
+    view.mode,
     view.placementVersion,
     view.presentation,
     view.token,
   ]);
 
-  const handsActive = ringElement !== null && view.presentation === 'eyes';
+  const handsActive = ringElement !== null && view.presentation === 'eyes' && !view.paused;
   const handsElement = useMemo(
     () => <QuestPreviewHands source={input} session={session} active={handsActive} />,
     [handsActive, input, session]
@@ -2080,6 +2256,7 @@ export default function QuestArenaScene() {
     () => <QuestIntroCover session={session} introActive={view.introActive} />,
     [session, view.introActive]
   );
+  const damageVignetteElement = useMemo(() => <QuestDamageVignette session={session} />, [session]);
 
   return (
     <ViroScene onCameraTransformUpdate={questHeadTracker.onCameraTransform}>
@@ -2092,6 +2269,7 @@ export default function QuestArenaScene() {
       {ringElement}
       {handsElement}
       {introCoverElement}
+      {damageVignetteElement}
       <QuestInputMarkers source={input} onPipelineChange={setMarkerPipeline} />
       <QuestDiagnosticsPanel
         source={input}
@@ -2103,15 +2281,22 @@ export default function QuestArenaScene() {
       />
       <QuestMenu
         page={view.page}
+        menuVisible={view.menuVisible && view.appActive !== false}
         acknowledged={view.acknowledged}
         posture={posture}
-        calibration={calibration}
+        calibration={menuCalibration}
         lines={menuLines}
         layer={layer}
         titleLayer={titleLayer}
-        combatHud={view.presentation === 'eyes' ? view.combatHud : null}
+        combatHud={view.presentation === 'eyes' && view.appActive !== false ? view.combatHud : null}
+        settings={view.settings}
         hover={visibleHover}
         onPress={(action, clickState, source) => {
+          if (clickState === 2) {
+            questTriggerPress(press.current, clickState, source);
+            updateMenuFocus();
+            return;
+          }
           if (inputKeyRef.current !== inputKey) {
             // Only presses are logged; releases and repeats add nothing.
             if (clickState === 1) {

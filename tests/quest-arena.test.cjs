@@ -61,13 +61,16 @@ function rectanglesOverlap(a, b) {
 
 test('menu pixels and controller frames describe the same buttons', () => {
   assert.equal(Object.hasOwn(layout, 'QUEST_RING_POSE'), false);
-  assert.deepEqual(QUEST_MENU_ACTIONS, ['solo', 'ready', 'back', 'exit', 'posture']);
   assert.deepEqual(QUEST_MENU_POSE.menu, {
     position: [0, -0.18, -1.5],
     rotation: [0, 0, 0],
   });
   assert.deepEqual(QUEST_MENU_POSE.ring, {
     position: [0, -0.78, -1.35],
+    rotation: [0, 0, 0],
+  });
+  assert.deepEqual(QUEST_MENU_POSE.pause, {
+    position: [0, -0.18, -1.5],
     rotation: [0, 0, 0],
   });
   assert.deepEqual(QUEST_MENU_SIZE, { widthM: 0.95, heightM: 0.3375 });
@@ -80,13 +83,19 @@ test('menu pixels and controller frames describe the same buttons', () => {
     position: [0, 0.86, -2.6],
     rotation: [0, 0, 0],
   });
+  assert.deepEqual(QUEST_TITLE_POSE.pause, {
+    position: [0, 0.43, -1.5],
+    rotation: [0, 0, 0],
+  });
 
   const pages = {
     menu: ['solo', 'posture', 'exit'],
     ring: ['ready', 'back', 'posture', 'exit'],
+    pause: ['resume', 'back', 'settings', 'exit'],
+    settings: ['music-volume', 'sfx-volume', 'damage-tint', 'turn-mode', 'pause-done'],
   };
   const seen = new Set();
-  for (const page of ['menu', 'ring']) {
+  for (const page of Object.keys(pages)) {
     for (const posture of ['standing', 'seated']) {
       const buttons = questMenuButtons(page, { acknowledged: false, posture });
       assert.deepEqual(
@@ -95,14 +104,16 @@ test('menu pixels and controller frames describe the same buttons', () => {
       );
       assert.equal(new Set(buttons.map((button) => button.y)).size, 2);
       const postureButton = buttons.find((button) => button.action === 'posture');
-      assert.equal(postureButton.label, posture === 'seated' ? 'Seated' : 'Standing');
-      const standing = questMenuButtons(page, 'standing').find(
-        (button) => button.action === 'posture'
-      );
-      assert.deepEqual(
-        [postureButton.x, postureButton.y, postureButton.width, postureButton.height],
-        [standing.x, standing.y, standing.width, standing.height]
-      );
+      if (postureButton) {
+        assert.equal(postureButton.label, posture === 'seated' ? 'Seated' : 'Standing');
+        const standing = questMenuButtons(page, 'standing').find(
+          (button) => button.action === 'posture'
+        );
+        assert.deepEqual(
+          [postureButton.x, postureButton.y, postureButton.width, postureButton.height],
+          [standing.x, standing.y, standing.width, standing.height]
+        );
+      }
       for (const button of buttons) {
         seen.add(button.action);
         assert.ok(button.x >= 0 && button.y >= 0);

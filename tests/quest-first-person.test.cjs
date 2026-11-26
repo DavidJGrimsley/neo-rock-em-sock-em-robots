@@ -590,6 +590,8 @@ function createSceneHarness(
       QuestDiagnosticsPanel: 'QuestDiagnosticsPanel',
       QuestInputMarkers: 'QuestInputMarkers',
     },
+    './quest-arena-audio.native.ts': { useQuestArenaAudio: () => {} },
+    './quest-tuning.ts': require('../src/features/quest-vr/quest-tuning.ts'),
   };
 
   const output = ts.transpileModule(

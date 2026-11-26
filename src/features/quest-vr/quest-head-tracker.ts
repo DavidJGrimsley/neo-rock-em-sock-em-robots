@@ -1,5 +1,6 @@
 import {
   DEFAULT_CALIBRATION,
+  applyYawTurnToCalibration,
   calibrateFromSamples,
   gameplayHeadPose,
   headSampleFromViro,
@@ -41,7 +42,8 @@ export interface QuestHeadTrackerSnapshot {
   referenceResets: number;
 }
 
-export type QuestHeadLiveEvent = 'sample' | 'jump-pending' | 'recenter' | 'calibrate' | 'dispose';
+export type QuestHeadLiveEvent =
+  'sample' | 'jump-pending' | 'recenter' | 'calibrate' | 'turn' | 'dispose';
 
 export interface QuestLiveHeadState {
   sample: HeadSample | null;
@@ -397,6 +399,16 @@ export function createQuestHeadTracker(deps: {
     return nextPosture;
   }
 
+  function applyTurnDelta(deltaYawDeg: number): Calibration {
+    if (!Number.isFinite(deltaYawDeg) || deltaYawDeg === 0) return calibration;
+    calibration = applyYawTurnToCalibration(calibration, latestSample?.position, deltaYawDeg);
+    calibrationVersion += 1;
+    pendingJump = null;
+    schedulePublish(deps.now());
+    emitLive('turn');
+    return calibration;
+  }
+
   function setRefSpaceEpochSource(source: (() => number) | null) {
     refSpaceEpochSource = source;
     lastRefSpaceEpoch = source ? source() : null;
@@ -452,6 +464,7 @@ export function createQuestHeadTracker(deps: {
     onCameraTransform,
     calibrateForSolo,
     cyclePosture,
+    applyTurnDelta,
     setRefSpaceEpochSource,
     dispose,
   };

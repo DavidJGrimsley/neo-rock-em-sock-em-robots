@@ -322,6 +322,8 @@ const panelJni = [
   'nativeTitleHide',
   'nativeTitlePose',
   'nativeTitleDraw',
+  'nativeTitlePoseInSpace',
+  'nativeTitleDrawInSpace',
 ].map((name) => `Java_expo_modules_questpanel_QuestPanelModule_${name}`);
 const missingPanelJni = pristine ? [] : panelJni.filter((symbol) => !candidate.exports.has(symbol));
 if (missingPanelJni.length)

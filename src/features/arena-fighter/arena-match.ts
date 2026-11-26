@@ -247,9 +247,9 @@ export class ArenaMatch {
   getQuestCombatTelemetry() {
     return this.round.getQuestCombatTelemetry();
   }
-  setCombatYaw = (yaw: number | null, roundId = this.snapshot.roundId) => {
+  setCombatYaw = (yaw: number | null, roundId = this.snapshot.roundId, viewYaw = yaw) => {
     if (this.mode !== 'solo' || roundId !== this.snapshot.roundId) return;
-    this.round.setCombatYaw(yaw, roundId, this.localFighter);
+    this.round.setCombatYaw(yaw, roundId, this.localFighter, viewYaw);
   };
   getSessionToken = () => this.round.getSessionToken();
   isCurrent(token: number) {

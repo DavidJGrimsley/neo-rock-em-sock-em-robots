@@ -181,6 +181,7 @@ interface HandMemory {
   armed: boolean;
   strikeStart: BodyPoint | null;
   strikeStartWorld: Vec3 | null;
+  strikeYaw: number;
   strikePeak: BodyPoint | null;
   strikePeakWorld: Vec3 | null;
   rearmDistance: number;
@@ -217,6 +218,7 @@ function blankHand(): HandMemory {
     armed: true,
     strikeStart: null,
     strikeStartWorld: null,
+    strikeYaw: 0,
     strikePeak: null,
     strikePeakWorld: null,
     rearmDistance: 0,
@@ -387,19 +389,18 @@ export function createQuestGestureClassifier(options?: {
     state.usable = true;
     state.speed = speed;
     if (!state.armed) {
-      const refStart =
+      const nearStart =
         followLiveHead && state.strikeStartWorld
-          ? questGestureBodyPoint(state.strikeStartWorld, activeFrame)
-          : state.strikeStart;
-      const refPeak =
+          ? worldDistance(position, state.strikeStartWorld) <= state.rearmDistance
+          : state.strikeStart !== null &&
+            bodyDistance(body, state.strikeStart) <= state.rearmDistance;
+      const retreat =
         followLiveHead && state.strikePeakWorld
-          ? questGestureBodyPoint(state.strikePeakWorld, activeFrame)
-          : state.strikePeak;
-      const nearStart = refStart !== null && bodyDistance(body, refStart) <= state.rearmDistance;
+          ? questGestureBodyPoint(state.strikePeakWorld, { yaw: state.strikeYaw, origin: position })
+          : state.strikePeak && sub(state.strikePeak, body);
       const retreatedFromPeak =
-        refPeak !== null &&
-        (refPeak.forward - body.forward >= state.rearmRetreatM ||
-          refPeak.up - body.up >= state.rearmRetreatM);
+        retreat !== null &&
+        (retreat.forward >= state.rearmRetreatM || retreat.up >= state.rearmRetreatM);
       if (nearStart || retreatedFromPeak) {
         state.armed = true;
         state.excursion = null;
@@ -444,6 +445,7 @@ export function createQuestGestureClassifier(options?: {
     state.armed = false;
     state.strikeStart = excursion.start;
     state.strikeStartWorld = excursion.startWorld;
+    state.strikeYaw = excursion.yaw;
     const peakDelta = intent.type === 'uppercut' ? excursion.maxUp : excursion.maxForward;
     state.strikePeakWorld =
       intent.type === 'uppercut' ? excursion.maxUpWorld : excursion.maxForwardWorld;
@@ -660,6 +662,11 @@ export function createQuestGestureClassifier(options?: {
       activeFrame = frame;
       resetHands();
       return out;
+    },
+    /** Updates calibration frame for intentional camera turning without interrupting active guard or punch tracking. */
+    updateFrame(next: QuestBodyFrame) {
+      frame = resolveFrame(next);
+      activeFrame = frame;
     },
     setThresholds(next: Partial<QuestGestureThresholds>) {
       thresholds = { ...thresholds, ...next };

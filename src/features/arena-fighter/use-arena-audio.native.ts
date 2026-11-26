@@ -20,12 +20,17 @@ const sources = {
   round5: require('../../../assets/arena/sounds/round5.wav'),
 };
 
-export function useArenaAudio(match: ArenaMatch | null, landscape: boolean, titleVisible: boolean) {
+export function useArenaAudio(
+  match: ArenaMatch | null,
+  landscape: boolean,
+  titleVisible: boolean,
+  musicVolumeCap = 0.45
+) {
   const owner = useRef<ArenaAudio | null>(null);
-  const inputs = useRef({ match, landscape, titleVisible });
+  const inputs = useRef({ match, landscape, titleVisible, musicVolumeCap });
   useLayoutEffect(() => {
-    inputs.current = { match, landscape, titleVisible };
-  }, [match, landscape, titleVisible]);
+    inputs.current = { match, landscape, titleVisible, musicVolumeCap };
+  }, [match, landscape, titleVisible, musicVolumeCap]);
   const disposal = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => {
     let attached = true;
@@ -50,11 +55,16 @@ export function useArenaAudio(match: ArenaMatch | null, landscape: boolean, titl
           const cached = await Asset.loadAsync(keys.map((key) => sources[key]));
           if (!attached) return;
           const playbackSources = new Map(keys.map((key, index) => [key, cached[index]]));
-          owner.current = new ArenaAudio((key) =>
-            createAudioPlayer(playbackSources.get(key)!.localUri ?? playbackSources.get(key)!.uri, {
-              updateInterval: 50,
-              keepAudioSessionActive: true,
-            })
+          owner.current = new ArenaAudio(
+            (key) =>
+              createAudioPlayer(
+                playbackSources.get(key)!.localUri ?? playbackSources.get(key)!.uri,
+                {
+                  updateInterval: 50,
+                  keepAudioSessionActive: true,
+                }
+              ),
+            inputs.current.musicVolumeCap
           );
           sync();
         })
@@ -83,6 +93,7 @@ export function useArenaAudio(match: ArenaMatch | null, landscape: boolean, titl
   }, []);
   useEffect(() => {
     owner.current?.connect(match);
+    owner.current?.setMusicVolume(musicVolumeCap);
     owner.current?.environment(AppState.currentState === 'active', landscape, titleVisible);
-  }, [match, landscape, titleVisible]);
+  }, [match, landscape, musicVolumeCap, titleVisible]);
 }

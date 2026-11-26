@@ -1,3 +1,5 @@
+import { DEFAULT_QUEST_SETTINGS, type QuestUserSettings } from './quest-tuning.ts';
+
 // Pixel rectangles and metre frames are the same buttons. The headset menu
 // card layer (quest-menu-compositor.ts) draws a compact padded button card
 // with Android Canvas, while a separate transparent title overlay floats
@@ -19,12 +21,15 @@ export const QUEST_TITLE_TEXTURE = { widthPx: 1024, heightPx: 400 } as const;
 export const QUEST_TITLE_SIZE = {
   menu: { widthM: 0.96, heightM: 0.375 },
   ring: { widthM: 1.2, heightM: 0.46875 },
+  pause: { widthM: 0.96, heightM: 0.375 },
+  settings: { widthM: 0.96, heightM: 0.375 },
 } as const;
 
 // Child of menuFrame(cal). Default calibration is the identity, so these metres
 // match OpenXR LOCAL at eye height y = 0. Art and hit targets share this node.
 // - menu: compact button card 1.50 m ahead, 6.8 deg below eye level.
 // - ring: compact button card 1.35 m ahead, 30 deg down; opponent robot stays clear above.
+// - pause: centered comfortably ahead of the current pause frame.
 export const QUEST_MENU_POSE = {
   menu: {
     position: [0, -0.18, -1.5] as [number, number, number],
@@ -34,11 +39,20 @@ export const QUEST_MENU_POSE = {
     position: [0, -0.78, -1.35] as [number, number, number],
     rotation: [0, 0, 0] as [number, number, number],
   },
+  pause: {
+    position: [0, -0.18, -1.5] as [number, number, number],
+    rotation: [0, 0, 0] as [number, number, number],
+  },
+  settings: {
+    position: [0, -0.18, -1.5] as [number, number, number],
+    rotation: [0, 0, 0] as [number, number, number],
+  },
 };
 
 // Floating transparent branded title poses in menuFrame(cal):
 // - menu: above the compact button card (and above any expanded alert card), well below sky diagnostics.
 // - ring: floating above the opponent robot head (+13.5..+22.8 deg vs robot top +11.4 deg and sky diag +29.3 deg).
+// - pause: matches menu position above the Pause button card.
 export const QUEST_TITLE_POSE = {
   menu: {
     position: [0, 0.43, -1.5] as [number, number, number],
@@ -48,11 +62,32 @@ export const QUEST_TITLE_POSE = {
     position: [0, 0.86, -2.6] as [number, number, number],
     rotation: [0, 0, 0] as [number, number, number],
   },
+  pause: {
+    position: [0, 0.43, -1.5] as [number, number, number],
+    rotation: [0, 0, 0] as [number, number, number],
+  },
+  settings: {
+    position: [0, 0.43, -1.5] as [number, number, number],
+    rotation: [0, 0, 0] as [number, number, number],
+  },
 };
 
-export const QUEST_MENU_ACTIONS = ['solo', 'ready', 'back', 'exit', 'posture'] as const;
+export const QUEST_MENU_ACTIONS = [
+  'solo',
+  'ready',
+  'back',
+  'exit',
+  'posture',
+  'resume',
+  'settings',
+  'music-volume',
+  'sfx-volume',
+  'damage-tint',
+  'turn-mode',
+  'pause-done',
+] as const;
 export type QuestMenuAction = (typeof QUEST_MENU_ACTIONS)[number];
-export type QuestMenuPage = 'menu' | 'ring';
+export type QuestMenuPage = 'menu' | 'ring' | 'pause' | 'settings';
 export type QuestMenuPosture = 'standing' | 'seated';
 
 export const QUEST_MENU_TEXT_LINES_MAX = 4;
@@ -137,6 +172,7 @@ export interface QuestMenuBuildOptions {
   posture?: QuestMenuPosture;
   fonts?: QuestMenuFonts;
   titles?: QuestMenuTitles;
+  settings?: QuestUserSettings;
 }
 
 const cardPaddingX = 48;
@@ -181,12 +217,14 @@ function resolveButtonArgs(
         acknowledged?: boolean;
         posture?: QuestMenuPosture;
         hasMessages?: boolean;
+        settings?: QuestUserSettings;
       } = false,
   postureArg?: QuestMenuPosture
 ): {
   acknowledged: boolean;
   posture: QuestMenuPosture;
   hasMessages: boolean;
+  settings?: QuestUserSettings;
 } {
   if (typeof arg === 'boolean') {
     return {
@@ -202,6 +240,7 @@ function resolveButtonArgs(
     acknowledged: arg.acknowledged === true,
     posture: arg.posture ?? postureArg ?? 'standing',
     hasMessages: arg.hasMessages === true,
+    settings: arg.settings,
   };
 }
 
@@ -220,31 +259,52 @@ export function questMenuButtons(
         acknowledged?: boolean;
         posture?: QuestMenuPosture;
         hasMessages?: boolean;
+        settings?: QuestUserSettings;
       } = false,
   postureArg?: QuestMenuPosture
 ): QuestMenuButton[] {
-  const { acknowledged, posture, hasMessages } = resolveButtonArgs(
-    acknowledgedOrOptions,
-    postureArg
-  );
+  const {
+    acknowledged,
+    posture,
+    hasMessages,
+    settings = DEFAULT_QUEST_SETTINGS,
+  } = resolveButtonArgs(acknowledgedOrOptions, postureArg);
   const postureButton = {
     action: 'posture' as const,
     label: posture === 'seated' ? 'Seated' : 'Standing',
   };
-  const items =
-    page === 'menu'
+  const items: { action: QuestMenuAction; label: string }[] =
+    page === 'settings'
       ? [
-          { action: 'solo' as const, label: 'Solo' },
-          postureButton,
-          { action: 'exit' as const, label: 'Exit' },
+          { action: 'music-volume', label: `Music ${Math.round(settings.musicVolume * 100)}%` },
+          { action: 'sfx-volume', label: `Effects ${Math.round(settings.sfxVolume * 100)}%` },
+          { action: 'damage-tint', label: settings.damageTintEnabled ? 'Tint on' : 'Tint off' },
+          {
+            action: 'turn-mode',
+            label: settings.turnMode === 'snap' ? 'Snap turn' : 'Smooth turn',
+          },
+          { action: 'pause-done', label: 'Done' },
         ]
-      : [
-          { action: 'ready' as const, label: acknowledged ? 'Set' : 'Ready' },
-          { action: 'back' as const, label: 'Back' },
-          postureButton,
-          { action: 'exit' as const, label: 'Exit' },
-        ];
-  const topCount = 2;
+      : page === 'menu'
+        ? [
+            { action: 'solo' as const, label: 'Solo' },
+            postureButton,
+            { action: 'exit' as const, label: 'Exit' },
+          ]
+        : page === 'pause'
+          ? [
+              { action: 'resume' as const, label: 'Resume' },
+              { action: 'back' as const, label: 'Menu' },
+              { action: 'settings' as const, label: 'Options' },
+              { action: 'exit' as const, label: 'Exit' },
+            ]
+          : [
+              { action: 'ready' as const, label: acknowledged ? 'Set' : 'Ready' },
+              { action: 'back' as const, label: 'Back' },
+              postureButton,
+              { action: 'exit' as const, label: 'Exit' },
+            ];
+  const topCount = page === 'settings' ? 3 : 2;
   const { topRowY, bottomRowY } = buttonRowsY(hasMessages);
   return [
     ...placeRow(items.slice(0, topCount), topRowY),
@@ -470,7 +530,12 @@ export function buildQuestMenu(
     .slice(0, QUEST_MENU_TEXT_LINES_MAX);
   const hasMessages = wrappedLines.length > 0;
   const { widthPx, heightPx, widthM, heightM } = questMenuCardMetrics(hasMessages);
-  const buttons = questMenuButtons(page, { acknowledged, posture, hasMessages });
+  const buttons = questMenuButtons(page, {
+    acknowledged,
+    posture,
+    hasMessages,
+    settings: options.settings,
+  });
   const { topRowY } = buttonRowsY(hasMessages);
 
   const ops: QuestMenuDrawOp[] = [
