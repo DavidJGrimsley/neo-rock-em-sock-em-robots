@@ -547,6 +547,20 @@ class QuestInputModule : Module() {
 
     Function("isAvailable") { available }
 
+    Function("readMovementMode") {
+      appContext.reactContext
+        ?.getSharedPreferences("quest_preferences", Context.MODE_PRIVATE)
+        ?.getString("movement_mode", "view-relative")
+    }
+
+    Function("writeMovementMode") { mode: String ->
+      if (mode != "view-relative" && mode != "opponent-relative") return@Function false
+      val context = appContext.reactContext ?: return@Function false
+      context.getSharedPreferences("quest_preferences", Context.MODE_PRIVATE)
+        .edit().putString("movement_mode", mode).apply()
+      true
+    }
+
     Function("setMarkersEnabled") { enabled: Boolean ->
       if (!available) return@Function false
       nativeSetMarkersEnabled(enabled)

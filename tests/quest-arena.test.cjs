@@ -92,7 +92,15 @@ test('menu pixels and controller frames describe the same buttons', () => {
     menu: ['solo', 'posture', 'exit'],
     ring: ['ready', 'back', 'posture', 'exit'],
     pause: ['resume', 'back', 'settings', 'exit'],
-    settings: ['music-volume', 'sfx-volume', 'damage-tint', 'turn-mode', 'pause-done'],
+    settings: [
+      'music-volume',
+      'sfx-volume',
+      'damage-tint',
+      'turn-mode',
+      'movement-mode',
+      'pause-done',
+    ],
+    result: ['ready', 'back', 'exit'],
   };
   const seen = new Set();
   for (const page of Object.keys(pages)) {

@@ -23,6 +23,7 @@ export const QUEST_TITLE_SIZE = {
   ring: { widthM: 1.2, heightM: 0.46875 },
   pause: { widthM: 0.96, heightM: 0.375 },
   settings: { widthM: 0.96, heightM: 0.375 },
+  result: { widthM: 0.96, heightM: 0.375 },
 } as const;
 
 // Child of menuFrame(cal). Default calibration is the identity, so these metres
@@ -44,6 +45,10 @@ export const QUEST_MENU_POSE = {
     rotation: [0, 0, 0] as [number, number, number],
   },
   settings: {
+    position: [0, -0.18, -1.5] as [number, number, number],
+    rotation: [0, 0, 0] as [number, number, number],
+  },
+  result: {
     position: [0, -0.18, -1.5] as [number, number, number],
     rotation: [0, 0, 0] as [number, number, number],
   },
@@ -70,6 +75,10 @@ export const QUEST_TITLE_POSE = {
     position: [0, 0.43, -1.5] as [number, number, number],
     rotation: [0, 0, 0] as [number, number, number],
   },
+  result: {
+    position: [0, 0.43, -1.5] as [number, number, number],
+    rotation: [0, 0, 0] as [number, number, number],
+  },
 };
 
 export const QUEST_MENU_ACTIONS = [
@@ -84,10 +93,11 @@ export const QUEST_MENU_ACTIONS = [
   'sfx-volume',
   'damage-tint',
   'turn-mode',
+  'movement-mode',
   'pause-done',
 ] as const;
 export type QuestMenuAction = (typeof QUEST_MENU_ACTIONS)[number];
-export type QuestMenuPage = 'menu' | 'ring' | 'pause' | 'settings';
+export type QuestMenuPage = 'menu' | 'ring' | 'pause' | 'settings' | 'result';
 export type QuestMenuPosture = 'standing' | 'seated';
 
 export const QUEST_MENU_TEXT_LINES_MAX = 4;
@@ -283,6 +293,10 @@ export function questMenuButtons(
             action: 'turn-mode',
             label: settings.turnMode === 'snap' ? 'Snap turn' : 'Smooth turn',
           },
+          {
+            action: 'movement-mode',
+            label: settings.movementMode === 'opponent-relative' ? 'Opponent-relative' : 'View-relative',
+          },
           { action: 'pause-done', label: 'Done' },
         ]
       : page === 'menu'
@@ -298,12 +312,18 @@ export function questMenuButtons(
               { action: 'settings' as const, label: 'Options' },
               { action: 'exit' as const, label: 'Exit' },
             ]
-          : [
-              { action: 'ready' as const, label: acknowledged ? 'Set' : 'Ready' },
-              { action: 'back' as const, label: 'Back' },
-              postureButton,
-              { action: 'exit' as const, label: 'Exit' },
-            ];
+          : page === 'result'
+            ? [
+                { action: 'ready' as const, label: 'Rematch' },
+                { action: 'back' as const, label: 'Menu' },
+                { action: 'exit' as const, label: 'Exit' },
+              ]
+            : [
+                { action: 'ready' as const, label: acknowledged ? 'Set' : 'Ready' },
+                { action: 'back' as const, label: 'Back' },
+                postureButton,
+                { action: 'exit' as const, label: 'Exit' },
+              ];
   const topCount = page === 'settings' ? 3 : 2;
   const { topRowY, bottomRowY } = buttonRowsY(hasMessages);
   return [

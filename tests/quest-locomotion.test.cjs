@@ -2468,3 +2468,44 @@ test('createQuestInputSource delivers multi-sample live batches to onSample with
     [false, true, false]
   );
 });
+
+
+test('opponent-relative stick and dash share a normalized opponent bearing independent of gaze', () => {
+  const sample = makeSample({ stick: [1, 1], rightPrimary: true });
+  const input = {
+    sample,
+    status: 'live',
+    mode: 'opponent-relative',
+    opponentYawRelative: 90,
+    head: { calibration: { yaw: 170 } },
+  };
+  const move = questLocomotionFromInput(input);
+  near(move.advance, Math.SQRT1_2);
+  near(move.strafe, Math.SQRT1_2);
+  near(Math.hypot(move.advance, move.strafe), 1);
+  const dash = evaluateQuestDashInput({ armed: true }, { ...input, inActiveFight: true });
+  assert.equal(dash.triggered, true);
+  near(dash.direction.advance, move.advance);
+  near(dash.direction.strafe, move.strafe);
+  assert.equal(questLocomotionFromInput({ ...input, opponentYawRelative: undefined }).active, false);
+  assert.equal(questLocomotionFromInput({ ...input, menuFocused: true }).active, false);
+  assert.equal(questLocomotionFromInput({ ...input, status: 'stale' }).active, false);
+});
+
+test('movement preference is restored in a new session and invalid values default to view-relative', () => {
+  let saved = 'invalid';
+  const storage = {
+    read: () => saved,
+    write: (mode) => {
+      saved = mode;
+    },
+  };
+  const first = createQuestArenaSession(undefined, undefined, undefined, undefined, storage);
+  assert.equal(first.getSettings().movementMode, 'view-relative');
+  first.updateSettings({ movementMode: 'opponent-relative' });
+  assert.equal(saved, 'opponent-relative');
+  first.dispose();
+  const reopened = createQuestArenaSession(undefined, undefined, undefined, undefined, storage);
+  assert.equal(reopened.getSettings().movementMode, 'opponent-relative');
+  reopened.dispose();
+});
